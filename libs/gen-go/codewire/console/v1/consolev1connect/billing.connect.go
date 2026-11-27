@@ -60,6 +60,15 @@ const (
 	// BillingServiceCreateCheckoutSessionProcedure is the fully-qualified name of the BillingService's
 	// CreateCheckoutSession RPC.
 	BillingServiceCreateCheckoutSessionProcedure = "/codewire.console.v1.BillingService/CreateCheckoutSession"
+	// BillingServiceReconcilePlanCheckoutSessionProcedure is the fully-qualified name of the
+	// BillingService's ReconcilePlanCheckoutSession RPC.
+	BillingServiceReconcilePlanCheckoutSessionProcedure = "/codewire.console.v1.BillingService/ReconcilePlanCheckoutSession"
+	// BillingServiceActivatePaygPlanProcedure is the fully-qualified name of the BillingService's
+	// ActivatePaygPlan RPC.
+	BillingServiceActivatePaygPlanProcedure = "/codewire.console.v1.BillingService/ActivatePaygPlan"
+	// BillingServiceSwitchOrganizationPlanProcedure is the fully-qualified name of the BillingService's
+	// SwitchOrganizationPlan RPC.
+	BillingServiceSwitchOrganizationPlanProcedure = "/codewire.console.v1.BillingService/SwitchOrganizationPlan"
 	// BillingServiceCreatePortalSessionProcedure is the fully-qualified name of the BillingService's
 	// CreatePortalSession RPC.
 	BillingServiceCreatePortalSessionProcedure = "/codewire.console.v1.BillingService/CreatePortalSession"
@@ -113,6 +122,17 @@ type BillingServiceClient interface {
 	GetEnvironmentUsage(context.Context, *connect.Request[v1.GetEnvironmentUsageRequest]) (*connect.Response[v1.GetEnvironmentUsageResponse], error)
 	// CreateCheckoutSession creates a Stripe subscription checkout session.
 	CreateCheckoutSession(context.Context, *connect.Request[v1.CreateCheckoutSessionRequest]) (*connect.Response[v1.CreateCheckoutSessionResponse], error)
+	// ReconcilePlanCheckoutSession synchronizes an organization's plan right
+	// after Stripe Checkout returns, before webhook delivery arrives.
+	ReconcilePlanCheckoutSession(context.Context, *connect.Request[v1.ReconcilePlanCheckoutSessionRequest]) (*connect.Response[v1.ReconcilePlanCheckoutSessionResponse], error)
+	// ActivatePaygPlan activates the Pay as you go ($0/mo) plan once the
+	// organization has a default payment method on file.
+	ActivatePaygPlan(context.Context, *connect.Request[v1.ActivatePaygPlanRequest]) (*connect.Response[v1.ActivatePaygPlanResponse], error)
+	// SwitchOrganizationPlan switches an organization between payg, pro, and
+	// max: updates an active Stripe subscription in place, schedules cancellation
+	// at period end when moving to payg, or returns a Stripe Checkout URL when a
+	// new subscription is required.
+	SwitchOrganizationPlan(context.Context, *connect.Request[v1.SwitchOrganizationPlanRequest]) (*connect.Response[v1.SwitchOrganizationPlanResponse], error)
 	// CreatePortalSession creates a Stripe billing portal session.
 	CreatePortalSession(context.Context, *connect.Request[v1.CreatePortalSessionRequest]) (*connect.Response[v1.CreatePortalSessionResponse], error)
 	// CreateSetupSession creates a Stripe payment-method setup session. Where
@@ -227,6 +247,24 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(billingServiceMethods.ByName("CreateCheckoutSession")),
 			connect.WithClientOptions(opts...),
 		),
+		reconcilePlanCheckoutSession: connect.NewClient[v1.ReconcilePlanCheckoutSessionRequest, v1.ReconcilePlanCheckoutSessionResponse](
+			httpClient,
+			baseURL+BillingServiceReconcilePlanCheckoutSessionProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("ReconcilePlanCheckoutSession")),
+			connect.WithClientOptions(opts...),
+		),
+		activatePaygPlan: connect.NewClient[v1.ActivatePaygPlanRequest, v1.ActivatePaygPlanResponse](
+			httpClient,
+			baseURL+BillingServiceActivatePaygPlanProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("ActivatePaygPlan")),
+			connect.WithClientOptions(opts...),
+		),
+		switchOrganizationPlan: connect.NewClient[v1.SwitchOrganizationPlanRequest, v1.SwitchOrganizationPlanResponse](
+			httpClient,
+			baseURL+BillingServiceSwitchOrganizationPlanProcedure,
+			connect.WithSchema(billingServiceMethods.ByName("SwitchOrganizationPlan")),
+			connect.WithClientOptions(opts...),
+		),
 		createPortalSession: connect.NewClient[v1.CreatePortalSessionRequest, v1.CreatePortalSessionResponse](
 			httpClient,
 			baseURL+BillingServiceCreatePortalSessionProcedure,
@@ -287,24 +325,27 @@ func NewBillingServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // billingServiceClient implements BillingServiceClient.
 type billingServiceClient struct {
-	listOrgPlans            *connect.Client[v1.ListOrgPlansRequest, v1.ListOrgPlansResponse]
-	listResourcePlans       *connect.Client[v1.ListResourcePlansRequest, v1.ListResourcePlansResponse]
-	getSignupCredit         *connect.Client[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse]
-	getPublicRates          *connect.Client[v1.GetPublicRatesRequest, v1.GetPublicRatesResponse]
-	getBillingOverview      *connect.Client[v1.GetBillingOverviewRequest, v1.GetBillingOverviewResponse]
-	listInvoices            *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
-	listBillingEvents       *connect.Client[v1.ListBillingEventsRequest, v1.ListBillingEventsResponse]
-	getEnvironmentUsage     *connect.Client[v1.GetEnvironmentUsageRequest, v1.GetEnvironmentUsageResponse]
-	createCheckoutSession   *connect.Client[v1.CreateCheckoutSessionRequest, v1.CreateCheckoutSessionResponse]
-	createPortalSession     *connect.Client[v1.CreatePortalSessionRequest, v1.CreatePortalSessionResponse]
-	createSetupSession      *connect.Client[v1.CreateSetupSessionRequest, v1.CreateSetupSessionResponse]
-	updateAutoTopUp         *connect.Client[v1.UpdateAutoTopUpRequest, v1.UpdateAutoTopUpResponse]
-	addCredit               *connect.Client[v1.AddCreditRequest, v1.AddCreditResponse]
-	listPaymentMethods      *connect.Client[v1.ListPaymentMethodsRequest, v1.ListPaymentMethodsResponse]
-	beginCardSetup          *connect.Client[v1.BeginCardSetupRequest, v1.BeginCardSetupResponse]
-	finishCardSetup         *connect.Client[v1.FinishCardSetupRequest, v1.FinishCardSetupResponse]
-	setDefaultPaymentMethod *connect.Client[v1.SetDefaultPaymentMethodRequest, v1.SetDefaultPaymentMethodResponse]
-	removePaymentMethod     *connect.Client[v1.RemovePaymentMethodRequest, v1.RemovePaymentMethodResponse]
+	listOrgPlans                 *connect.Client[v1.ListOrgPlansRequest, v1.ListOrgPlansResponse]
+	listResourcePlans            *connect.Client[v1.ListResourcePlansRequest, v1.ListResourcePlansResponse]
+	getSignupCredit              *connect.Client[v1.GetSignupCreditRequest, v1.GetSignupCreditResponse]
+	getPublicRates               *connect.Client[v1.GetPublicRatesRequest, v1.GetPublicRatesResponse]
+	getBillingOverview           *connect.Client[v1.GetBillingOverviewRequest, v1.GetBillingOverviewResponse]
+	listInvoices                 *connect.Client[v1.ListInvoicesRequest, v1.ListInvoicesResponse]
+	listBillingEvents            *connect.Client[v1.ListBillingEventsRequest, v1.ListBillingEventsResponse]
+	getEnvironmentUsage          *connect.Client[v1.GetEnvironmentUsageRequest, v1.GetEnvironmentUsageResponse]
+	createCheckoutSession        *connect.Client[v1.CreateCheckoutSessionRequest, v1.CreateCheckoutSessionResponse]
+	reconcilePlanCheckoutSession *connect.Client[v1.ReconcilePlanCheckoutSessionRequest, v1.ReconcilePlanCheckoutSessionResponse]
+	activatePaygPlan             *connect.Client[v1.ActivatePaygPlanRequest, v1.ActivatePaygPlanResponse]
+	switchOrganizationPlan       *connect.Client[v1.SwitchOrganizationPlanRequest, v1.SwitchOrganizationPlanResponse]
+	createPortalSession          *connect.Client[v1.CreatePortalSessionRequest, v1.CreatePortalSessionResponse]
+	createSetupSession           *connect.Client[v1.CreateSetupSessionRequest, v1.CreateSetupSessionResponse]
+	updateAutoTopUp              *connect.Client[v1.UpdateAutoTopUpRequest, v1.UpdateAutoTopUpResponse]
+	addCredit                    *connect.Client[v1.AddCreditRequest, v1.AddCreditResponse]
+	listPaymentMethods           *connect.Client[v1.ListPaymentMethodsRequest, v1.ListPaymentMethodsResponse]
+	beginCardSetup               *connect.Client[v1.BeginCardSetupRequest, v1.BeginCardSetupResponse]
+	finishCardSetup              *connect.Client[v1.FinishCardSetupRequest, v1.FinishCardSetupResponse]
+	setDefaultPaymentMethod      *connect.Client[v1.SetDefaultPaymentMethodRequest, v1.SetDefaultPaymentMethodResponse]
+	removePaymentMethod          *connect.Client[v1.RemovePaymentMethodRequest, v1.RemovePaymentMethodResponse]
 }
 
 // ListOrgPlans calls codewire.console.v1.BillingService.ListOrgPlans.
@@ -350,6 +391,22 @@ func (c *billingServiceClient) GetEnvironmentUsage(ctx context.Context, req *con
 // CreateCheckoutSession calls codewire.console.v1.BillingService.CreateCheckoutSession.
 func (c *billingServiceClient) CreateCheckoutSession(ctx context.Context, req *connect.Request[v1.CreateCheckoutSessionRequest]) (*connect.Response[v1.CreateCheckoutSessionResponse], error) {
 	return c.createCheckoutSession.CallUnary(ctx, req)
+}
+
+// ReconcilePlanCheckoutSession calls
+// codewire.console.v1.BillingService.ReconcilePlanCheckoutSession.
+func (c *billingServiceClient) ReconcilePlanCheckoutSession(ctx context.Context, req *connect.Request[v1.ReconcilePlanCheckoutSessionRequest]) (*connect.Response[v1.ReconcilePlanCheckoutSessionResponse], error) {
+	return c.reconcilePlanCheckoutSession.CallUnary(ctx, req)
+}
+
+// ActivatePaygPlan calls codewire.console.v1.BillingService.ActivatePaygPlan.
+func (c *billingServiceClient) ActivatePaygPlan(ctx context.Context, req *connect.Request[v1.ActivatePaygPlanRequest]) (*connect.Response[v1.ActivatePaygPlanResponse], error) {
+	return c.activatePaygPlan.CallUnary(ctx, req)
+}
+
+// SwitchOrganizationPlan calls codewire.console.v1.BillingService.SwitchOrganizationPlan.
+func (c *billingServiceClient) SwitchOrganizationPlan(ctx context.Context, req *connect.Request[v1.SwitchOrganizationPlanRequest]) (*connect.Response[v1.SwitchOrganizationPlanResponse], error) {
+	return c.switchOrganizationPlan.CallUnary(ctx, req)
 }
 
 // CreatePortalSession calls codewire.console.v1.BillingService.CreatePortalSession.
@@ -421,6 +478,17 @@ type BillingServiceHandler interface {
 	GetEnvironmentUsage(context.Context, *connect.Request[v1.GetEnvironmentUsageRequest]) (*connect.Response[v1.GetEnvironmentUsageResponse], error)
 	// CreateCheckoutSession creates a Stripe subscription checkout session.
 	CreateCheckoutSession(context.Context, *connect.Request[v1.CreateCheckoutSessionRequest]) (*connect.Response[v1.CreateCheckoutSessionResponse], error)
+	// ReconcilePlanCheckoutSession synchronizes an organization's plan right
+	// after Stripe Checkout returns, before webhook delivery arrives.
+	ReconcilePlanCheckoutSession(context.Context, *connect.Request[v1.ReconcilePlanCheckoutSessionRequest]) (*connect.Response[v1.ReconcilePlanCheckoutSessionResponse], error)
+	// ActivatePaygPlan activates the Pay as you go ($0/mo) plan once the
+	// organization has a default payment method on file.
+	ActivatePaygPlan(context.Context, *connect.Request[v1.ActivatePaygPlanRequest]) (*connect.Response[v1.ActivatePaygPlanResponse], error)
+	// SwitchOrganizationPlan switches an organization between payg, pro, and
+	// max: updates an active Stripe subscription in place, schedules cancellation
+	// at period end when moving to payg, or returns a Stripe Checkout URL when a
+	// new subscription is required.
+	SwitchOrganizationPlan(context.Context, *connect.Request[v1.SwitchOrganizationPlanRequest]) (*connect.Response[v1.SwitchOrganizationPlanResponse], error)
 	// CreatePortalSession creates a Stripe billing portal session.
 	CreatePortalSession(context.Context, *connect.Request[v1.CreatePortalSessionRequest]) (*connect.Response[v1.CreatePortalSessionResponse], error)
 	// CreateSetupSession creates a Stripe payment-method setup session. Where
@@ -531,6 +599,24 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 		connect.WithSchema(billingServiceMethods.ByName("CreateCheckoutSession")),
 		connect.WithHandlerOptions(opts...),
 	)
+	billingServiceReconcilePlanCheckoutSessionHandler := connect.NewUnaryHandler(
+		BillingServiceReconcilePlanCheckoutSessionProcedure,
+		svc.ReconcilePlanCheckoutSession,
+		connect.WithSchema(billingServiceMethods.ByName("ReconcilePlanCheckoutSession")),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceActivatePaygPlanHandler := connect.NewUnaryHandler(
+		BillingServiceActivatePaygPlanProcedure,
+		svc.ActivatePaygPlan,
+		connect.WithSchema(billingServiceMethods.ByName("ActivatePaygPlan")),
+		connect.WithHandlerOptions(opts...),
+	)
+	billingServiceSwitchOrganizationPlanHandler := connect.NewUnaryHandler(
+		BillingServiceSwitchOrganizationPlanProcedure,
+		svc.SwitchOrganizationPlan,
+		connect.WithSchema(billingServiceMethods.ByName("SwitchOrganizationPlan")),
+		connect.WithHandlerOptions(opts...),
+	)
 	billingServiceCreatePortalSessionHandler := connect.NewUnaryHandler(
 		BillingServiceCreatePortalSessionProcedure,
 		svc.CreatePortalSession,
@@ -606,6 +692,12 @@ func NewBillingServiceHandler(svc BillingServiceHandler, opts ...connect.Handler
 			billingServiceGetEnvironmentUsageHandler.ServeHTTP(w, r)
 		case BillingServiceCreateCheckoutSessionProcedure:
 			billingServiceCreateCheckoutSessionHandler.ServeHTTP(w, r)
+		case BillingServiceReconcilePlanCheckoutSessionProcedure:
+			billingServiceReconcilePlanCheckoutSessionHandler.ServeHTTP(w, r)
+		case BillingServiceActivatePaygPlanProcedure:
+			billingServiceActivatePaygPlanHandler.ServeHTTP(w, r)
+		case BillingServiceSwitchOrganizationPlanProcedure:
+			billingServiceSwitchOrganizationPlanHandler.ServeHTTP(w, r)
 		case BillingServiceCreatePortalSessionProcedure:
 			billingServiceCreatePortalSessionHandler.ServeHTTP(w, r)
 		case BillingServiceCreateSetupSessionProcedure:
@@ -667,6 +759,18 @@ func (UnimplementedBillingServiceHandler) GetEnvironmentUsage(context.Context, *
 
 func (UnimplementedBillingServiceHandler) CreateCheckoutSession(context.Context, *connect.Request[v1.CreateCheckoutSessionRequest]) (*connect.Response[v1.CreateCheckoutSessionResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.CreateCheckoutSession is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) ReconcilePlanCheckoutSession(context.Context, *connect.Request[v1.ReconcilePlanCheckoutSessionRequest]) (*connect.Response[v1.ReconcilePlanCheckoutSessionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.ReconcilePlanCheckoutSession is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) ActivatePaygPlan(context.Context, *connect.Request[v1.ActivatePaygPlanRequest]) (*connect.Response[v1.ActivatePaygPlanResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.ActivatePaygPlan is not implemented"))
+}
+
+func (UnimplementedBillingServiceHandler) SwitchOrganizationPlan(context.Context, *connect.Request[v1.SwitchOrganizationPlanRequest]) (*connect.Response[v1.SwitchOrganizationPlanResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.console.v1.BillingService.SwitchOrganizationPlan is not implemented"))
 }
 
 func (UnimplementedBillingServiceHandler) CreatePortalSession(context.Context, *connect.Request[v1.CreatePortalSessionRequest]) (*connect.Response[v1.CreatePortalSessionResponse], error) {

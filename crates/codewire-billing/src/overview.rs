@@ -102,6 +102,23 @@ pub struct BillingOverviewResponse {
     /// JSON null, so `None` here is the faithful encoding.
     pub subscriptions: Option<Vec<SubscriptionSummary>>,
     pub current_month_usage: UsageSummary,
+    /// Monthly subscription price in USD cents (0 for payg/none).
+    pub plan_price_cents: i32,
+    /// Active cycle monthly compute allowance granted, in nano-USD.
+    pub allowance_granted_nano_usd: i64,
+    /// Active cycle monthly compute allowance drawn, in nano-USD.
+    pub allowance_drawn_nano_usd: i64,
+    /// Active cycle monthly compute allowance end timestamp (RFC3339).
+    pub allowance_period_end: Option<String>,
+    /// Whether the active Stripe subscription cancels at period end.
+    pub cancel_at_period_end: bool,
+    pub max_vcpu: i32,
+    pub max_memory_gib: i32,
+    pub max_disk_gib: i32,
+    /// -1 for unlimited, 0 when no active plan.
+    pub max_concurrent_sandboxes: i32,
+    /// -1 for unlimited, 0 when no active plan.
+    pub max_team_members: i32,
 }
 
 // ── Catalog lookups (DB-backed, see module docs) ───────────────────
@@ -177,6 +194,7 @@ struct EffectiveOrgBilling {
     trial_end: Option<NaiveDateTime>,
     current_period_end: Option<NaiveDateTime>,
     seat_count: i32,
+    cancel_at_period_end: bool,
 }
 
 /// Mirrors `billing.ResolveEffectiveOrgEnvironmentPlan` +
@@ -204,15 +222,18 @@ async fn load_effective_org_billing(pool: &PgPool, org_id: &str) -> AppResult<Ef
         state.trial_end = trial_end;
     }
 
-    if let Some((seats, period_end)) = sqlx::query_as::<_, (i32, Option<NaiveDateTime>)>(
-        r#"SELECT seat_count, current_period_end FROM org_subscriptions WHERE org_id = $1"#,
-    )
-    .bind(org_id)
-    .fetch_optional(pool)
-    .await?
+    if let Some((seats, period_end, cancel_at_period_end)) =
+        sqlx::query_as::<_, (i32, Option<NaiveDateTime>, bool)>(
+            r#"SELECT seat_count, current_period_end, cancel_at_period_end
+               FROM org_subscriptions WHERE org_id = $1"#,
+        )
+        .bind(org_id)
+        .fetch_optional(pool)
+        .await?
     {
         state.seat_count = seats;
         state.current_period_end = period_end;
+        state.cancel_at_period_end = cancel_at_period_end;
     }
 
     if let Some(p) = lookup_org_plan(pool, &state.plan).await? {
@@ -298,6 +319,7 @@ async fn credit_overview(
     org_id: &str,
     month_start: DateTime<Utc>,
     enforcement: codewire_server_core::credit_enforcement::CreditEnforcement,
+    allowance_remaining_nano_usd: i64,
 ) -> AppResult<CreditOverview> {
     type Row = (
         String,
@@ -331,6 +353,11 @@ async fn credit_overview(
     let (rate_card, cpu, memory, disk, balance, enabled, cents, exhausted_at, has_customer) = row;
     let unmetered = rate_card == crate::credit::UNLIMITED_RATE_CARD;
     let month = crate::usage_cost::month_usage_nano_eur(pool, org_id, month_start).await?;
+    let effective_balance = if allowance_remaining_nano_usd > 0 {
+        balance.max(0).saturating_add(allowance_remaining_nano_usd)
+    } else {
+        balance
+    };
     Ok(CreditOverview {
         balance_nano_eur: balance,
         rates: CreditRates {
@@ -344,7 +371,7 @@ async fn credit_overview(
         exhausted_at: out_of_credit_since(
             enforcement,
             unmetered,
-            balance,
+            effective_balance,
             exhausted_at,
             Utc::now(),
         )
@@ -352,7 +379,7 @@ async fn credit_overview(
         top_up_charging_cents: if top_up_charging(
             enforcement,
             unmetered,
-            balance,
+            effective_balance,
             enabled,
             has_customer,
             exhausted_at,
@@ -493,12 +520,19 @@ pub async fn billing_overview(
     let env_plan = lookup_resource_plan(pool, "sandbox", &effective.plan)
         .await?
         .unwrap_or_default();
+    let plan_def = crate::plan_subscriptions::lookup_plan_definition(pool, &effective.plan).await?;
+    let allowance = crate::plan_subscriptions::active_allowance(pool, org_id).await?;
 
-    let (active_subs, total_monthly) = if matches!(
+    let is_active_plan = matches!(
         effective.status.as_str(),
         "active" | "trialing" | "past_due"
-    ) {
-        (1, env_plan.price_cents)
+    );
+    let plan_price_cents = plan_def
+        .as_ref()
+        .map(|def| def.monthly_price_cents)
+        .unwrap_or(env_plan.price_cents);
+    let (active_subs, total_monthly) = if is_active_plan {
+        (1, plan_price_cents)
     } else {
         (0, 0)
     };
@@ -509,9 +543,32 @@ pub async fn billing_overview(
         .single()
         .expect("first of month is always valid");
     let usage = usage_sums(pool, org_id, month_start).await?;
-    let credit = credit_overview(pool, org_id, month_start, state.credit_enforcement).await?;
+    let credit = credit_overview(
+        pool,
+        org_id,
+        month_start,
+        state.credit_enforcement,
+        allowance.remaining_nano_usd(),
+    )
+    .await?;
 
     let (trial_days, extra_seat_cents) = lookup_settings(pool).await?;
+
+    let plan_def_name = plan_def
+        .as_ref()
+        .map(|def| def.display_name.as_str())
+        .unwrap_or("");
+    let (max_vcpu, max_memory_gib, max_disk_gib, max_concurrent_sandboxes, max_team_members) =
+        match (&plan_def, is_active_plan) {
+            (Some(def), true) => (
+                def.max_vcpu,
+                def.max_memory_gib,
+                def.max_disk_gib,
+                def.max_concurrent_sandboxes.unwrap_or(-1),
+                def.max_team_members.unwrap_or(-1),
+            ),
+            _ => (0, 0, 0, 0, 0),
+        };
 
     Ok(BillingOverviewResponse {
         credit,
@@ -519,6 +576,7 @@ pub async fn billing_overview(
         has_payment_method: payment_method.is_some(),
         default_card: payment_method.and_then(|method| method.card),
         plan_display_name: coalesce_plan_display_name(&[
+            plan_def_name,
             &effective.plan_display_name,
             &org_plan.display_name,
             &effective.plan,
@@ -533,10 +591,22 @@ pub async fn billing_overview(
         limits: BillingLimits {
             team_members: BillingLimitUsage {
                 used: member_count as i32,
-                max: org_plan.max_team_members,
+                max: if is_active_plan && plan_def.is_some() {
+                    max_team_members
+                } else {
+                    org_plan.max_team_members
+                },
             },
-            concurrent_workspaces: env_plan.max_concurrent_ws,
-            storage_gb: env_plan.storage_gb,
+            concurrent_workspaces: if is_active_plan && plan_def.is_some() {
+                max_concurrent_sandboxes
+            } else {
+                env_plan.max_concurrent_ws
+            },
+            storage_gb: if is_active_plan && plan_def.is_some() {
+                max_disk_gib
+            } else {
+                env_plan.storage_gb
+            },
         },
         current_period_end: fmt_naive_utc_opt(effective.current_period_end),
         active_subscriptions: active_subs,
@@ -547,6 +617,18 @@ pub async fn billing_overview(
             memory_gb_hours: usage.mem_gb_hours,
             storage_gb_hours: usage.disk_gb_hours,
         },
+        plan_price_cents: if is_active_plan { plan_price_cents } else { 0 },
+        allowance_granted_nano_usd: allowance.granted_nano_usd,
+        allowance_drawn_nano_usd: allowance.drawn_nano_usd,
+        allowance_period_end: allowance
+            .period_end
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        cancel_at_period_end: effective.cancel_at_period_end,
+        max_vcpu,
+        max_memory_gib,
+        max_disk_gib,
+        max_concurrent_sandboxes,
+        max_team_members,
     })
 }
 

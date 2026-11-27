@@ -378,6 +378,7 @@ mod tests {
                "status":"enabled","livemode":false,"api_version":"2026-04-22.dahlia","created":1,
                "metadata":{},"description":null,"application":null,
                "enabled_events":["checkout.session.completed",
+                 "customer.subscription.created","customer.subscription.updated","customer.subscription.deleted",
                  "invoice.created","invoice.paid","invoice.payment_failed","invoice.finalized"]},
               {"id":"we_elsewhere","object":"webhook_endpoint","url":"https://elsewhere.test/hook",
                "status":"disabled","livemode":false,"api_version":null,"enabled_events":["*"]}]}"#,

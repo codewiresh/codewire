@@ -7,13 +7,14 @@ use std::sync::Arc;
 
 use buffa_types::Timestamp;
 use codewire_proto::codewire::console::v1::{
-    AddCreditOutcome as ProtoAddCreditOutcome, AddCreditRefusal, AddCreditRequest,
-    AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse,
-    BillingEvent as ProtoBillingEvent, BillingLimitUsage as ProtoBillingLimitUsage,
-    BillingLimits as ProtoBillingLimits, BillingService, CardSetupSettlement,
-    CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest,
-    CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse,
-    CreditRates as ProtoCreditRates, EnvironmentUsageEntry as ProtoEnvironmentUsageEntry,
+    ActivatePaygPlanRequest, ActivatePaygPlanResponse, AddCreditOutcome as ProtoAddCreditOutcome,
+    AddCreditRefusal, AddCreditRequest, AddCreditResponse, BeginCardSetupRequest,
+    BeginCardSetupResponse, BillingEvent as ProtoBillingEvent,
+    BillingLimitUsage as ProtoBillingLimitUsage, BillingLimits as ProtoBillingLimits,
+    BillingService, CardSetupSettlement, CreateCheckoutSessionRequest,
+    CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse,
+    CreateSetupSessionRequest, CreateSetupSessionResponse, CreditRates as ProtoCreditRates,
+    EnvironmentUsageEntry as ProtoEnvironmentUsageEntry,
     EnvironmentUsageHour as ProtoEnvironmentUsageHour,
     EnvironmentUsageMonth as ProtoEnvironmentUsageMonth, FinishCardSetupRequest,
     FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse,
@@ -23,10 +24,11 @@ use codewire_proto::codewire::console::v1::{
     ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse,
     ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest,
     ListResourcePlansResponse, OrgPlan as ProtoOrgPlan, PaymentCard as ProtoPaymentCard,
+    ReconcilePlanCheckoutSessionRequest, ReconcilePlanCheckoutSessionResponse,
     RemovePaymentMethodRequest, RemovePaymentMethodResponse, ResourcePlan as ProtoResourcePlan,
     SavedPaymentMethod as ProtoSavedPaymentMethod, SetDefaultPaymentMethodRequest,
-    SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse,
-    UsageSummary as ProtoUsageSummary,
+    SetDefaultPaymentMethodResponse, SwitchOrganizationPlanRequest, SwitchOrganizationPlanResponse,
+    UpdateAutoTopUpRequest, UpdateAutoTopUpResponse, UsageSummary as ProtoUsageSummary,
 };
 use codewire_server_core::connect::{auth_user, rpc_app_error};
 use codewire_server_core::{AppError, AppResult};
@@ -197,20 +199,98 @@ impl BillingService for BillingConnectService {
         connectrpc::Response::ok(response)
     }
 
-    /// Plans are retired (#3381): billing sells prepaid credit only, so a
-    /// plan checkout is refused before anything reaches Stripe.
     async fn create_checkout_session(
         &self,
         ctx: RequestContext,
-        _request: ServiceRequest<'_, CreateCheckoutSessionRequest>,
+        request: ServiceRequest<'_, CreateCheckoutSessionRequest>,
     ) -> ServiceResult<CreateCheckoutSessionResponse> {
-        auth_user(&ctx)?;
-        Err(rpc_app_error(
-            &AppError::Precondition(
-                "plans are retired; add prepaid credit on the organization's Billing page".into(),
-            ),
-            &ctx,
-        ))
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let checkout_url = crate::plan_subscriptions::create_plan_checkout(
+            &self.state,
+            &user,
+            request.org_id,
+            request.plan,
+            request.success_url,
+            request.cancel_url,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(CreateCheckoutSessionResponse {
+            checkout_url,
+            ..Default::default()
+        })
+    }
+
+    async fn reconcile_plan_checkout_session(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ReconcilePlanCheckoutSessionRequest>,
+    ) -> ServiceResult<ReconcilePlanCheckoutSessionResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let reconciled = crate::plan_subscriptions::reconcile_plan_checkout(
+            &self.state,
+            &user,
+            request.org_id,
+            request.session_id,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        let current_period_end = reconciled
+            .current_period_end
+            .map(|dt| Timestamp::from_unix(dt.timestamp(), dt.timestamp_subsec_nanos() as i32));
+        connectrpc::Response::ok(ReconcilePlanCheckoutSessionResponse {
+            plan: reconciled.plan,
+            status: reconciled.status,
+            current_period_end: current_period_end.into(),
+            allowance_granted_nano_usd: reconciled.allowance_granted_nano_usd,
+            ..Default::default()
+        })
+    }
+
+    async fn activate_payg_plan(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, ActivatePaygPlanRequest>,
+    ) -> ServiceResult<ActivatePaygPlanResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let (plan, status) =
+            crate::plan_subscriptions::activate_payg_plan(&self.state, &user, request.org_id)
+                .await
+                .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(ActivatePaygPlanResponse {
+            plan,
+            status,
+            ..Default::default()
+        })
+    }
+
+    async fn switch_organization_plan(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, SwitchOrganizationPlanRequest>,
+    ) -> ServiceResult<SwitchOrganizationPlanResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let switched = crate::plan_subscriptions::switch_organization_plan(
+            &self.state,
+            &user,
+            request.org_id,
+            request.plan,
+            request.success_url,
+            request.cancel_url,
+        )
+        .await
+        .map_err(|error| rpc_app_error(&error, &ctx))?;
+        connectrpc::Response::ok(SwitchOrganizationPlanResponse {
+            plan: switched.plan,
+            status: switched.status,
+            checkout_url: switched.checkout_url,
+            cancel_at_period_end: switched.cancel_at_period_end,
+            ..Default::default()
+        })
     }
 
     async fn create_portal_session(
@@ -575,6 +655,16 @@ fn proto_billing_overview(value: BillingOverviewResponse) -> AppResult<GetBillin
         default_card: value.default_card.map(proto_card).into(),
         top_up_charging_cents: value.credit.top_up_charging_cents,
         credit_enforced: value.credit.credit_enforced,
+        plan_price_cents: value.plan_price_cents,
+        allowance_granted_nano_usd: value.allowance_granted_nano_usd,
+        allowance_drawn_nano_usd: value.allowance_drawn_nano_usd,
+        allowance_period_end: optional_timestamp(value.allowance_period_end.as_deref())?.into(),
+        cancel_at_period_end: value.cancel_at_period_end,
+        max_vcpu: value.max_vcpu,
+        max_memory_gib: value.max_memory_gib,
+        max_disk_gib: value.max_disk_gib,
+        max_concurrent_sandboxes: value.max_concurrent_sandboxes,
+        max_team_members: value.max_team_members,
         ..Default::default()
     })
 }

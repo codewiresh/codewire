@@ -55,6 +55,20 @@ service BillingService {
   // CreateCheckoutSession creates a Stripe subscription checkout session.
   rpc CreateCheckoutSession(CreateCheckoutSessionRequest) returns (CreateCheckoutSessionResponse);
 
+  // ReconcilePlanCheckoutSession synchronizes an organization's plan right
+  // after Stripe Checkout returns, before webhook delivery arrives.
+  rpc ReconcilePlanCheckoutSession(ReconcilePlanCheckoutSessionRequest) returns (ReconcilePlanCheckoutSessionResponse);
+
+  // ActivatePaygPlan activates the Pay as you go ($0/mo) plan once the
+  // organization has a default payment method on file.
+  rpc ActivatePaygPlan(ActivatePaygPlanRequest) returns (ActivatePaygPlanResponse);
+
+  // SwitchOrganizationPlan switches an organization between payg, pro, and
+  // max: updates an active Stripe subscription in place, schedules cancellation
+  // at period end when moving to payg, or returns a Stripe Checkout URL when a
+  // new subscription is required.
+  rpc SwitchOrganizationPlan(SwitchOrganizationPlanRequest) returns (SwitchOrganizationPlanResponse);
+
   // CreatePortalSession creates a Stripe billing portal session.
   rpc CreatePortalSession(CreatePortalSessionRequest) returns (CreatePortalSessionResponse);
 
@@ -225,6 +239,26 @@ message GetBillingOverviewResponse {
   // nothing is refused or charged, so the console says nothing of running
   // low (#4754).
   bool credit_enforced = 26;
+  // Monthly subscription price in USD cents for the active plan (0 for payg/none).
+  int32 plan_price_cents = 27;
+  // Included monthly compute allowance granted for the current billing cycle, in nano-USD.
+  int64 allowance_granted_nano_usd = 28;
+  // Portion of the current cycle's allowance already drawn, in nano-USD.
+  int64 allowance_drawn_nano_usd = 29;
+  // When the current monthly allowance cycle ends (unused allowance expires).
+  optional google.protobuf.Timestamp allowance_period_end = 30;
+  // Whether the Stripe subscription is scheduled to cancel at the end of the current period.
+  bool cancel_at_period_end = 31;
+  // Per-sandbox maximum vCPU allowed by the active plan (0 when no active plan).
+  int32 max_vcpu = 32;
+  // Per-sandbox maximum memory in GiB allowed by the active plan (0 when no active plan).
+  int32 max_memory_gib = 33;
+  // Per-sandbox maximum disk in GiB allowed by the active plan (0 when no active plan).
+  int32 max_disk_gib = 34;
+  // Maximum concurrent sandboxes allowed by the active plan (-1 for unlimited, 0 when no plan).
+  int32 max_concurrent_sandboxes = 35;
+  // Maximum team members allowed by the active plan (-1 for unlimited, 0 when no plan).
+  int32 max_team_members = 36;
 }
 
 // What a receipt shows of a card: never its number or fingerprint.
@@ -505,6 +539,43 @@ message CreateCheckoutSessionRequest {
 
 message CreateCheckoutSessionResponse {
   string checkout_url = 1;
+}
+
+message ReconcilePlanCheckoutSessionRequest {
+  string org_id = 1;
+  string session_id = 2;
+}
+
+message ReconcilePlanCheckoutSessionResponse {
+  string plan = 1;
+  string status = 2;
+  optional google.protobuf.Timestamp current_period_end = 3;
+  int64 allowance_granted_nano_usd = 4;
+}
+
+message ActivatePaygPlanRequest {
+  string org_id = 1;
+}
+
+message ActivatePaygPlanResponse {
+  string plan = 1;
+  string status = 2;
+}
+
+message SwitchOrganizationPlanRequest {
+  string org_id = 1;
+  string plan = 2;
+  string success_url = 3;
+  string cancel_url = 4;
+}
+
+message SwitchOrganizationPlanResponse {
+  string plan = 1;
+  string status = 2;
+  // Populated when upgrading from payg/no-subscription to a paid plan and
+  // Stripe Checkout must collect payment first.
+  string checkout_url = 3;
+  bool cancel_at_period_end = 4;
 }
 
 message CreatePortalSessionRequest {

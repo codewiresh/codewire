@@ -27,6 +27,7 @@ pub mod usage_cost;
 pub mod webhook;
 
 pub mod org_billing;
+pub mod plan_subscriptions;
 pub mod plans;
 pub mod receipts;
 pub mod routes;

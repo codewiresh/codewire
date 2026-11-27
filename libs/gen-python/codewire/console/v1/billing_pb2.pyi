@@ -169,7 +169,7 @@ class GetBillingOverviewRequest(_message.Message):
     def __init__(self, org_id: _Optional[str] = ...) -> None: ...
 
 class GetBillingOverviewResponse(_message.Message):
-    __slots__ = ("billing_enabled", "has_payment_method", "plan", "plan_display_name", "status", "trial_end", "trial_days", "seat_count", "included_devs", "extra_seat_price_cents", "limits", "current_period_end", "active_subscriptions", "total_monthly_cost_cents", "current_month_usage", "credit_balance_nano_eur", "rates", "unmetered", "auto_top_up_enabled", "auto_top_up_cents", "credit_exhausted_at", "month_usage_nano_eur", "default_card", "top_up_charging_cents", "credit_enforced")
+    __slots__ = ("billing_enabled", "has_payment_method", "plan", "plan_display_name", "status", "trial_end", "trial_days", "seat_count", "included_devs", "extra_seat_price_cents", "limits", "current_period_end", "active_subscriptions", "total_monthly_cost_cents", "current_month_usage", "credit_balance_nano_eur", "rates", "unmetered", "auto_top_up_enabled", "auto_top_up_cents", "credit_exhausted_at", "month_usage_nano_eur", "default_card", "top_up_charging_cents", "credit_enforced", "plan_price_cents", "allowance_granted_nano_usd", "allowance_drawn_nano_usd", "allowance_period_end", "cancel_at_period_end", "max_vcpu", "max_memory_gib", "max_disk_gib", "max_concurrent_sandboxes", "max_team_members")
     BILLING_ENABLED_FIELD_NUMBER: _ClassVar[int]
     HAS_PAYMENT_METHOD_FIELD_NUMBER: _ClassVar[int]
     PLAN_FIELD_NUMBER: _ClassVar[int]
@@ -195,6 +195,16 @@ class GetBillingOverviewResponse(_message.Message):
     DEFAULT_CARD_FIELD_NUMBER: _ClassVar[int]
     TOP_UP_CHARGING_CENTS_FIELD_NUMBER: _ClassVar[int]
     CREDIT_ENFORCED_FIELD_NUMBER: _ClassVar[int]
+    PLAN_PRICE_CENTS_FIELD_NUMBER: _ClassVar[int]
+    ALLOWANCE_GRANTED_NANO_USD_FIELD_NUMBER: _ClassVar[int]
+    ALLOWANCE_DRAWN_NANO_USD_FIELD_NUMBER: _ClassVar[int]
+    ALLOWANCE_PERIOD_END_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_AT_PERIOD_END_FIELD_NUMBER: _ClassVar[int]
+    MAX_VCPU_FIELD_NUMBER: _ClassVar[int]
+    MAX_MEMORY_GIB_FIELD_NUMBER: _ClassVar[int]
+    MAX_DISK_GIB_FIELD_NUMBER: _ClassVar[int]
+    MAX_CONCURRENT_SANDBOXES_FIELD_NUMBER: _ClassVar[int]
+    MAX_TEAM_MEMBERS_FIELD_NUMBER: _ClassVar[int]
     billing_enabled: bool
     has_payment_method: bool
     plan: str
@@ -220,7 +230,17 @@ class GetBillingOverviewResponse(_message.Message):
     default_card: PaymentCard
     top_up_charging_cents: int
     credit_enforced: bool
-    def __init__(self, billing_enabled: _Optional[bool] = ..., has_payment_method: _Optional[bool] = ..., plan: _Optional[str] = ..., plan_display_name: _Optional[str] = ..., status: _Optional[str] = ..., trial_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., trial_days: _Optional[int] = ..., seat_count: _Optional[int] = ..., included_devs: _Optional[int] = ..., extra_seat_price_cents: _Optional[int] = ..., limits: _Optional[_Union[BillingLimits, _Mapping]] = ..., current_period_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., active_subscriptions: _Optional[int] = ..., total_monthly_cost_cents: _Optional[int] = ..., current_month_usage: _Optional[_Union[UsageSummary, _Mapping]] = ..., credit_balance_nano_eur: _Optional[int] = ..., rates: _Optional[_Union[CreditRates, _Mapping]] = ..., unmetered: _Optional[bool] = ..., auto_top_up_enabled: _Optional[bool] = ..., auto_top_up_cents: _Optional[int] = ..., credit_exhausted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., month_usage_nano_eur: _Optional[int] = ..., default_card: _Optional[_Union[PaymentCard, _Mapping]] = ..., top_up_charging_cents: _Optional[int] = ..., credit_enforced: _Optional[bool] = ...) -> None: ...
+    plan_price_cents: int
+    allowance_granted_nano_usd: int
+    allowance_drawn_nano_usd: int
+    allowance_period_end: _timestamp_pb2.Timestamp
+    cancel_at_period_end: bool
+    max_vcpu: int
+    max_memory_gib: int
+    max_disk_gib: int
+    max_concurrent_sandboxes: int
+    max_team_members: int
+    def __init__(self, billing_enabled: _Optional[bool] = ..., has_payment_method: _Optional[bool] = ..., plan: _Optional[str] = ..., plan_display_name: _Optional[str] = ..., status: _Optional[str] = ..., trial_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., trial_days: _Optional[int] = ..., seat_count: _Optional[int] = ..., included_devs: _Optional[int] = ..., extra_seat_price_cents: _Optional[int] = ..., limits: _Optional[_Union[BillingLimits, _Mapping]] = ..., current_period_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., active_subscriptions: _Optional[int] = ..., total_monthly_cost_cents: _Optional[int] = ..., current_month_usage: _Optional[_Union[UsageSummary, _Mapping]] = ..., credit_balance_nano_eur: _Optional[int] = ..., rates: _Optional[_Union[CreditRates, _Mapping]] = ..., unmetered: _Optional[bool] = ..., auto_top_up_enabled: _Optional[bool] = ..., auto_top_up_cents: _Optional[int] = ..., credit_exhausted_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., month_usage_nano_eur: _Optional[int] = ..., default_card: _Optional[_Union[PaymentCard, _Mapping]] = ..., top_up_charging_cents: _Optional[int] = ..., credit_enforced: _Optional[bool] = ..., plan_price_cents: _Optional[int] = ..., allowance_granted_nano_usd: _Optional[int] = ..., allowance_drawn_nano_usd: _Optional[int] = ..., allowance_period_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., cancel_at_period_end: _Optional[bool] = ..., max_vcpu: _Optional[int] = ..., max_memory_gib: _Optional[int] = ..., max_disk_gib: _Optional[int] = ..., max_concurrent_sandboxes: _Optional[int] = ..., max_team_members: _Optional[int] = ...) -> None: ...
 
 class PaymentCard(_message.Message):
     __slots__ = ("brand", "last4", "exp_month", "exp_year")
@@ -559,6 +579,64 @@ class CreateCheckoutSessionResponse(_message.Message):
     CHECKOUT_URL_FIELD_NUMBER: _ClassVar[int]
     checkout_url: str
     def __init__(self, checkout_url: _Optional[str] = ...) -> None: ...
+
+class ReconcilePlanCheckoutSessionRequest(_message.Message):
+    __slots__ = ("org_id", "session_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    session_id: str
+    def __init__(self, org_id: _Optional[str] = ..., session_id: _Optional[str] = ...) -> None: ...
+
+class ReconcilePlanCheckoutSessionResponse(_message.Message):
+    __slots__ = ("plan", "status", "current_period_end", "allowance_granted_nano_usd")
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    CURRENT_PERIOD_END_FIELD_NUMBER: _ClassVar[int]
+    ALLOWANCE_GRANTED_NANO_USD_FIELD_NUMBER: _ClassVar[int]
+    plan: str
+    status: str
+    current_period_end: _timestamp_pb2.Timestamp
+    allowance_granted_nano_usd: int
+    def __init__(self, plan: _Optional[str] = ..., status: _Optional[str] = ..., current_period_end: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., allowance_granted_nano_usd: _Optional[int] = ...) -> None: ...
+
+class ActivatePaygPlanRequest(_message.Message):
+    __slots__ = ("org_id",)
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    def __init__(self, org_id: _Optional[str] = ...) -> None: ...
+
+class ActivatePaygPlanResponse(_message.Message):
+    __slots__ = ("plan", "status")
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    plan: str
+    status: str
+    def __init__(self, plan: _Optional[str] = ..., status: _Optional[str] = ...) -> None: ...
+
+class SwitchOrganizationPlanRequest(_message.Message):
+    __slots__ = ("org_id", "plan", "success_url", "cancel_url")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    SUCCESS_URL_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_URL_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    plan: str
+    success_url: str
+    cancel_url: str
+    def __init__(self, org_id: _Optional[str] = ..., plan: _Optional[str] = ..., success_url: _Optional[str] = ..., cancel_url: _Optional[str] = ...) -> None: ...
+
+class SwitchOrganizationPlanResponse(_message.Message):
+    __slots__ = ("plan", "status", "checkout_url", "cancel_at_period_end")
+    PLAN_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    CHECKOUT_URL_FIELD_NUMBER: _ClassVar[int]
+    CANCEL_AT_PERIOD_END_FIELD_NUMBER: _ClassVar[int]
+    plan: str
+    status: str
+    checkout_url: str
+    cancel_at_period_end: bool
+    def __init__(self, plan: _Optional[str] = ..., status: _Optional[str] = ..., checkout_url: _Optional[str] = ..., cancel_at_period_end: _Optional[bool] = ...) -> None: ...
 
 class CreatePortalSessionRequest(_message.Message):
     __slots__ = ("org_id", "return_url")

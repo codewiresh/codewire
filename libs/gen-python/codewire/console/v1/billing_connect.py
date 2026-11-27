@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .billing_pb2 import AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, FinishCardSetupRequest, FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetPublicRatesRequest, GetPublicRatesResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest, ListResourcePlansResponse, RemovePaymentMethodRequest, RemovePaymentMethodResponse, SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
+from .billing_pb2 import ActivatePaygPlanRequest, ActivatePaygPlanResponse, AddCreditRequest, AddCreditResponse, BeginCardSetupRequest, BeginCardSetupResponse, CreateCheckoutSessionRequest, CreateCheckoutSessionResponse, CreatePortalSessionRequest, CreatePortalSessionResponse, CreateSetupSessionRequest, CreateSetupSessionResponse, FinishCardSetupRequest, FinishCardSetupResponse, GetBillingOverviewRequest, GetBillingOverviewResponse, GetEnvironmentUsageRequest, GetEnvironmentUsageResponse, GetPublicRatesRequest, GetPublicRatesResponse, GetSignupCreditRequest, GetSignupCreditResponse, ListBillingEventsRequest, ListBillingEventsResponse, ListInvoicesRequest, ListInvoicesResponse, ListOrgPlansRequest, ListOrgPlansResponse, ListPaymentMethodsRequest, ListPaymentMethodsResponse, ListResourcePlansRequest, ListResourcePlansResponse, ReconcilePlanCheckoutSessionRequest, ReconcilePlanCheckoutSessionResponse, RemovePaymentMethodRequest, RemovePaymentMethodResponse, SetDefaultPaymentMethodRequest, SetDefaultPaymentMethodResponse, SwitchOrganizationPlanRequest, SwitchOrganizationPlanResponse, UpdateAutoTopUpRequest, UpdateAutoTopUpResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -60,6 +60,15 @@ class BillingService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def create_checkout_session(self, request: CreateCheckoutSessionRequest, ctx: RequestContext[CreateCheckoutSessionRequest, CreateCheckoutSessionResponse]) -> CreateCheckoutSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def reconcile_plan_checkout_session(self, request: ReconcilePlanCheckoutSessionRequest, ctx: RequestContext[ReconcilePlanCheckoutSessionRequest, ReconcilePlanCheckoutSessionResponse]) -> ReconcilePlanCheckoutSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def activate_payg_plan(self, request: ActivatePaygPlanRequest, ctx: RequestContext[ActivatePaygPlanRequest, ActivatePaygPlanResponse]) -> ActivatePaygPlanResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def switch_organization_plan(self, request: SwitchOrganizationPlanRequest, ctx: RequestContext[SwitchOrganizationPlanRequest, SwitchOrganizationPlanResponse]) -> SwitchOrganizationPlanResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def create_portal_session(self, request: CreatePortalSessionRequest, ctx: RequestContext[CreatePortalSessionRequest, CreatePortalSessionResponse]) -> CreatePortalSessionResponse:
@@ -192,6 +201,36 @@ class BillingServiceASGIApplication(ConnectASGIApplication[BillingService]):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.create_checkout_session,
+                ),
+                "/codewire.console.v1.BillingService/ReconcilePlanCheckoutSession": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ReconcilePlanCheckoutSession",
+                        service_name="codewire.console.v1.BillingService",
+                        input=ReconcilePlanCheckoutSessionRequest,
+                        output=ReconcilePlanCheckoutSessionResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.reconcile_plan_checkout_session,
+                ),
+                "/codewire.console.v1.BillingService/ActivatePaygPlan": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ActivatePaygPlan",
+                        service_name="codewire.console.v1.BillingService",
+                        input=ActivatePaygPlanRequest,
+                        output=ActivatePaygPlanResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.activate_payg_plan,
+                ),
+                "/codewire.console.v1.BillingService/SwitchOrganizationPlan": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SwitchOrganizationPlan",
+                        service_name="codewire.console.v1.BillingService",
+                        input=SwitchOrganizationPlanRequest,
+                        output=SwitchOrganizationPlanResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.switch_organization_plan,
                 ),
                 "/codewire.console.v1.BillingService/CreatePortalSession": Endpoint.unary(
                     method=MethodInfo(
@@ -517,6 +556,66 @@ class BillingServiceClient(ConnectClient):
             timeout_ms=timeout_ms,
         )
 
+    async def reconcile_plan_checkout_session(
+        self,
+        request: ReconcilePlanCheckoutSessionRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ReconcilePlanCheckoutSessionResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ReconcilePlanCheckoutSession",
+                service_name="codewire.console.v1.BillingService",
+                input=ReconcilePlanCheckoutSessionRequest,
+                output=ReconcilePlanCheckoutSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def activate_payg_plan(
+        self,
+        request: ActivatePaygPlanRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ActivatePaygPlanResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ActivatePaygPlan",
+                service_name="codewire.console.v1.BillingService",
+                input=ActivatePaygPlanRequest,
+                output=ActivatePaygPlanResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def switch_organization_plan(
+        self,
+        request: SwitchOrganizationPlanRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SwitchOrganizationPlanResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SwitchOrganizationPlan",
+                service_name="codewire.console.v1.BillingService",
+                input=SwitchOrganizationPlanRequest,
+                output=SwitchOrganizationPlanResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
     async def create_portal_session(
         self,
         request: CreatePortalSessionRequest,
@@ -727,6 +826,15 @@ class BillingServiceSync(Protocol):
     def create_checkout_session(self, request: CreateCheckoutSessionRequest, ctx: RequestContext[CreateCheckoutSessionRequest, CreateCheckoutSessionResponse]) -> CreateCheckoutSessionResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def reconcile_plan_checkout_session(self, request: ReconcilePlanCheckoutSessionRequest, ctx: RequestContext[ReconcilePlanCheckoutSessionRequest, ReconcilePlanCheckoutSessionResponse]) -> ReconcilePlanCheckoutSessionResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def activate_payg_plan(self, request: ActivatePaygPlanRequest, ctx: RequestContext[ActivatePaygPlanRequest, ActivatePaygPlanResponse]) -> ActivatePaygPlanResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def switch_organization_plan(self, request: SwitchOrganizationPlanRequest, ctx: RequestContext[SwitchOrganizationPlanRequest, SwitchOrganizationPlanResponse]) -> SwitchOrganizationPlanResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def create_portal_session(self, request: CreatePortalSessionRequest, ctx: RequestContext[CreatePortalSessionRequest, CreatePortalSessionResponse]) -> CreatePortalSessionResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -855,6 +963,36 @@ class BillingServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.create_checkout_session,
+                ),
+                "/codewire.console.v1.BillingService/ReconcilePlanCheckoutSession": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ReconcilePlanCheckoutSession",
+                        service_name="codewire.console.v1.BillingService",
+                        input=ReconcilePlanCheckoutSessionRequest,
+                        output=ReconcilePlanCheckoutSessionResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.reconcile_plan_checkout_session,
+                ),
+                "/codewire.console.v1.BillingService/ActivatePaygPlan": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ActivatePaygPlan",
+                        service_name="codewire.console.v1.BillingService",
+                        input=ActivatePaygPlanRequest,
+                        output=ActivatePaygPlanResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.activate_payg_plan,
+                ),
+                "/codewire.console.v1.BillingService/SwitchOrganizationPlan": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SwitchOrganizationPlan",
+                        service_name="codewire.console.v1.BillingService",
+                        input=SwitchOrganizationPlanRequest,
+                        output=SwitchOrganizationPlanResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.switch_organization_plan,
                 ),
                 "/codewire.console.v1.BillingService/CreatePortalSession": EndpointSync.unary(
                     method=MethodInfo(
@@ -1166,6 +1304,63 @@ class BillingServiceClientSync(ConnectClientSync):
                 service_name="codewire.console.v1.BillingService",
                 input=CreateCheckoutSessionRequest,
                 output=CreateCheckoutSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def reconcile_plan_checkout_session(
+        self,
+        request: ReconcilePlanCheckoutSessionRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ReconcilePlanCheckoutSessionResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ReconcilePlanCheckoutSession",
+                service_name="codewire.console.v1.BillingService",
+                input=ReconcilePlanCheckoutSessionRequest,
+                output=ReconcilePlanCheckoutSessionResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def activate_payg_plan(
+        self,
+        request: ActivatePaygPlanRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ActivatePaygPlanResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ActivatePaygPlan",
+                service_name="codewire.console.v1.BillingService",
+                input=ActivatePaygPlanRequest,
+                output=ActivatePaygPlanResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def switch_organization_plan(
+        self,
+        request: SwitchOrganizationPlanRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SwitchOrganizationPlanResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SwitchOrganizationPlan",
+                service_name="codewire.console.v1.BillingService",
+                input=SwitchOrganizationPlanRequest,
+                output=SwitchOrganizationPlanResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

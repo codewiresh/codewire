@@ -188,8 +188,11 @@ async fn claim_event(
 /// The Stripe event types `handle_webhook_event` acts on. Billing's Stripe
 /// endpoint check requires its endpoint to send each of them and nothing
 /// else (#3263), so keep this list and the match in step.
-pub const HANDLED_EVENT_TYPES: [&str; 5] = [
+pub const HANDLED_EVENT_TYPES: [&str; 8] = [
     "checkout.session.completed",
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
     "invoice.created",
     "invoice.paid",
     "invoice.payment_failed",
@@ -218,6 +221,11 @@ pub async fn handle_webhook_event(state: &BillingState, event: Event) -> anyhow:
         match &event.data.object {
             EventObject::CheckoutSessionCompleted(session) => {
                 handle_checkout_completed(state, session).await?
+            }
+            EventObject::CustomerSubscriptionCreated(sub)
+            | EventObject::CustomerSubscriptionUpdated(sub)
+            | EventObject::CustomerSubscriptionDeleted(sub) => {
+                handle_subscription_event(state, sub, event.id.as_str(), event.created).await?
             }
             EventObject::InvoiceCreated(inv) => handle_invoice_created(state, inv).await?,
             EventObject::InvoicePaid(inv) => handle_invoice_paid(state, inv).await?,
@@ -321,10 +329,180 @@ async fn handle_checkout_completed(
         return handle_credit_checkout(state, session).await;
     }
 
-    // Plans are retired (#3381): billing sells no subscription, so any other
-    // completed session is a stale plan checkout and is only logged.
-    tracing::warn!(session_id = %session.id, "billing: ignoring a completed checkout that buys no credit");
+    if session.mode == stripe_shared::CheckoutSessionMode::Subscription
+        && session
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .map(String::as_str)
+            == Some(crate::stripe_client::PLAN_SUBSCRIPTION_KIND)
+    {
+        return handle_plan_subscription_checkout(state, session).await;
+    }
+
+    tracing::warn!(session_id = %session.id, "billing: ignoring a completed checkout of unknown kind");
     Ok(())
+}
+
+async fn handle_plan_subscription_checkout(
+    state: &BillingState,
+    session: &stripe_shared::CheckoutSession,
+) -> anyhow::Result<()> {
+    let org_id = session
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("org_id"))
+        .map(String::as_str)
+        .unwrap_or_default();
+    if org_id.is_empty() {
+        tracing::warn!(session_id = %session.id, "billing: plan checkout without org_id");
+        return Ok(());
+    }
+    if session.status != Some(stripe_shared::CheckoutSessionStatus::Complete) {
+        tracing::info!(
+            session_id = %session.id,
+            org_id,
+            status = ?session.status,
+            "billing: plan checkout session is not complete; skipping"
+        );
+        return Ok(());
+    }
+    let Some(customer_id) = session.customer.as_ref().map(expandable_id) else {
+        tracing::error!(
+            session_id = %session.id,
+            org_id,
+            "billing: plan checkout without a customer"
+        );
+        return Ok(());
+    };
+    if !crate::plan_subscriptions::org_owns_stripe_customer(&state.pool, org_id, &customer_id)
+        .await?
+    {
+        tracing::error!(
+            session_id = %session.id,
+            org_id,
+            "billing: plan checkout customer is not the organization's"
+        );
+        return Ok(());
+    }
+    let Some(sub_ref) = session.subscription.as_ref() else {
+        tracing::warn!(session_id = %session.id, org_id, "billing: plan checkout without subscription");
+        return Ok(());
+    };
+    let sub_id = expandable_id(sub_ref);
+    let subscription = state.stripe.retrieve_subscription(&sub_id).await?;
+    if expandable_id(&subscription.customer) != customer_id {
+        tracing::error!(
+            session_id = %session.id,
+            org_id,
+            subscription_id = %sub_id,
+            "billing: plan checkout subscription customer mismatch"
+        );
+        return Ok(());
+    }
+    let Some(synced) = crate::plan_subscriptions::sync_subscription_state(
+        &state.pool,
+        org_id,
+        &subscription,
+        None,
+        None,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    if session.payment_status == stripe_shared::CheckoutSessionPaymentStatus::Paid
+        && let Some(invoice_id) = subscription
+            .latest_invoice
+            .as_ref()
+            .and_then(|inv| match inv {
+                stripe_types::Expandable::Id(id) => id.as_ref().map(ToString::to_string),
+                stripe_types::Expandable::Object(inv) => inv.id.as_ref().map(ToString::to_string),
+            })
+        && let Some((period_start, period_end)) =
+            crate::plan_subscriptions::subscription_period(&subscription)
+        && let Some(def) =
+            crate::plan_subscriptions::lookup_plan_definition(&state.pool, &synced.plan).await?
+        && def.included_compute_nano_usd > 0
+    {
+        crate::plan_subscriptions::grant_cycle_allowance(
+            &state.pool,
+            org_id,
+            &def.plan_key,
+            period_start,
+            period_end,
+            def.included_compute_nano_usd,
+            &invoice_id,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn handle_subscription_event(
+    state: &BillingState,
+    sub: &stripe_shared::Subscription,
+    event_id: &str,
+    event_created: i64,
+) -> anyhow::Result<()> {
+    let pool = &state.pool;
+    let org_id = resolve_subscription_org_id(pool, sub).await;
+    if org_id.is_empty() {
+        tracing::warn!(
+            subscription_id = %sub.id,
+            event_id,
+            "billing: subscription event could not be matched to an organization"
+        );
+        return Ok(());
+    }
+    let created_at = DateTime::<Utc>::from_timestamp(event_created, 0);
+    crate::plan_subscriptions::sync_subscription_state(
+        pool,
+        &org_id,
+        sub,
+        Some(event_id),
+        created_at,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn resolve_subscription_org_id(pool: &PgPool, sub: &stripe_shared::Subscription) -> String {
+    let customer_id = expandable_id(&sub.customer);
+    if customer_id.is_empty() {
+        return String::new();
+    }
+    if let Some(org_id) = sub.metadata.get("org_id").filter(|id| !id.is_empty())
+        && crate::plan_subscriptions::org_owns_stripe_customer(pool, org_id, &customer_id)
+            .await
+            .unwrap_or(false)
+    {
+        return org_id.clone();
+    }
+    if let Ok(Some(org)) = sqlx::query_scalar::<_, String>(
+        r#"SELECT s.org_id
+           FROM org_subscriptions s
+           JOIN organizations o ON o.id = s.org_id
+           WHERE s.stripe_subscription_id = $1 AND o.stripe_customer_id = $2"#,
+    )
+    .bind(sub.id.as_str())
+    .bind(&customer_id)
+    .fetch_optional(pool)
+    .await
+        && !org.is_empty()
+    {
+        return org;
+    }
+    if let Ok(Some(org)) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM organizations WHERE stripe_customer_id = $1",
+    )
+    .bind(&customer_id)
+    .fetch_optional(pool)
+    .await
+    {
+        return org;
+    }
+    String::new()
 }
 
 /// A one-time credit purchase paid on Stripe's page (#3381): credits what was
@@ -500,6 +678,59 @@ async fn handle_invoice_paid(
 
     let invoice_id = inv.id.as_deref().unwrap_or_default();
     let org_id = resolve_invoice_org_id(pool, inv).await;
+
+    // Grant the monthly compute allowance for paid USD cycle/initial
+    // subscription invoices idempotently by stripe_invoice_id (#6659).
+    // Rejects proration (subscription_update), manual, $0, non-USD, and
+    // non-matching subscription or price invoices.
+    let sub_id = invoice_subscription_id(inv);
+    let is_cycle_invoice = matches!(
+        inv.billing_reason,
+        Some(
+            stripe_shared::InvoiceBillingReason::SubscriptionCreate
+                | stripe_shared::InvoiceBillingReason::SubscriptionCycle
+        )
+    );
+    if !sub_id.is_empty()
+        && !org_id.is_empty()
+        && !invoice_id.is_empty()
+        && is_cycle_invoice
+        && inv.currency == crate::stripe_client::BILLING_CURRENCY
+        && inv.amount_paid > 0
+    {
+        let sub_matches: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS (
+                   SELECT 1 FROM org_subscriptions
+                   WHERE org_id = $1 AND stripe_subscription_id = $2
+               )"#,
+        )
+        .bind(&org_id)
+        .bind(&sub_id)
+        .fetch_one(pool)
+        .await?;
+        if sub_matches
+            && let Some((def, line_period)) = resolve_invoice_plan(pool, inv).await?
+            && def.included_compute_nano_usd > 0
+        {
+            let period = line_period.or_else(|| {
+                let start = DateTime::<Utc>::from_timestamp(inv.period_start, 0)?;
+                let end = DateTime::<Utc>::from_timestamp(inv.period_end, 0)?;
+                (end > start).then_some((start, end))
+            });
+            if let Some((period_start, period_end)) = period {
+                crate::plan_subscriptions::grant_cycle_allowance(
+                    pool,
+                    &org_id,
+                    &def.plan_key,
+                    period_start,
+                    period_end,
+                    def.included_compute_nano_usd,
+                    invoice_id,
+                )
+                .await?;
+            }
+        }
+    }
 
     if state.receipts == ReceiptSender::Stripe {
         // Stripe emails this receipt (#4816). receipt_sent_at stays NULL: it
@@ -829,6 +1060,42 @@ async fn log_billing_event(
     }
 }
 
+/// Resolves the billed billing plan definition (and its line-item period, if
+/// valid) authoritatively from the invoice's subscription line items' Stripe
+/// Price IDs. Returns `Ok(None)` when no line item matches a known plan price.
+async fn resolve_invoice_plan(
+    pool: &PgPool,
+    inv: &stripe_shared::Invoice,
+) -> anyhow::Result<
+    Option<(
+        crate::plan_subscriptions::PlanDefinition,
+        Option<(DateTime<Utc>, DateTime<Utc>)>,
+    )>,
+> {
+    for line in &inv.lines.data {
+        let Some(price_id) = line
+            .pricing
+            .as_ref()
+            .and_then(|p| p.price_details.as_ref())
+            .map(|pd| expandable_id(&pd.price))
+        else {
+            continue;
+        };
+        if let Some(def) =
+            crate::plan_subscriptions::lookup_plan_by_stripe_price(pool, &price_id).await?
+        {
+            let start = DateTime::<Utc>::from_timestamp(line.period.start, 0);
+            let end = DateTime::<Utc>::from_timestamp(line.period.end, 0);
+            let period = match (start, end) {
+                (Some(s), Some(e)) if e > s => Some((s, e)),
+                _ => None,
+            };
+            return Ok(Some((def, period)));
+        }
+    }
+    Ok(None)
+}
+
 fn invoice_subtotal(inv: &stripe_shared::Invoice) -> i64 {
     inv.lines
         .data
@@ -1137,5 +1404,214 @@ mod tests {
         let ts = 1780396200;
         assert_eq!(format_go_date(ts, "long"), "June 2, 2026");
         assert_eq!(format_go_date(ts, "short"), "Jun 2, 2026");
+    }
+
+    #[tokio::test]
+    async fn db_handle_invoice_paid_gates_allowance_on_reason_currency_amount_sub_and_price() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&url).await.unwrap();
+        let mut billing = signed_state();
+        billing.pool = pool.clone();
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = format!("wh-inv-user-{suffix}");
+        let org_id = format!("wh-inv-org-{suffix}");
+        let cus_id = format!("cus_wh_{suffix}");
+        let sub_id = format!("sub_wh_{suffix}");
+        let pro_price = format!("price_wh_pro_{suffix}");
+
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $2)")
+            .bind(&user_id)
+            .bind(format!("{user_id}@example.test"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by, stripe_customer_id) \
+             VALUES ($1, 'WH Org', $2, $3, $4)",
+        )
+        .bind(&org_id)
+        .bind(format!("wh-inv-{suffix}"))
+        .bind(&user_id)
+        .bind(&cus_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO org_subscriptions (org_id, plan, status, stripe_subscription_id) \
+             VALUES ($1, 'pro', 'active', $2)",
+        )
+        .bind(&org_id)
+        .bind(&sub_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE billing_plan_definitions SET stripe_price_id_test = $1 WHERE plan_key = 'pro'",
+        )
+        .bind(&pro_price)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let now = Utc::now().timestamp();
+        let start = now - 3600;
+        let end = now + 86400 * 29;
+        let make_inv = |inv_id: &str,
+                        reason: &str,
+                        currency: &str,
+                        amount_paid: i64,
+                        inv_sub: &str,
+                        price_id: &str| {
+            let v = serde_json::json!({
+                "id": inv_id,
+                "object": "invoice",
+                "amount_due": amount_paid,
+                "amount_overpaid": 0,
+                "amount_paid": amount_paid,
+                "amount_remaining": 0,
+                "amount_shipping": 0,
+                "attempt_count": 1,
+                "attempted": true,
+                "automatic_tax": { "enabled": false, "disabled_reason": null, "liability": null, "provider": null, "status": null },
+                "automatically_finalizes_at": null,
+                "billing_reason": reason,
+                "collection_method": "charge_automatically",
+                "created": now,
+                "currency": currency,
+                "customer": cus_id,
+                "default_tax_rates": [],
+                "discounts": [],
+                "issuer": { "type": "self", "account": null },
+                "lines": {
+                    "object": "list",
+                    "data": [{
+                        "id": format!("il_{inv_id}"),
+                        "object": "line_item",
+                        "amount": amount_paid,
+                        "currency": currency,
+                        "discountable": false,
+                        "discounts": [],
+                        "livemode": false,
+                        "metadata": {},
+                        "period": { "start": start, "end": end },
+                        "pricing": {
+                            "type": "price_details",
+                            "price_details": {
+                                "price": price_id,
+                                "product": "prod_pro"
+                            }
+                        },
+                        "subtotal": amount_paid
+                    }],
+                    "has_more": false,
+                    "url": "/v1/invoices/lines"
+                },
+                "livemode": false,
+                "parent": {
+                    "type": "subscription_details",
+                    "quote_details": null,
+                    "subscription_details": { "subscription": inv_sub, "metadata": {} }
+                },
+                "payment_settings": { "default_mandate": null, "payment_method_options": null, "payment_method_types": null },
+                "period_end": end,
+                "period_start": start,
+                "post_payment_credit_notes_amount": 0,
+                "pre_payment_credit_notes_amount": 0,
+                "starting_balance": 0,
+                "status": "paid",
+                "status_transitions": { "finalized_at": null, "marked_uncollectible_at": null, "paid_at": now, "voided_at": null },
+                "subtotal": amount_paid,
+                "total": amount_paid,
+                "total_discount_amounts": [],
+                "total_taxes": []
+            });
+            miniserde::json::from_str::<stripe_shared::Invoice>(&v.to_string()).unwrap()
+        };
+
+        // Rejected cases: proration (subscription_update), $0, non-USD, mismatched sub, unknown price.
+        for inv in [
+            make_inv(
+                &format!("in_upd_{suffix}"),
+                "subscription_update",
+                "usd",
+                6000,
+                &sub_id,
+                &pro_price,
+            ),
+            make_inv(
+                &format!("in_zero_{suffix}"),
+                "subscription_cycle",
+                "usd",
+                0,
+                &sub_id,
+                &pro_price,
+            ),
+            make_inv(
+                &format!("in_eur_{suffix}"),
+                "subscription_cycle",
+                "eur",
+                4000,
+                &sub_id,
+                &pro_price,
+            ),
+            make_inv(
+                &format!("in_other_sub_{suffix}"),
+                "subscription_cycle",
+                "usd",
+                4000,
+                "sub_other_unrelated",
+                &pro_price,
+            ),
+            make_inv(
+                &format!("in_unknown_price_{suffix}"),
+                "subscription_cycle",
+                "usd",
+                4000,
+                &sub_id,
+                "price_unknown",
+            ),
+        ] {
+            handle_invoice_paid(&billing, &inv).await.unwrap();
+        }
+        let rejected_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_plan_allowances WHERE organization_id = $1",
+        )
+        .bind(&org_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rejected_count, 0,
+            "invalid/proration/$0/non-USD/mismatched invoices must not grant allowances"
+        );
+
+        // Accepted case: paid USD subscription_cycle matching org's subscription & Pro price.
+        let good = make_inv(
+            &format!("in_good_{suffix}"),
+            "subscription_cycle",
+            "usd",
+            4000,
+            &sub_id,
+            &pro_price,
+        );
+        handle_invoice_paid(&billing, &good).await.unwrap();
+        let granted: i64 = sqlx::query_scalar(
+            "SELECT granted_nano_usd FROM billing_plan_allowances WHERE organization_id = $1",
+        )
+        .bind(&org_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(granted, 100_000_000_000);
+
+        sqlx::query(
+            "UPDATE billing_plan_definitions SET stripe_price_id_test = NULL WHERE plan_key = 'pro'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 }

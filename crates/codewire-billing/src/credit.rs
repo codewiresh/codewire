@@ -184,25 +184,62 @@ pub async fn draw_organization(pool: &PgPool, organization_id: &str) -> anyhow::
         )
     };
     if amount > 0 {
-        let started = due.iter().map(|row| row.4).min().unwrap_or(now);
-        let ended = due.iter().map(|row| row.5).max().unwrap_or(now);
-        sqlx::query(
-            r#"INSERT INTO billing_credit_ledger
-                   (organization_id, entry_kind, amount_nano_eur, idempotency_key,
-                    rate_card, usage_started_at, usage_ended_at)
-               VALUES ($1, 'usage', $2, $3, $4, $5, $6)"#,
+        let mut remaining = amount;
+        // Two-bucket metering (#6659): draw from the active cycle's monthly
+        // plan allowance first, then draw any excess from prepaid credit.
+        let allowance: Option<(i64, i64, i64)> = sqlx::query_as(
+            r#"SELECT id, granted_nano_usd, drawn_nano_usd
+               FROM billing_plan_allowances
+               WHERE organization_id = $1
+                 AND period_start <= $2
+                 AND period_end > $2
+                 AND drawn_nano_usd < granted_nano_usd
+               ORDER BY period_end ASC, id ASC
+               LIMIT 1
+               FOR UPDATE"#,
         )
         .bind(organization_id)
-        .bind(-amount)
-        .bind(format!(
-            "usage:{}",
-            now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
-        ))
-        .bind(&rate_card)
-        .bind(started)
-        .bind(ended)
-        .execute(&mut *transaction)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
         .await?;
+        if let Some((allowance_id, granted, drawn)) = allowance {
+            let available = (granted - drawn).max(0);
+            let from_allowance = remaining.min(available);
+            if from_allowance > 0 {
+                sqlx::query(
+                    r#"UPDATE billing_plan_allowances
+                       SET drawn_nano_usd = drawn_nano_usd + $2,
+                           updated_at = now()
+                       WHERE id = $1"#,
+                )
+                .bind(allowance_id)
+                .bind(from_allowance)
+                .execute(&mut *transaction)
+                .await?;
+                remaining -= from_allowance;
+            }
+        }
+        if remaining > 0 {
+            let started = due.iter().map(|row| row.4).min().unwrap_or(now);
+            let ended = due.iter().map(|row| row.5).max().unwrap_or(now);
+            sqlx::query(
+                r#"INSERT INTO billing_credit_ledger
+                       (organization_id, entry_kind, amount_nano_eur, idempotency_key,
+                        rate_card, usage_started_at, usage_ended_at)
+                   VALUES ($1, 'usage', $2, $3, $4, $5, $6)"#,
+            )
+            .bind(organization_id)
+            .bind(-remaining)
+            .bind(format!(
+                "usage:{}",
+                now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+            ))
+            .bind(&rate_card)
+            .bind(started)
+            .bind(ended)
+            .execute(&mut *transaction)
+            .await?;
+        }
     }
     let ids: Vec<String> = due.iter().map(|row| row.0.clone()).collect();
     let through: Vec<DateTime<Utc>> = due.iter().map(|row| row.5).collect();
@@ -230,9 +267,16 @@ async fn clear_exhausted_if_funded(
     sqlx::query(
         r#"UPDATE organizations o SET credit_exhausted_at = NULL
            WHERE o.id = $1 AND o.credit_exhausted_at IS NOT NULL
-             AND (o.rate_card = 'unlimited' OR EXISTS (
-                 SELECT 1 FROM billing_credit_balances b
-                 WHERE b.organization_id = o.id AND b.balance_nano_eur > 0))"#,
+             AND (o.rate_card = 'unlimited'
+                  OR EXISTS (
+                      SELECT 1 FROM billing_credit_balances b
+                      WHERE b.organization_id = o.id AND b.balance_nano_eur > 0)
+                  OR EXISTS (
+                      SELECT 1 FROM billing_plan_allowances a
+                      WHERE a.organization_id = o.id
+                        AND a.period_start <= now()
+                        AND a.period_end > now()
+                        AND a.drawn_nano_usd < a.granted_nano_usd))"#,
     )
     .bind(organization_id)
     .execute(&mut **transaction)
@@ -523,11 +567,23 @@ pub async fn settle_organization(
     if !enforcement.is_on() {
         return Ok(Settlement::NotEnforced);
     }
-    type State = (String, i64, bool, i32, Option<String>);
-    let Some((rate_card, balance, auto_top_up, top_up_cents, customer)): Option<State> =
+    type State = (String, i64, i64, bool, i32, Option<String>);
+    let Some((rate_card, balance, allowance_remaining, auto_top_up, top_up_cents, customer)): Option<State> =
         sqlx::query_as(
-            r#"SELECT o.rate_card, COALESCE(b.balance_nano_eur, 0), o.auto_top_up_enabled,
-                      o.auto_top_up_cents, o.stripe_customer_id
+            r#"SELECT o.rate_card,
+                      COALESCE(b.balance_nano_eur, 0),
+                      COALESCE((
+                          SELECT GREATEST(a.granted_nano_usd - a.drawn_nano_usd, 0)
+                          FROM billing_plan_allowances a
+                          WHERE a.organization_id = o.id
+                            AND a.period_start <= now()
+                            AND a.period_end > now()
+                          ORDER BY a.period_end DESC, a.id DESC
+                          LIMIT 1
+                      ), 0),
+                      o.auto_top_up_enabled,
+                      o.auto_top_up_cents,
+                      o.stripe_customer_id
                FROM organizations o
                LEFT JOIN billing_credit_balances b ON b.organization_id = o.id
                WHERE o.id = $1"#,
@@ -544,7 +600,9 @@ pub async fn settle_organization(
     .bind(organization_id)
     .fetch_optional(pool)
     .await?;
-    if pending.is_none() && (rate_card == UNLIMITED_RATE_CARD || balance > 0) {
+    if pending.is_none()
+        && (rate_card == UNLIMITED_RATE_CARD || balance > 0 || allowance_remaining > 0)
+    {
         let mut transaction = pool.begin().await?;
         clear_exhausted_if_funded(&mut transaction, organization_id).await?;
         transaction.commit().await?;

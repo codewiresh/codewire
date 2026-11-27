@@ -112,12 +112,20 @@ const IDEMPOTENT_CALLS: &[(&str, IdempotencyKind)] = &[
     ("update_subscription_item", IdempotencyKind::Operation),
     ("set_default_payment_method", IdempotencyKind::Operation),
     ("charge_top_up", IdempotencyKind::Operation),
+    ("ensure_plan_product", IdempotencyKind::Operation),
+    ("ensure_plan_price", IdempotencyKind::Operation),
+    (
+        "set_subscription_cancel_at_period_end",
+        IdempotencyKind::Operation,
+    ),
+    ("update_subscription_plan", IdempotencyKind::Operation),
     ("create_portal_session", IdempotencyKind::Parameters),
     ("create_setup_session", IdempotencyKind::Parameters),
     (
         "create_credit_checkout_session",
         IdempotencyKind::Parameters,
     ),
+    ("create_plan_checkout_session", IdempotencyKind::Parameters),
 ];
 
 /// The key of a parameter-keyed call: a hash of the request exactly as it is
@@ -1208,6 +1216,9 @@ impl StripeHandle {
 
 mod cards;
 pub use cards::SavedCard;
+mod plans;
+pub(crate) use plans::PLAN_SUBSCRIPTION_KIND;
+pub use plans::{PlanCheckout, SubscriptionPlanUpdate};
 
 /// How an automatic top-up charge ended (#3381).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1877,10 +1888,11 @@ mod idempotency_key_tests {
     #[test]
     fn every_idempotent_call_is_named_and_keyed_by_its_kind() {
         let file = include_str!("stripe_client.rs");
-        // The card calls live in their own file (#4750).
+        // The card and plan calls live in their own files (#4750, #6659).
         let source = [
             &file[..file.find("mod currency_tests").expect("test module")],
             include_str!("stripe_client/cards.rs"),
+            include_str!("stripe_client/plans.rs"),
         ]
         .concat();
         let mut found = Vec::new();
