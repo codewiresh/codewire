@@ -489,6 +489,18 @@ def standard_pool_cases(spool: dict, broker: dict) -> list[tuple[str, dict | Non
                                   for e in env(t) if e["name"] == "CODEWIRE_POD_UDP_PEERS"]
                 or env(t).append({"name": "CODEWIRE_POD_UDP_PEERS", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}})),
          ENVIRONMENT),
+        ("on, standard pool: literal runtime image digest admitted", on, "create",
+         mutate(spool, lambda t: [e.__setitem__("value", "sha256:" + "a" * 64) for e in env(t)
+                                  if e["name"] == "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST"]
+                or env(t).append({"name": "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST", "value": "sha256:" + "a" * 64})), None),
+        ("on, standard pool: runtime image digest from a source refused", on, "create",
+         mutate(spool, lambda t: [e.pop("value", None) or e.__setitem__("valueFrom", {"fieldRef": {"fieldPath": "metadata.name"}})
+                                  for e in env(t) if e["name"] == "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST"]
+                or env(t).append({"name": "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}})),
+         ENVIRONMENT),
+        ("on, standard pool: restore generation refused on warm pool", on, "create",
+         mutate(spool, lambda t: env(t).append({"name": "CODEWIRE_VM_RESTORE_GENERATION", "value": "1"})),
+         ENVIRONMENT),
         ("on, standard pool: a VM setting from a source", on, "create",
          mutate(spool, lambda t: [e.pop("value") or e.__setitem__("valueFrom", {"fieldRef": {"fieldPath": "metadata.name"}})
                                   for e in env(t) if e["name"] == "CODEWIRE_VM_VCPUS"]), ENVIRONMENT),

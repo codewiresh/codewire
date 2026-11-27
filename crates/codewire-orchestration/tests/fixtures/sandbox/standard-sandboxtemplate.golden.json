@@ -244,6 +244,10 @@
               {
                 "name": "CODEWIRE_POD_UDP_PEERS",
                 "value": "198.51.100.35:41641"
+              },
+              {
+                "name": "CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST",
+                "value": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
               }
             ],
             "image": "registry.example.invalid/codewire/pod-runtime@sha256:1111111111111111111111111111111111111111111111111111111111111111",

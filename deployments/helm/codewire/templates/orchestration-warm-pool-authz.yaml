@@ -458,7 +458,7 @@ spec:
     # The VM settings a standard pool's workspace container sets, each as a
     # literal (crates/codewire-orchestration/src/sandbox/template/standard.rs).
     - name: standardPoolEnvironment
-      expression: "['CODEWIRE_VM_VCPUS', 'CODEWIRE_VM_MEMORY_MIB', 'CODEWIRE_VM_STATE_DISK_MIB', 'CODEWIRE_VM_DOCKER_DISK_MIB', 'CODEWIRE_VM_STATE', 'CODEWIRE_VM_EGRESS_MODE', 'CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_WORKSPACE_INIT', 'CODEWIRE_IMAGE_DISK_ID', 'CODEWIRE_IMAGE_DISK_BUILD_ID', 'CODEWIRE_POD_PLATFORM_PEERS', 'CODEWIRE_POD_UDP_PEERS']"
+      expression: "['CODEWIRE_VM_VCPUS', 'CODEWIRE_VM_MEMORY_MIB', 'CODEWIRE_VM_STATE_DISK_MIB', 'CODEWIRE_VM_DOCKER_DISK_MIB', 'CODEWIRE_VM_STATE', 'CODEWIRE_VM_EGRESS_MODE', 'CODEWIRE_WORKSPACE_IMAGE', 'CODEWIRE_WORKSPACE_INIT', 'CODEWIRE_IMAGE_DISK_ID', 'CODEWIRE_IMAGE_DISK_BUILD_ID', 'CODEWIRE_POD_PLATFORM_PEERS', 'CODEWIRE_POD_UDP_PEERS', 'CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST']"
     # codewire#5602: the one workspace disk a `standard` Pod may mount, by
     # exact reference: the first field of the deployment's
     # SANDBOX_STANDARD_IMAGE_DISK, from this policy's parameter. Empty,

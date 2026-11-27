@@ -141,6 +141,18 @@ impl StandardRuntime {
         &self.runtime_image
     }
 
+    /// The `sha256:<64 hex>` digest suffix of [`Self::runtime_image`].
+    pub fn runtime_image_digest(&self) -> Option<&str> {
+        self.runtime_image
+            .rsplit_once('@')
+            .map(|(_, digest)| digest)
+            .filter(|digest| {
+                digest
+                    .strip_prefix("sha256:")
+                    .is_some_and(|hex| lowercase_hex(hex, 64))
+            })
+    }
+
     /// The published workspace disk the Pod mounts read-only, by digest.
     pub fn image_disk(&self) -> &str {
         &self.image_disk
@@ -451,6 +463,9 @@ fn settings(
     ];
     if !egress.udp_relay_peers.is_empty() {
         entries.push((POD_RUNTIME_UDP_PEERS_ENV, egress.udp_relay_peers.join(",")));
+    }
+    if let Some(digest) = runtime.runtime_image_digest() {
+        entries.push(("CODEWIRE_STANDARD_RUNTIME_IMAGE_DIGEST", digest.to_owned()));
     }
     entries
         .into_iter()
