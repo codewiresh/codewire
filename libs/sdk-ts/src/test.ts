@@ -360,6 +360,14 @@ async function runTests() {
       requireTestKey(context);
       return { status: "ok" };
     },
+    suspendEnvironment: (_request, context) => {
+      requireTestKey(context);
+      return { status: "suspended" };
+    },
+    resumeEnvironment: (_request, context) => {
+      requireTestKey(context);
+      return { status: "resumed" };
+    },
     setEnvironmentStartupScript: (request, context) => {
       requireTestKey(context);
       startupScripts.push(request.startupScript);

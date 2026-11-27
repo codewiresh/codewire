@@ -190,6 +190,30 @@ export class Environment implements EnvironmentData {
     }
   }
 
+  /** Pause a running standard environment's VM inside its Pod. */
+  async suspend(): Promise<void> {
+    try {
+      await this.clients.environments.suspendEnvironment({
+        orgId: this.orgId,
+        environmentId: this.id,
+      });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Wake a suspended standard environment's VM. */
+  async resume(): Promise<void> {
+    try {
+      await this.clients.environments.resumeEnvironment({
+        orgId: this.orgId,
+        environmentId: this.id,
+      });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
   /** Replace only source selection under the caller's exact concurrency fence. */
   async updateSources(
     request: UpdateEnvironmentSourcesRequest,

@@ -377,9 +377,13 @@ Target, not shipped (#5529). The contract is
 [`docs/dev/IDLE-STOP.md`](../dev/IDLE-STOP.md), "Suspend".
 
 - **Entry points:** `idle_suspend` in `codewire.yaml`, `cw create --idle-suspend`,
-  `cw update NAME --idle-suspend`; waking by `cw exec`, `cw shell`, `ssh`, a preview
-  visit, an agent request or the dashboard's terminal.
+  `cw update NAME --idle-suspend`, `cw suspend NAME`, `cw resume NAME`; waking by
+  `cw resume`, `cw exec`, `cw shell`, `ssh`, a preview visit, an agent request or
+  the dashboard's terminal.
 - **States to exercise:**
+  - `cw suspend NAME` on a running `standard` sandbox (even with `idle_suspend` off): pauses immediately and `cw ls` reads `suspended`; a repeat `cw suspend NAME` prints already suspended and exits 0 without waking it;
+  - `cw resume NAME` on a suspended `standard` sandbox: wakes immediately, keeps running processes, and `cw ls` reads `running`; a repeat `cw resume NAME` prints already running and exits 0;
+  - `cw suspend NAME` on a stopped or `commodity` sandbox, and `cw resume NAME` on a stopped sandbox: each refused with its reason;
   - `idle_suspend` off (the default): an idle sandbox never suspends;
   - on: it suspends after its timeout, and `cw ls` reads `suspended`;
   - set on a `commodity` sandbox: refused by name;
@@ -406,6 +410,7 @@ Target, not shipped (#5529). The contract is
   5. `cw update std-s --idle-suspend off`: it no longer suspends. On a `commodity` sandbox, `--idle-suspend 5m` is refused.
   6. Inside `std-s`, a process other than the daemon sends `suspend` on vsock port 7784. The operator reads a `paused` record in the Pod log, `cw ls` still reads `running`, and the next activity check (at most 30 seconds later) resumes it, leaving a `resumed` record.
   7. The operator compares the billing session's suspended seconds with the Pod log's `paused` and `resumed` records for the walk: they match to the second, and no gap is flagged.
+  8. With `idle_suspend` off, run `cw suspend std-s`, verify `cw ls` reads `suspended` and a second `cw suspend std-s` exits 0 ("already suspended") without waking the VM; run `cw resume std-s`, verify `cw ls` reads `running`, the `sleep` PID is unchanged, and a second `cw resume std-s` exits 0 ("already running"). Verify `cw suspend` on a `commodity` or stopped sandbox and `cw resume` on a stopped sandbox are each refused with a clear next step.
 - **Proof:** the state transitions in `cw ls` and the API, the wake times, the `sleep`'s PID unchanged across the pause, the clock difference, the operator's Pod reads (Ready, the same Pod UID, no restart), the billing record's suspended seconds taken from the supervisor's pause record, and #6367's four checks.
 
 ## `standard-systemd`: a `standard` sandbox on a `workspace-systemd` disk boots systemd as container PID 1

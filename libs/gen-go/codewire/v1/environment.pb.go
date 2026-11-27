@@ -3353,6 +3353,198 @@ func (x *StartEnvironmentResponse) GetCompletesWithLog() bool {
 	return false
 }
 
+type SuspendEnvironmentRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OrgId         string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	EnvironmentId string                 `protobuf:"bytes,2,opt,name=environment_id,json=environmentId,proto3" json:"environment_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SuspendEnvironmentRequest) Reset() {
+	*x = SuspendEnvironmentRequest{}
+	mi := &file_codewire_v1_environment_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SuspendEnvironmentRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendEnvironmentRequest) ProtoMessage() {}
+
+func (x *SuspendEnvironmentRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_codewire_v1_environment_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendEnvironmentRequest.ProtoReflect.Descriptor instead.
+func (*SuspendEnvironmentRequest) Descriptor() ([]byte, []int) {
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *SuspendEnvironmentRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *SuspendEnvironmentRequest) GetEnvironmentId() string {
+	if x != nil {
+		return x.EnvironmentId
+	}
+	return ""
+}
+
+type SuspendEnvironmentResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SuspendEnvironmentResponse) Reset() {
+	*x = SuspendEnvironmentResponse{}
+	mi := &file_codewire_v1_environment_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SuspendEnvironmentResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SuspendEnvironmentResponse) ProtoMessage() {}
+
+func (x *SuspendEnvironmentResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_codewire_v1_environment_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SuspendEnvironmentResponse.ProtoReflect.Descriptor instead.
+func (*SuspendEnvironmentResponse) Descriptor() ([]byte, []int) {
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *SuspendEnvironmentResponse) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+type ResumeEnvironmentRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OrgId         string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	EnvironmentId string                 `protobuf:"bytes,2,opt,name=environment_id,json=environmentId,proto3" json:"environment_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResumeEnvironmentRequest) Reset() {
+	*x = ResumeEnvironmentRequest{}
+	mi := &file_codewire_v1_environment_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResumeEnvironmentRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeEnvironmentRequest) ProtoMessage() {}
+
+func (x *ResumeEnvironmentRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_codewire_v1_environment_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeEnvironmentRequest.ProtoReflect.Descriptor instead.
+func (*ResumeEnvironmentRequest) Descriptor() ([]byte, []int) {
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *ResumeEnvironmentRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResumeEnvironmentRequest) GetEnvironmentId() string {
+	if x != nil {
+		return x.EnvironmentId
+	}
+	return ""
+}
+
+type ResumeEnvironmentResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        string                 `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResumeEnvironmentResponse) Reset() {
+	*x = ResumeEnvironmentResponse{}
+	mi := &file_codewire_v1_environment_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResumeEnvironmentResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResumeEnvironmentResponse) ProtoMessage() {}
+
+func (x *ResumeEnvironmentResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_codewire_v1_environment_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResumeEnvironmentResponse.ProtoReflect.Descriptor instead.
+func (*ResumeEnvironmentResponse) Descriptor() ([]byte, []int) {
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *ResumeEnvironmentResponse) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
 type ProtectEnvironmentRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	OrgId         string                 `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
@@ -3363,7 +3555,7 @@ type ProtectEnvironmentRequest struct {
 
 func (x *ProtectEnvironmentRequest) Reset() {
 	*x = ProtectEnvironmentRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[32]
+	mi := &file_codewire_v1_environment_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3375,7 +3567,7 @@ func (x *ProtectEnvironmentRequest) String() string {
 func (*ProtectEnvironmentRequest) ProtoMessage() {}
 
 func (x *ProtectEnvironmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[32]
+	mi := &file_codewire_v1_environment_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3388,7 +3580,7 @@ func (x *ProtectEnvironmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtectEnvironmentRequest.ProtoReflect.Descriptor instead.
 func (*ProtectEnvironmentRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{32}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ProtectEnvironmentRequest) GetOrgId() string {
@@ -3414,7 +3606,7 @@ type ProtectEnvironmentResponse struct {
 
 func (x *ProtectEnvironmentResponse) Reset() {
 	*x = ProtectEnvironmentResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[33]
+	mi := &file_codewire_v1_environment_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3426,7 +3618,7 @@ func (x *ProtectEnvironmentResponse) String() string {
 func (*ProtectEnvironmentResponse) ProtoMessage() {}
 
 func (x *ProtectEnvironmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[33]
+	mi := &file_codewire_v1_environment_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3439,7 +3631,7 @@ func (x *ProtectEnvironmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtectEnvironmentResponse.ProtoReflect.Descriptor instead.
 func (*ProtectEnvironmentResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{33}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ProtectEnvironmentResponse) GetStatus() string {
@@ -3459,7 +3651,7 @@ type UnprotectEnvironmentRequest struct {
 
 func (x *UnprotectEnvironmentRequest) Reset() {
 	*x = UnprotectEnvironmentRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[34]
+	mi := &file_codewire_v1_environment_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3471,7 +3663,7 @@ func (x *UnprotectEnvironmentRequest) String() string {
 func (*UnprotectEnvironmentRequest) ProtoMessage() {}
 
 func (x *UnprotectEnvironmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[34]
+	mi := &file_codewire_v1_environment_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3484,7 +3676,7 @@ func (x *UnprotectEnvironmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnprotectEnvironmentRequest.ProtoReflect.Descriptor instead.
 func (*UnprotectEnvironmentRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{34}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *UnprotectEnvironmentRequest) GetOrgId() string {
@@ -3510,7 +3702,7 @@ type UnprotectEnvironmentResponse struct {
 
 func (x *UnprotectEnvironmentResponse) Reset() {
 	*x = UnprotectEnvironmentResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[35]
+	mi := &file_codewire_v1_environment_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3522,7 +3714,7 @@ func (x *UnprotectEnvironmentResponse) String() string {
 func (*UnprotectEnvironmentResponse) ProtoMessage() {}
 
 func (x *UnprotectEnvironmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[35]
+	mi := &file_codewire_v1_environment_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3535,7 +3727,7 @@ func (x *UnprotectEnvironmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnprotectEnvironmentResponse.ProtoReflect.Descriptor instead.
 func (*UnprotectEnvironmentResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{35}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *UnprotectEnvironmentResponse) GetStatus() string {
@@ -3555,7 +3747,7 @@ type CancelEnvironmentDeletionRequest struct {
 
 func (x *CancelEnvironmentDeletionRequest) Reset() {
 	*x = CancelEnvironmentDeletionRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[36]
+	mi := &file_codewire_v1_environment_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3567,7 +3759,7 @@ func (x *CancelEnvironmentDeletionRequest) String() string {
 func (*CancelEnvironmentDeletionRequest) ProtoMessage() {}
 
 func (x *CancelEnvironmentDeletionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[36]
+	mi := &file_codewire_v1_environment_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3580,7 +3772,7 @@ func (x *CancelEnvironmentDeletionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelEnvironmentDeletionRequest.ProtoReflect.Descriptor instead.
 func (*CancelEnvironmentDeletionRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{36}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *CancelEnvironmentDeletionRequest) GetOrgId() string {
@@ -3606,7 +3798,7 @@ type CancelEnvironmentDeletionResponse struct {
 
 func (x *CancelEnvironmentDeletionResponse) Reset() {
 	*x = CancelEnvironmentDeletionResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[37]
+	mi := &file_codewire_v1_environment_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3618,7 +3810,7 @@ func (x *CancelEnvironmentDeletionResponse) String() string {
 func (*CancelEnvironmentDeletionResponse) ProtoMessage() {}
 
 func (x *CancelEnvironmentDeletionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[37]
+	mi := &file_codewire_v1_environment_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3631,7 +3823,7 @@ func (x *CancelEnvironmentDeletionResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use CancelEnvironmentDeletionResponse.ProtoReflect.Descriptor instead.
 func (*CancelEnvironmentDeletionResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{37}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *CancelEnvironmentDeletionResponse) GetStatus() string {
@@ -3652,7 +3844,7 @@ type ExtendEnvironmentTtlRequest struct {
 
 func (x *ExtendEnvironmentTtlRequest) Reset() {
 	*x = ExtendEnvironmentTtlRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[38]
+	mi := &file_codewire_v1_environment_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3664,7 +3856,7 @@ func (x *ExtendEnvironmentTtlRequest) String() string {
 func (*ExtendEnvironmentTtlRequest) ProtoMessage() {}
 
 func (x *ExtendEnvironmentTtlRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[38]
+	mi := &file_codewire_v1_environment_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3677,7 +3869,7 @@ func (x *ExtendEnvironmentTtlRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtendEnvironmentTtlRequest.ProtoReflect.Descriptor instead.
 func (*ExtendEnvironmentTtlRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{38}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *ExtendEnvironmentTtlRequest) GetOrgId() string {
@@ -3710,7 +3902,7 @@ type ExtendEnvironmentTtlResponse struct {
 
 func (x *ExtendEnvironmentTtlResponse) Reset() {
 	*x = ExtendEnvironmentTtlResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[39]
+	mi := &file_codewire_v1_environment_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3722,7 +3914,7 @@ func (x *ExtendEnvironmentTtlResponse) String() string {
 func (*ExtendEnvironmentTtlResponse) ProtoMessage() {}
 
 func (x *ExtendEnvironmentTtlResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[39]
+	mi := &file_codewire_v1_environment_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3735,7 +3927,7 @@ func (x *ExtendEnvironmentTtlResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExtendEnvironmentTtlResponse.ProtoReflect.Descriptor instead.
 func (*ExtendEnvironmentTtlResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{39}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ExtendEnvironmentTtlResponse) GetStatus() string {
@@ -3757,7 +3949,7 @@ type SetEnvironmentIdleStopRequest struct {
 
 func (x *SetEnvironmentIdleStopRequest) Reset() {
 	*x = SetEnvironmentIdleStopRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[40]
+	mi := &file_codewire_v1_environment_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3769,7 +3961,7 @@ func (x *SetEnvironmentIdleStopRequest) String() string {
 func (*SetEnvironmentIdleStopRequest) ProtoMessage() {}
 
 func (x *SetEnvironmentIdleStopRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[40]
+	mi := &file_codewire_v1_environment_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3782,7 +3974,7 @@ func (x *SetEnvironmentIdleStopRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEnvironmentIdleStopRequest.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentIdleStopRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{40}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *SetEnvironmentIdleStopRequest) GetOrgId() string {
@@ -3815,7 +4007,7 @@ type SetEnvironmentIdleStopResponse struct {
 
 func (x *SetEnvironmentIdleStopResponse) Reset() {
 	*x = SetEnvironmentIdleStopResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[41]
+	mi := &file_codewire_v1_environment_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3827,7 +4019,7 @@ func (x *SetEnvironmentIdleStopResponse) String() string {
 func (*SetEnvironmentIdleStopResponse) ProtoMessage() {}
 
 func (x *SetEnvironmentIdleStopResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[41]
+	mi := &file_codewire_v1_environment_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3840,7 +4032,7 @@ func (x *SetEnvironmentIdleStopResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEnvironmentIdleStopResponse.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentIdleStopResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{41}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *SetEnvironmentIdleStopResponse) GetStatus() string {
@@ -3862,7 +4054,7 @@ type SetEnvironmentIdleSuspendRequest struct {
 
 func (x *SetEnvironmentIdleSuspendRequest) Reset() {
 	*x = SetEnvironmentIdleSuspendRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[42]
+	mi := &file_codewire_v1_environment_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3874,7 +4066,7 @@ func (x *SetEnvironmentIdleSuspendRequest) String() string {
 func (*SetEnvironmentIdleSuspendRequest) ProtoMessage() {}
 
 func (x *SetEnvironmentIdleSuspendRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[42]
+	mi := &file_codewire_v1_environment_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3887,7 +4079,7 @@ func (x *SetEnvironmentIdleSuspendRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetEnvironmentIdleSuspendRequest.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentIdleSuspendRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{42}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *SetEnvironmentIdleSuspendRequest) GetOrgId() string {
@@ -3920,7 +4112,7 @@ type SetEnvironmentIdleSuspendResponse struct {
 
 func (x *SetEnvironmentIdleSuspendResponse) Reset() {
 	*x = SetEnvironmentIdleSuspendResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[43]
+	mi := &file_codewire_v1_environment_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3932,7 +4124,7 @@ func (x *SetEnvironmentIdleSuspendResponse) String() string {
 func (*SetEnvironmentIdleSuspendResponse) ProtoMessage() {}
 
 func (x *SetEnvironmentIdleSuspendResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[43]
+	mi := &file_codewire_v1_environment_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3945,7 +4137,7 @@ func (x *SetEnvironmentIdleSuspendResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use SetEnvironmentIdleSuspendResponse.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentIdleSuspendResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{43}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *SetEnvironmentIdleSuspendResponse) GetStatus() string {
@@ -3967,7 +4159,7 @@ type SetEnvironmentIdleHibernateRequest struct {
 
 func (x *SetEnvironmentIdleHibernateRequest) Reset() {
 	*x = SetEnvironmentIdleHibernateRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[44]
+	mi := &file_codewire_v1_environment_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3979,7 +4171,7 @@ func (x *SetEnvironmentIdleHibernateRequest) String() string {
 func (*SetEnvironmentIdleHibernateRequest) ProtoMessage() {}
 
 func (x *SetEnvironmentIdleHibernateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[44]
+	mi := &file_codewire_v1_environment_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3992,7 +4184,7 @@ func (x *SetEnvironmentIdleHibernateRequest) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use SetEnvironmentIdleHibernateRequest.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentIdleHibernateRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{44}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *SetEnvironmentIdleHibernateRequest) GetOrgId() string {
@@ -4025,7 +4217,7 @@ type SetEnvironmentIdleHibernateResponse struct {
 
 func (x *SetEnvironmentIdleHibernateResponse) Reset() {
 	*x = SetEnvironmentIdleHibernateResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[45]
+	mi := &file_codewire_v1_environment_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4037,7 +4229,7 @@ func (x *SetEnvironmentIdleHibernateResponse) String() string {
 func (*SetEnvironmentIdleHibernateResponse) ProtoMessage() {}
 
 func (x *SetEnvironmentIdleHibernateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[45]
+	mi := &file_codewire_v1_environment_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4050,7 +4242,7 @@ func (x *SetEnvironmentIdleHibernateResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use SetEnvironmentIdleHibernateResponse.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentIdleHibernateResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{45}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *SetEnvironmentIdleHibernateResponse) GetStatus() string {
@@ -4070,7 +4262,7 @@ type HibernateEnvironmentRequest struct {
 
 func (x *HibernateEnvironmentRequest) Reset() {
 	*x = HibernateEnvironmentRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[46]
+	mi := &file_codewire_v1_environment_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4082,7 +4274,7 @@ func (x *HibernateEnvironmentRequest) String() string {
 func (*HibernateEnvironmentRequest) ProtoMessage() {}
 
 func (x *HibernateEnvironmentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[46]
+	mi := &file_codewire_v1_environment_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4095,7 +4287,7 @@ func (x *HibernateEnvironmentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HibernateEnvironmentRequest.ProtoReflect.Descriptor instead.
 func (*HibernateEnvironmentRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{46}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *HibernateEnvironmentRequest) GetOrgId() string {
@@ -4121,7 +4313,7 @@ type HibernateEnvironmentResponse struct {
 
 func (x *HibernateEnvironmentResponse) Reset() {
 	*x = HibernateEnvironmentResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[47]
+	mi := &file_codewire_v1_environment_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4133,7 +4325,7 @@ func (x *HibernateEnvironmentResponse) String() string {
 func (*HibernateEnvironmentResponse) ProtoMessage() {}
 
 func (x *HibernateEnvironmentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[47]
+	mi := &file_codewire_v1_environment_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4146,7 +4338,7 @@ func (x *HibernateEnvironmentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HibernateEnvironmentResponse.ProtoReflect.Descriptor instead.
 func (*HibernateEnvironmentResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{47}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *HibernateEnvironmentResponse) GetStatus() string {
@@ -4169,7 +4361,7 @@ type SetEnvironmentStartupScriptRequest struct {
 
 func (x *SetEnvironmentStartupScriptRequest) Reset() {
 	*x = SetEnvironmentStartupScriptRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[48]
+	mi := &file_codewire_v1_environment_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4181,7 +4373,7 @@ func (x *SetEnvironmentStartupScriptRequest) String() string {
 func (*SetEnvironmentStartupScriptRequest) ProtoMessage() {}
 
 func (x *SetEnvironmentStartupScriptRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[48]
+	mi := &file_codewire_v1_environment_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4194,7 +4386,7 @@ func (x *SetEnvironmentStartupScriptRequest) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use SetEnvironmentStartupScriptRequest.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentStartupScriptRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{48}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *SetEnvironmentStartupScriptRequest) GetOrgId() string {
@@ -4230,7 +4422,7 @@ type SetEnvironmentStartupScriptResponse struct {
 
 func (x *SetEnvironmentStartupScriptResponse) Reset() {
 	*x = SetEnvironmentStartupScriptResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[49]
+	mi := &file_codewire_v1_environment_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4242,7 +4434,7 @@ func (x *SetEnvironmentStartupScriptResponse) String() string {
 func (*SetEnvironmentStartupScriptResponse) ProtoMessage() {}
 
 func (x *SetEnvironmentStartupScriptResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[49]
+	mi := &file_codewire_v1_environment_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4255,7 +4447,7 @@ func (x *SetEnvironmentStartupScriptResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use SetEnvironmentStartupScriptResponse.ProtoReflect.Descriptor instead.
 func (*SetEnvironmentStartupScriptResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{49}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *SetEnvironmentStartupScriptResponse) GetChanged() bool {
@@ -4286,7 +4478,7 @@ type AccessGrant struct {
 
 func (x *AccessGrant) Reset() {
 	*x = AccessGrant{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[50]
+	mi := &file_codewire_v1_environment_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4298,7 +4490,7 @@ func (x *AccessGrant) String() string {
 func (*AccessGrant) ProtoMessage() {}
 
 func (x *AccessGrant) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[50]
+	mi := &file_codewire_v1_environment_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4311,7 +4503,7 @@ func (x *AccessGrant) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccessGrant.ProtoReflect.Descriptor instead.
 func (*AccessGrant) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{50}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *AccessGrant) GetId() string {
@@ -4368,7 +4560,7 @@ type ListEnvironmentAccessRequest struct {
 
 func (x *ListEnvironmentAccessRequest) Reset() {
 	*x = ListEnvironmentAccessRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[51]
+	mi := &file_codewire_v1_environment_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4380,7 +4572,7 @@ func (x *ListEnvironmentAccessRequest) String() string {
 func (*ListEnvironmentAccessRequest) ProtoMessage() {}
 
 func (x *ListEnvironmentAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[51]
+	mi := &file_codewire_v1_environment_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4393,7 +4585,7 @@ func (x *ListEnvironmentAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEnvironmentAccessRequest.ProtoReflect.Descriptor instead.
 func (*ListEnvironmentAccessRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{51}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ListEnvironmentAccessRequest) GetOrgId() string {
@@ -4434,7 +4626,7 @@ type ListEnvironmentAccessResponse struct {
 
 func (x *ListEnvironmentAccessResponse) Reset() {
 	*x = ListEnvironmentAccessResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[52]
+	mi := &file_codewire_v1_environment_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4446,7 +4638,7 @@ func (x *ListEnvironmentAccessResponse) String() string {
 func (*ListEnvironmentAccessResponse) ProtoMessage() {}
 
 func (x *ListEnvironmentAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[52]
+	mi := &file_codewire_v1_environment_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4459,7 +4651,7 @@ func (x *ListEnvironmentAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEnvironmentAccessResponse.ProtoReflect.Descriptor instead.
 func (*ListEnvironmentAccessResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{52}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ListEnvironmentAccessResponse) GetAccessGrants() []*AccessGrant {
@@ -4488,7 +4680,7 @@ type GrantEnvironmentAccessRequest struct {
 
 func (x *GrantEnvironmentAccessRequest) Reset() {
 	*x = GrantEnvironmentAccessRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[53]
+	mi := &file_codewire_v1_environment_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4500,7 +4692,7 @@ func (x *GrantEnvironmentAccessRequest) String() string {
 func (*GrantEnvironmentAccessRequest) ProtoMessage() {}
 
 func (x *GrantEnvironmentAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[53]
+	mi := &file_codewire_v1_environment_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4513,7 +4705,7 @@ func (x *GrantEnvironmentAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantEnvironmentAccessRequest.ProtoReflect.Descriptor instead.
 func (*GrantEnvironmentAccessRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{53}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *GrantEnvironmentAccessRequest) GetOrgId() string {
@@ -4553,7 +4745,7 @@ type GrantEnvironmentAccessResponse struct {
 
 func (x *GrantEnvironmentAccessResponse) Reset() {
 	*x = GrantEnvironmentAccessResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[54]
+	mi := &file_codewire_v1_environment_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4565,7 +4757,7 @@ func (x *GrantEnvironmentAccessResponse) String() string {
 func (*GrantEnvironmentAccessResponse) ProtoMessage() {}
 
 func (x *GrantEnvironmentAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[54]
+	mi := &file_codewire_v1_environment_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4578,7 +4770,7 @@ func (x *GrantEnvironmentAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantEnvironmentAccessResponse.ProtoReflect.Descriptor instead.
 func (*GrantEnvironmentAccessResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{54}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *GrantEnvironmentAccessResponse) GetAccessGrant() *AccessGrant {
@@ -4599,7 +4791,7 @@ type RevokeEnvironmentAccessRequest struct {
 
 func (x *RevokeEnvironmentAccessRequest) Reset() {
 	*x = RevokeEnvironmentAccessRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[55]
+	mi := &file_codewire_v1_environment_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4611,7 +4803,7 @@ func (x *RevokeEnvironmentAccessRequest) String() string {
 func (*RevokeEnvironmentAccessRequest) ProtoMessage() {}
 
 func (x *RevokeEnvironmentAccessRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[55]
+	mi := &file_codewire_v1_environment_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4624,7 +4816,7 @@ func (x *RevokeEnvironmentAccessRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeEnvironmentAccessRequest.ProtoReflect.Descriptor instead.
 func (*RevokeEnvironmentAccessRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{55}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *RevokeEnvironmentAccessRequest) GetOrgId() string {
@@ -4656,7 +4848,7 @@ type RevokeEnvironmentAccessResponse struct {
 
 func (x *RevokeEnvironmentAccessResponse) Reset() {
 	*x = RevokeEnvironmentAccessResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[56]
+	mi := &file_codewire_v1_environment_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4668,7 +4860,7 @@ func (x *RevokeEnvironmentAccessResponse) String() string {
 func (*RevokeEnvironmentAccessResponse) ProtoMessage() {}
 
 func (x *RevokeEnvironmentAccessResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[56]
+	mi := &file_codewire_v1_environment_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4681,7 +4873,7 @@ func (x *RevokeEnvironmentAccessResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeEnvironmentAccessResponse.ProtoReflect.Descriptor instead.
 func (*RevokeEnvironmentAccessResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{56}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{60}
 }
 
 type GetEnvironmentTrustReportRequest struct {
@@ -4694,7 +4886,7 @@ type GetEnvironmentTrustReportRequest struct {
 
 func (x *GetEnvironmentTrustReportRequest) Reset() {
 	*x = GetEnvironmentTrustReportRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[57]
+	mi := &file_codewire_v1_environment_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4706,7 +4898,7 @@ func (x *GetEnvironmentTrustReportRequest) String() string {
 func (*GetEnvironmentTrustReportRequest) ProtoMessage() {}
 
 func (x *GetEnvironmentTrustReportRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[57]
+	mi := &file_codewire_v1_environment_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4719,7 +4911,7 @@ func (x *GetEnvironmentTrustReportRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEnvironmentTrustReportRequest.ProtoReflect.Descriptor instead.
 func (*GetEnvironmentTrustReportRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{57}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *GetEnvironmentTrustReportRequest) GetOrgId() string {
@@ -4745,7 +4937,7 @@ type GetEnvironmentTrustReportResponse struct {
 
 func (x *GetEnvironmentTrustReportResponse) Reset() {
 	*x = GetEnvironmentTrustReportResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[58]
+	mi := &file_codewire_v1_environment_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4757,7 +4949,7 @@ func (x *GetEnvironmentTrustReportResponse) String() string {
 func (*GetEnvironmentTrustReportResponse) ProtoMessage() {}
 
 func (x *GetEnvironmentTrustReportResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[58]
+	mi := &file_codewire_v1_environment_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4770,7 +4962,7 @@ func (x *GetEnvironmentTrustReportResponse) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use GetEnvironmentTrustReportResponse.ProtoReflect.Descriptor instead.
 func (*GetEnvironmentTrustReportResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{58}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *GetEnvironmentTrustReportResponse) GetTrustReport() *EnvironmentTrustReport {
@@ -4796,7 +4988,7 @@ type EnvironmentTrustReport struct {
 
 func (x *EnvironmentTrustReport) Reset() {
 	*x = EnvironmentTrustReport{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[59]
+	mi := &file_codewire_v1_environment_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4808,7 +5000,7 @@ func (x *EnvironmentTrustReport) String() string {
 func (*EnvironmentTrustReport) ProtoMessage() {}
 
 func (x *EnvironmentTrustReport) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[59]
+	mi := &file_codewire_v1_environment_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4821,7 +5013,7 @@ func (x *EnvironmentTrustReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvironmentTrustReport.ProtoReflect.Descriptor instead.
 func (*EnvironmentTrustReport) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{59}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *EnvironmentTrustReport) GetEnvironment() *TrustReportEnvironment {
@@ -4893,7 +5085,7 @@ type TrustReportEnvironment struct {
 
 func (x *TrustReportEnvironment) Reset() {
 	*x = TrustReportEnvironment{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[60]
+	mi := &file_codewire_v1_environment_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4905,7 +5097,7 @@ func (x *TrustReportEnvironment) String() string {
 func (*TrustReportEnvironment) ProtoMessage() {}
 
 func (x *TrustReportEnvironment) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[60]
+	mi := &file_codewire_v1_environment_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4918,7 +5110,7 @@ func (x *TrustReportEnvironment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportEnvironment.ProtoReflect.Descriptor instead.
 func (*TrustReportEnvironment) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{60}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *TrustReportEnvironment) GetId() string {
@@ -4968,7 +5160,7 @@ type TrustReportRuntime struct {
 
 func (x *TrustReportRuntime) Reset() {
 	*x = TrustReportRuntime{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[61]
+	mi := &file_codewire_v1_environment_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4980,7 +5172,7 @@ func (x *TrustReportRuntime) String() string {
 func (*TrustReportRuntime) ProtoMessage() {}
 
 func (x *TrustReportRuntime) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[61]
+	mi := &file_codewire_v1_environment_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4993,7 +5185,7 @@ func (x *TrustReportRuntime) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportRuntime.ProtoReflect.Descriptor instead.
 func (*TrustReportRuntime) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{61}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *TrustReportRuntime) GetProfile() string {
@@ -5038,7 +5230,7 @@ type TrustReportPlacement struct {
 
 func (x *TrustReportPlacement) Reset() {
 	*x = TrustReportPlacement{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[62]
+	mi := &file_codewire_v1_environment_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5050,7 +5242,7 @@ func (x *TrustReportPlacement) String() string {
 func (*TrustReportPlacement) ProtoMessage() {}
 
 func (x *TrustReportPlacement) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[62]
+	mi := &file_codewire_v1_environment_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5063,7 +5255,7 @@ func (x *TrustReportPlacement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportPlacement.ProtoReflect.Descriptor instead.
 func (*TrustReportPlacement) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{62}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *TrustReportPlacement) GetNamespace() string {
@@ -5122,7 +5314,7 @@ type TrustReportImages struct {
 
 func (x *TrustReportImages) Reset() {
 	*x = TrustReportImages{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[63]
+	mi := &file_codewire_v1_environment_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5134,7 +5326,7 @@ func (x *TrustReportImages) String() string {
 func (*TrustReportImages) ProtoMessage() {}
 
 func (x *TrustReportImages) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[63]
+	mi := &file_codewire_v1_environment_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5147,7 +5339,7 @@ func (x *TrustReportImages) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportImages.ProtoReflect.Descriptor instead.
 func (*TrustReportImages) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{63}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *TrustReportImages) GetWorkspaceImage() string {
@@ -5207,7 +5399,7 @@ type TrustReportProvenance struct {
 
 func (x *TrustReportProvenance) Reset() {
 	*x = TrustReportProvenance{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[64]
+	mi := &file_codewire_v1_environment_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5219,7 +5411,7 @@ func (x *TrustReportProvenance) String() string {
 func (*TrustReportProvenance) ProtoMessage() {}
 
 func (x *TrustReportProvenance) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[64]
+	mi := &file_codewire_v1_environment_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5232,7 +5424,7 @@ func (x *TrustReportProvenance) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportProvenance.ProtoReflect.Descriptor instead.
 func (*TrustReportProvenance) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{64}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *TrustReportProvenance) GetStatus() string {
@@ -5297,7 +5489,7 @@ type TrustReportAttestation struct {
 
 func (x *TrustReportAttestation) Reset() {
 	*x = TrustReportAttestation{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[65]
+	mi := &file_codewire_v1_environment_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5309,7 +5501,7 @@ func (x *TrustReportAttestation) String() string {
 func (*TrustReportAttestation) ProtoMessage() {}
 
 func (x *TrustReportAttestation) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[65]
+	mi := &file_codewire_v1_environment_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5322,7 +5514,7 @@ func (x *TrustReportAttestation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportAttestation.ProtoReflect.Descriptor instead.
 func (*TrustReportAttestation) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{65}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *TrustReportAttestation) GetStatus() string {
@@ -5373,7 +5565,7 @@ type TrustReportTrustee struct {
 
 func (x *TrustReportTrustee) Reset() {
 	*x = TrustReportTrustee{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[66]
+	mi := &file_codewire_v1_environment_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5385,7 +5577,7 @@ func (x *TrustReportTrustee) String() string {
 func (*TrustReportTrustee) ProtoMessage() {}
 
 func (x *TrustReportTrustee) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[66]
+	mi := &file_codewire_v1_environment_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5398,7 +5590,7 @@ func (x *TrustReportTrustee) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportTrustee.ProtoReflect.Descriptor instead.
 func (*TrustReportTrustee) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{66}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *TrustReportTrustee) GetStatus() string {
@@ -5447,7 +5639,7 @@ type TrustReportSummary struct {
 
 func (x *TrustReportSummary) Reset() {
 	*x = TrustReportSummary{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[67]
+	mi := &file_codewire_v1_environment_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5459,7 +5651,7 @@ func (x *TrustReportSummary) String() string {
 func (*TrustReportSummary) ProtoMessage() {}
 
 func (x *TrustReportSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[67]
+	mi := &file_codewire_v1_environment_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5472,7 +5664,7 @@ func (x *TrustReportSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrustReportSummary.ProtoReflect.Descriptor instead.
 func (*TrustReportSummary) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{67}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *TrustReportSummary) GetTrustLevel() string {
@@ -5508,7 +5700,7 @@ type WatchEnvironmentCreateRequest struct {
 
 func (x *WatchEnvironmentCreateRequest) Reset() {
 	*x = WatchEnvironmentCreateRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[68]
+	mi := &file_codewire_v1_environment_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5520,7 +5712,7 @@ func (x *WatchEnvironmentCreateRequest) String() string {
 func (*WatchEnvironmentCreateRequest) ProtoMessage() {}
 
 func (x *WatchEnvironmentCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[68]
+	mi := &file_codewire_v1_environment_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5533,7 +5725,7 @@ func (x *WatchEnvironmentCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEnvironmentCreateRequest.ProtoReflect.Descriptor instead.
 func (*WatchEnvironmentCreateRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{68}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *WatchEnvironmentCreateRequest) GetOrgId() string {
@@ -5563,7 +5755,7 @@ type WatchEnvironmentCreateResponse struct {
 
 func (x *WatchEnvironmentCreateResponse) Reset() {
 	*x = WatchEnvironmentCreateResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[69]
+	mi := &file_codewire_v1_environment_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5575,7 +5767,7 @@ func (x *WatchEnvironmentCreateResponse) String() string {
 func (*WatchEnvironmentCreateResponse) ProtoMessage() {}
 
 func (x *WatchEnvironmentCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[69]
+	mi := &file_codewire_v1_environment_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5588,7 +5780,7 @@ func (x *WatchEnvironmentCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WatchEnvironmentCreateResponse.ProtoReflect.Descriptor instead.
 func (*WatchEnvironmentCreateResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{69}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *WatchEnvironmentCreateResponse) GetEvent() isWatchEnvironmentCreateResponse_Event {
@@ -5644,7 +5836,7 @@ type PrepareProgress struct {
 
 func (x *PrepareProgress) Reset() {
 	*x = PrepareProgress{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[70]
+	mi := &file_codewire_v1_environment_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5656,7 +5848,7 @@ func (x *PrepareProgress) String() string {
 func (*PrepareProgress) ProtoMessage() {}
 
 func (x *PrepareProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[70]
+	mi := &file_codewire_v1_environment_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5669,7 +5861,7 @@ func (x *PrepareProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareProgress.ProtoReflect.Descriptor instead.
 func (*PrepareProgress) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{70}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *PrepareProgress) GetPhase() string {
@@ -5711,7 +5903,7 @@ type PrepareComplete struct {
 
 func (x *PrepareComplete) Reset() {
 	*x = PrepareComplete{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[71]
+	mi := &file_codewire_v1_environment_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5723,7 +5915,7 @@ func (x *PrepareComplete) String() string {
 func (*PrepareComplete) ProtoMessage() {}
 
 func (x *PrepareComplete) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[71]
+	mi := &file_codewire_v1_environment_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5736,7 +5928,7 @@ func (x *PrepareComplete) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrepareComplete.ProtoReflect.Descriptor instead.
 func (*PrepareComplete) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{71}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *PrepareComplete) GetDraft() *CreateEnvironmentRequest {
@@ -5774,7 +5966,7 @@ type RepoConfig struct {
 
 func (x *RepoConfig) Reset() {
 	*x = RepoConfig{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[72]
+	mi := &file_codewire_v1_environment_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5786,7 +5978,7 @@ func (x *RepoConfig) String() string {
 func (*RepoConfig) ProtoMessage() {}
 
 func (x *RepoConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[72]
+	mi := &file_codewire_v1_environment_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5799,7 +5991,7 @@ func (x *RepoConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoConfig.ProtoReflect.Descriptor instead.
 func (*RepoConfig) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{72}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *RepoConfig) GetId() string {
@@ -5858,7 +6050,7 @@ type StreamLogsRequest struct {
 
 func (x *StreamLogsRequest) Reset() {
 	*x = StreamLogsRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[73]
+	mi := &file_codewire_v1_environment_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5870,7 +6062,7 @@ func (x *StreamLogsRequest) String() string {
 func (*StreamLogsRequest) ProtoMessage() {}
 
 func (x *StreamLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[73]
+	mi := &file_codewire_v1_environment_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5883,7 +6075,7 @@ func (x *StreamLogsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamLogsRequest.ProtoReflect.Descriptor instead.
 func (*StreamLogsRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{73}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *StreamLogsRequest) GetOrgId() string {
@@ -5927,7 +6119,7 @@ type StreamLogsResponse struct {
 
 func (x *StreamLogsResponse) Reset() {
 	*x = StreamLogsResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[74]
+	mi := &file_codewire_v1_environment_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5939,7 +6131,7 @@ func (x *StreamLogsResponse) String() string {
 func (*StreamLogsResponse) ProtoMessage() {}
 
 func (x *StreamLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[74]
+	mi := &file_codewire_v1_environment_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5952,7 +6144,7 @@ func (x *StreamLogsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamLogsResponse.ProtoReflect.Descriptor instead.
 func (*StreamLogsResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{74}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *StreamLogsResponse) GetEvent() isStreamLogsResponse_Event {
@@ -6005,7 +6197,7 @@ type StreamHeartbeat struct {
 
 func (x *StreamHeartbeat) Reset() {
 	*x = StreamHeartbeat{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[75]
+	mi := &file_codewire_v1_environment_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6017,7 +6209,7 @@ func (x *StreamHeartbeat) String() string {
 func (*StreamHeartbeat) ProtoMessage() {}
 
 func (x *StreamHeartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[75]
+	mi := &file_codewire_v1_environment_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6030,7 +6222,7 @@ func (x *StreamHeartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StreamHeartbeat.ProtoReflect.Descriptor instead.
 func (*StreamHeartbeat) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{75}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *StreamHeartbeat) GetSentAt() *timestamppb.Timestamp {
@@ -6055,7 +6247,7 @@ type EnvironmentLog struct {
 
 func (x *EnvironmentLog) Reset() {
 	*x = EnvironmentLog{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[76]
+	mi := &file_codewire_v1_environment_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6067,7 +6259,7 @@ func (x *EnvironmentLog) String() string {
 func (*EnvironmentLog) ProtoMessage() {}
 
 func (x *EnvironmentLog) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[76]
+	mi := &file_codewire_v1_environment_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6080,7 +6272,7 @@ func (x *EnvironmentLog) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvironmentLog.ProtoReflect.Descriptor instead.
 func (*EnvironmentLog) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{76}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *EnvironmentLog) GetId() string {
@@ -6143,7 +6335,7 @@ type EnvironmentDaemonDiagnostic struct {
 
 func (x *EnvironmentDaemonDiagnostic) Reset() {
 	*x = EnvironmentDaemonDiagnostic{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[77]
+	mi := &file_codewire_v1_environment_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6155,7 +6347,7 @@ func (x *EnvironmentDaemonDiagnostic) String() string {
 func (*EnvironmentDaemonDiagnostic) ProtoMessage() {}
 
 func (x *EnvironmentDaemonDiagnostic) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[77]
+	mi := &file_codewire_v1_environment_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6168,7 +6360,7 @@ func (x *EnvironmentDaemonDiagnostic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvironmentDaemonDiagnostic.ProtoReflect.Descriptor instead.
 func (*EnvironmentDaemonDiagnostic) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{77}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *EnvironmentDaemonDiagnostic) GetName() string {
@@ -6208,7 +6400,7 @@ type EnvironmentDaemonStatus struct {
 
 func (x *EnvironmentDaemonStatus) Reset() {
 	*x = EnvironmentDaemonStatus{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[78]
+	mi := &file_codewire_v1_environment_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6220,7 +6412,7 @@ func (x *EnvironmentDaemonStatus) String() string {
 func (*EnvironmentDaemonStatus) ProtoMessage() {}
 
 func (x *EnvironmentDaemonStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[78]
+	mi := &file_codewire_v1_environment_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6233,7 +6425,7 @@ func (x *EnvironmentDaemonStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnvironmentDaemonStatus.ProtoReflect.Descriptor instead.
 func (*EnvironmentDaemonStatus) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{78}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *EnvironmentDaemonStatus) GetState() EnvironmentDaemonState {
@@ -6302,7 +6494,7 @@ type GetEnvironmentDaemonStatusRequest struct {
 
 func (x *GetEnvironmentDaemonStatusRequest) Reset() {
 	*x = GetEnvironmentDaemonStatusRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[79]
+	mi := &file_codewire_v1_environment_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6314,7 +6506,7 @@ func (x *GetEnvironmentDaemonStatusRequest) String() string {
 func (*GetEnvironmentDaemonStatusRequest) ProtoMessage() {}
 
 func (x *GetEnvironmentDaemonStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[79]
+	mi := &file_codewire_v1_environment_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6327,7 +6519,7 @@ func (x *GetEnvironmentDaemonStatusRequest) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use GetEnvironmentDaemonStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetEnvironmentDaemonStatusRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{79}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *GetEnvironmentDaemonStatusRequest) GetOrgId() string {
@@ -6353,7 +6545,7 @@ type GetEnvironmentDaemonStatusResponse struct {
 
 func (x *GetEnvironmentDaemonStatusResponse) Reset() {
 	*x = GetEnvironmentDaemonStatusResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[80]
+	mi := &file_codewire_v1_environment_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6365,7 +6557,7 @@ func (x *GetEnvironmentDaemonStatusResponse) String() string {
 func (*GetEnvironmentDaemonStatusResponse) ProtoMessage() {}
 
 func (x *GetEnvironmentDaemonStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[80]
+	mi := &file_codewire_v1_environment_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6378,7 +6570,7 @@ func (x *GetEnvironmentDaemonStatusResponse) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use GetEnvironmentDaemonStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetEnvironmentDaemonStatusResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{80}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *GetEnvironmentDaemonStatusResponse) GetStatus() *EnvironmentDaemonStatus {
@@ -6398,7 +6590,7 @@ type StreamEnvironmentDaemonLogsRequest struct {
 
 func (x *StreamEnvironmentDaemonLogsRequest) Reset() {
 	*x = StreamEnvironmentDaemonLogsRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[81]
+	mi := &file_codewire_v1_environment_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6410,7 +6602,7 @@ func (x *StreamEnvironmentDaemonLogsRequest) String() string {
 func (*StreamEnvironmentDaemonLogsRequest) ProtoMessage() {}
 
 func (x *StreamEnvironmentDaemonLogsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[81]
+	mi := &file_codewire_v1_environment_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6423,7 +6615,7 @@ func (x *StreamEnvironmentDaemonLogsRequest) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use StreamEnvironmentDaemonLogsRequest.ProtoReflect.Descriptor instead.
 func (*StreamEnvironmentDaemonLogsRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{81}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *StreamEnvironmentDaemonLogsRequest) GetOrgId() string {
@@ -6449,7 +6641,7 @@ type StreamEnvironmentDaemonLogsResponse struct {
 
 func (x *StreamEnvironmentDaemonLogsResponse) Reset() {
 	*x = StreamEnvironmentDaemonLogsResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[82]
+	mi := &file_codewire_v1_environment_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6461,7 +6653,7 @@ func (x *StreamEnvironmentDaemonLogsResponse) String() string {
 func (*StreamEnvironmentDaemonLogsResponse) ProtoMessage() {}
 
 func (x *StreamEnvironmentDaemonLogsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[82]
+	mi := &file_codewire_v1_environment_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6474,7 +6666,7 @@ func (x *StreamEnvironmentDaemonLogsResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use StreamEnvironmentDaemonLogsResponse.ProtoReflect.Descriptor instead.
 func (*StreamEnvironmentDaemonLogsResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{82}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *StreamEnvironmentDaemonLogsResponse) GetData() []byte {
@@ -6494,7 +6686,7 @@ type RepairEnvironmentDaemonRequest struct {
 
 func (x *RepairEnvironmentDaemonRequest) Reset() {
 	*x = RepairEnvironmentDaemonRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[83]
+	mi := &file_codewire_v1_environment_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6506,7 +6698,7 @@ func (x *RepairEnvironmentDaemonRequest) String() string {
 func (*RepairEnvironmentDaemonRequest) ProtoMessage() {}
 
 func (x *RepairEnvironmentDaemonRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[83]
+	mi := &file_codewire_v1_environment_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6519,7 +6711,7 @@ func (x *RepairEnvironmentDaemonRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepairEnvironmentDaemonRequest.ProtoReflect.Descriptor instead.
 func (*RepairEnvironmentDaemonRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{83}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *RepairEnvironmentDaemonRequest) GetOrgId() string {
@@ -6546,7 +6738,7 @@ type RepairEnvironmentDaemonResponse struct {
 
 func (x *RepairEnvironmentDaemonResponse) Reset() {
 	*x = RepairEnvironmentDaemonResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[84]
+	mi := &file_codewire_v1_environment_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6558,7 +6750,7 @@ func (x *RepairEnvironmentDaemonResponse) String() string {
 func (*RepairEnvironmentDaemonResponse) ProtoMessage() {}
 
 func (x *RepairEnvironmentDaemonResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[84]
+	mi := &file_codewire_v1_environment_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6571,7 +6763,7 @@ func (x *RepairEnvironmentDaemonResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepairEnvironmentDaemonResponse.ProtoReflect.Descriptor instead.
 func (*RepairEnvironmentDaemonResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{84}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *RepairEnvironmentDaemonResponse) GetStatus() *EnvironmentDaemonStatus {
@@ -6602,7 +6794,7 @@ type RetryEnvironmentSetupRequest struct {
 
 func (x *RetryEnvironmentSetupRequest) Reset() {
 	*x = RetryEnvironmentSetupRequest{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[85]
+	mi := &file_codewire_v1_environment_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6614,7 +6806,7 @@ func (x *RetryEnvironmentSetupRequest) String() string {
 func (*RetryEnvironmentSetupRequest) ProtoMessage() {}
 
 func (x *RetryEnvironmentSetupRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[85]
+	mi := &file_codewire_v1_environment_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6627,7 +6819,7 @@ func (x *RetryEnvironmentSetupRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryEnvironmentSetupRequest.ProtoReflect.Descriptor instead.
 func (*RetryEnvironmentSetupRequest) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{85}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *RetryEnvironmentSetupRequest) GetOrgId() string {
@@ -6659,7 +6851,7 @@ type RetryEnvironmentSetupResponse struct {
 
 func (x *RetryEnvironmentSetupResponse) Reset() {
 	*x = RetryEnvironmentSetupResponse{}
-	mi := &file_codewire_v1_environment_proto_msgTypes[86]
+	mi := &file_codewire_v1_environment_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6671,7 +6863,7 @@ func (x *RetryEnvironmentSetupResponse) String() string {
 func (*RetryEnvironmentSetupResponse) ProtoMessage() {}
 
 func (x *RetryEnvironmentSetupResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_codewire_v1_environment_proto_msgTypes[86]
+	mi := &file_codewire_v1_environment_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6684,7 +6876,7 @@ func (x *RetryEnvironmentSetupResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RetryEnvironmentSetupResponse.ProtoReflect.Descriptor instead.
 func (*RetryEnvironmentSetupResponse) Descriptor() ([]byte, []int) {
-	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{86}
+	return file_codewire_v1_environment_proto_rawDescGZIP(), []int{90}
 }
 
 var File_codewire_v1_environment_proto protoreflect.FileDescriptor
@@ -7306,6 +7498,24 @@ var file_codewire_v1_environment_proto_rawDesc = string([]byte{
 	0x12, 0x2c, 0x0a, 0x12, 0x63, 0x6f, 0x6d, 0x70, 0x6c, 0x65, 0x74, 0x65, 0x73, 0x5f, 0x77, 0x69,
 	0x74, 0x68, 0x5f, 0x6c, 0x6f, 0x67, 0x18, 0x03, 0x20, 0x01, 0x28, 0x08, 0x52, 0x10, 0x63, 0x6f,
 	0x6d, 0x70, 0x6c, 0x65, 0x74, 0x65, 0x73, 0x57, 0x69, 0x74, 0x68, 0x4c, 0x6f, 0x67, 0x22, 0x59,
+	0x0a, 0x19, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x15, 0x0a, 0x06, 0x6f,
+	0x72, 0x67, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6f, 0x72, 0x67,
+	0x49, 0x64, 0x12, 0x25, 0x0a, 0x0e, 0x65, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
+	0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d, 0x65, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x22, 0x34, 0x0a, 0x1a, 0x53, 0x75, 0x73,
+	0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x16, 0x0a, 0x06, 0x73, 0x74, 0x61, 0x74, 0x75,
+	0x73, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x22,
+	0x58, 0x0a, 0x18, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x15, 0x0a, 0x06, 0x6f,
+	0x72, 0x67, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6f, 0x72, 0x67,
+	0x49, 0x64, 0x12, 0x25, 0x0a, 0x0e, 0x65, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
+	0x74, 0x5f, 0x69, 0x64, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0d, 0x65, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x22, 0x33, 0x0a, 0x19, 0x52, 0x65, 0x73,
+	0x75, 0x6d, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x16, 0x0a, 0x06, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73,
+	0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73, 0x22, 0x59,
 	0x0a, 0x19, 0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
 	0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x12, 0x15, 0x0a, 0x06, 0x6f,
 	0x72, 0x67, 0x5f, 0x69, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x05, 0x6f, 0x72, 0x67,
@@ -7984,7 +8194,7 @@ var file_codewire_v1_environment_proto_rawDesc = string([]byte{
 	0x5f, 0x55, 0x4e, 0x48, 0x45, 0x41, 0x4c, 0x54, 0x48, 0x59, 0x10, 0x04, 0x12, 0x2d, 0x0a, 0x29,
 	0x45, 0x4e, 0x56, 0x49, 0x52, 0x4f, 0x4e, 0x4d, 0x45, 0x4e, 0x54, 0x5f, 0x44, 0x41, 0x45, 0x4d,
 	0x4f, 0x4e, 0x5f, 0x53, 0x54, 0x41, 0x54, 0x45, 0x5f, 0x55, 0x50, 0x47, 0x52, 0x41, 0x44, 0x45,
-	0x5f, 0x52, 0x45, 0x51, 0x55, 0x49, 0x52, 0x45, 0x44, 0x10, 0x05, 0x32, 0xf5, 0x1b, 0x0a, 0x12,
+	0x5f, 0x52, 0x45, 0x51, 0x55, 0x49, 0x52, 0x45, 0x44, 0x10, 0x05, 0x32, 0xc0, 0x1d, 0x0a, 0x12,
 	0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x65, 0x72, 0x76, 0x69,
 	0x63, 0x65, 0x12, 0x64, 0x0a, 0x10, 0x4c, 0x69, 0x73, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
 	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x73, 0x12, 0x24, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72,
@@ -8053,174 +8263,186 @@ var file_codewire_v1_environment_proto_rawDesc = string([]byte{
 	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
 	0x1a, 0x25, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53,
 	0x74, 0x61, 0x72, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52,
-	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x77, 0x0a, 0x18, 0x55, 0x70, 0x64, 0x61, 0x74,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x65, 0x0a, 0x12, 0x53, 0x75, 0x73, 0x70, 0x65,
+	0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x12, 0x26, 0x2e,
+	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x75, 0x73, 0x70,
+	0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x27, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
+	0x2e, 0x76, 0x31, 0x2e, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72,
+	0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x62,
+	0x0a, 0x11, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
+	0x65, 0x6e, 0x74, 0x12, 0x25, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76,
+	0x31, 0x2e, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
+	0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x26, 0x2e, 0x63, 0x6f, 0x64,
+	0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x73, 0x75, 0x6d, 0x65, 0x45,
+	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
+	0x73, 0x65, 0x12, 0x77, 0x0a, 0x18, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x73, 0x12, 0x2c,
+	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x55, 0x70, 0x64,
+	0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x6f,
+	0x75, 0x72, 0x63, 0x65, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2d, 0x2e, 0x63,
+	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x55, 0x70, 0x64, 0x61, 0x74,
 	0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x6f, 0x75, 0x72,
-	0x63, 0x65, 0x73, 0x12, 0x2c, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76,
-	0x31, 0x2e, 0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
-	0x65, 0x6e, 0x74, 0x53, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
-	0x74, 0x1a, 0x2d, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e,
-	0x55, 0x70, 0x64, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x53, 0x6f, 0x75, 0x72, 0x63, 0x65, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
-	0x12, 0x65, 0x0a, 0x12, 0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72,
-	0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x12, 0x26, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72,
-	0x65, 0x2e, 0x76, 0x31, 0x2e, 0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69,
-	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x27,
-	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x50, 0x72, 0x6f,
-	0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52,
-	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x6b, 0x0a, 0x14, 0x55, 0x6e, 0x70, 0x72, 0x6f,
-	0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x12,
-	0x28, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x55, 0x6e,
-	0x70, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
-	0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65,
-	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x55, 0x6e, 0x70, 0x72, 0x6f, 0x74, 0x65, 0x63,
-	0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70,
-	0x6f, 0x6e, 0x73, 0x65, 0x12, 0x7a, 0x0a, 0x19, 0x43, 0x61, 0x6e, 0x63, 0x65, 0x6c, 0x45, 0x6e,
-	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x69, 0x6f,
-	0x6e, 0x12, 0x2d, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e,
-	0x43, 0x61, 0x6e, 0x63, 0x65, 0x6c, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
-	0x1a, 0x2e, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x43,
-	0x61, 0x6e, 0x63, 0x65, 0x6c, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74,
-	0x44, 0x65, 0x6c, 0x65, 0x74, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
-	0x12, 0x6b, 0x0a, 0x14, 0x45, 0x78, 0x74, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
-	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x74, 0x6c, 0x12, 0x28, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77,
-	0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x45, 0x78, 0x74, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76,
-	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x74, 0x6c, 0x52, 0x65, 0x71, 0x75, 0x65,
-	0x73, 0x74, 0x1a, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31,
-	0x2e, 0x45, 0x78, 0x74, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
-	0x6e, 0x74, 0x54, 0x74, 0x6c, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x71, 0x0a,
-	0x16, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49,
-	0x64, 0x6c, 0x65, 0x53, 0x74, 0x6f, 0x70, 0x12, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
+	0x63, 0x65, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x65, 0x0a, 0x12, 0x50,
+	0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
+	0x74, 0x12, 0x26, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e,
+	0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
+	0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x27, 0x2e, 0x63, 0x6f, 0x64, 0x65,
+	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x50, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45,
+	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
+	0x73, 0x65, 0x12, 0x6b, 0x0a, 0x14, 0x55, 0x6e, 0x70, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45,
+	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x12, 0x28, 0x2e, 0x63, 0x6f, 0x64,
+	0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x55, 0x6e, 0x70, 0x72, 0x6f, 0x74, 0x65,
+	0x63, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71,
+	0x75, 0x65, 0x73, 0x74, 0x1a, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
+	0x76, 0x31, 0x2e, 0x55, 0x6e, 0x70, 0x72, 0x6f, 0x74, 0x65, 0x63, 0x74, 0x45, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
+	0x7a, 0x0a, 0x19, 0x43, 0x61, 0x6e, 0x63, 0x65, 0x6c, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x44, 0x65, 0x6c, 0x65, 0x74, 0x69, 0x6f, 0x6e, 0x12, 0x2d, 0x2e, 0x63,
+	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x61, 0x6e, 0x63, 0x65,
+	0x6c, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x65, 0x6c, 0x65,
+	0x74, 0x69, 0x6f, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2e, 0x2e, 0x63, 0x6f,
+	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x61, 0x6e, 0x63, 0x65, 0x6c,
+	0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x65, 0x6c, 0x65, 0x74,
+	0x69, 0x6f, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x6b, 0x0a, 0x14, 0x45,
+	0x78, 0x74, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74,
+	0x54, 0x74, 0x6c, 0x12, 0x28, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76,
+	0x31, 0x2e, 0x45, 0x78, 0x74, 0x65, 0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
+	0x65, 0x6e, 0x74, 0x54, 0x74, 0x6c, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x29, 0x2e,
+	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x45, 0x78, 0x74, 0x65,
+	0x6e, 0x64, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x74, 0x6c,
+	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x71, 0x0a, 0x16, 0x53, 0x65, 0x74, 0x45,
+	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x74,
+	0x6f, 0x70, 0x12, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31,
+	0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49,
+	0x64, 0x6c, 0x65, 0x53, 0x74, 0x6f, 0x70, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2b,
+	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74,
+	0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53,
+	0x74, 0x6f, 0x70, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x7a, 0x0a, 0x19, 0x53,
+	0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c,
+	0x65, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x12, 0x2d, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77,
+	0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
+	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2e, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
 	0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
-	0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x74, 0x6f, 0x70, 0x52, 0x65, 0x71, 0x75,
-	0x65, 0x73, 0x74, 0x1a, 0x2b, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76,
-	0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74,
-	0x49, 0x64, 0x6c, 0x65, 0x53, 0x74, 0x6f, 0x70, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
-	0x12, 0x7a, 0x0a, 0x19, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
-	0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x12, 0x2d, 0x2e,
-	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45,
-	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x75,
-	0x73, 0x70, 0x65, 0x6e, 0x64, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2e, 0x2e, 0x63,
-	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e,
-	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x75, 0x73,
-	0x70, 0x65, 0x6e, 0x64, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x80, 0x01, 0x0a,
-	0x1b, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49,
-	0x64, 0x6c, 0x65, 0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x12, 0x2f, 0x2e, 0x63,
-	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e,
-	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x48, 0x69, 0x62,
-	0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x30, 0x2e,
-	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45,
+	0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x53, 0x75, 0x73, 0x70, 0x65, 0x6e, 0x64, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x80, 0x01, 0x0a, 0x1b, 0x53, 0x65, 0x74, 0x45,
 	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x48, 0x69,
-	0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x6b, 0x0a, 0x14, 0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69,
-	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x12, 0x28, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
-	0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x45,
-	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73,
-	0x74, 0x1a, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e,
-	0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
-	0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x80, 0x01, 0x0a,
-	0x1b, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53,
-	0x74, 0x61, 0x72, 0x74, 0x75, 0x70, 0x53, 0x63, 0x72, 0x69, 0x70, 0x74, 0x12, 0x2f, 0x2e, 0x63,
-	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e,
-	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x74, 0x61, 0x72, 0x74, 0x75, 0x70,
-	0x53, 0x63, 0x72, 0x69, 0x70, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x30, 0x2e,
-	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45,
+	0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x12, 0x2f, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
+	0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61, 0x74,
+	0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x30, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77,
+	0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
+	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x49, 0x64, 0x6c, 0x65, 0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61,
+	0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x6b, 0x0a, 0x14, 0x48, 0x69,
+	0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
+	0x6e, 0x74, 0x12, 0x28, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31,
+	0x2e, 0x48, 0x69, 0x62, 0x65, 0x72, 0x6e, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
+	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x29, 0x2e, 0x63,
+	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x48, 0x69, 0x62, 0x65, 0x72,
+	0x6e, 0x61, 0x74, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x80, 0x01, 0x0a, 0x1b, 0x53, 0x65, 0x74, 0x45,
 	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x74, 0x61, 0x72, 0x74, 0x75,
-	0x70, 0x53, 0x63, 0x72, 0x69, 0x70, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12,
-	0x7f, 0x0a, 0x19, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x54, 0x72, 0x75, 0x73, 0x74, 0x52, 0x65, 0x70, 0x6f, 0x72, 0x74, 0x12, 0x2d, 0x2e, 0x63,
-	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e,
-	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x75, 0x73, 0x74, 0x52, 0x65,
-	0x70, 0x6f, 0x72, 0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2e, 0x2e, 0x63, 0x6f,
-	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76,
-	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x75, 0x73, 0x74, 0x52, 0x65, 0x70,
-	0x6f, 0x72, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01,
-	0x12, 0x73, 0x0a, 0x15, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
-	0x6e, 0x74, 0x48, 0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x12, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65,
-	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72,
-	0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x48, 0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x52, 0x65, 0x71,
-	0x75, 0x65, 0x73, 0x74, 0x1a, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
+	0x70, 0x53, 0x63, 0x72, 0x69, 0x70, 0x74, 0x12, 0x2f, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
+	0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x53, 0x74, 0x61, 0x72, 0x74, 0x75, 0x70, 0x53, 0x63, 0x72, 0x69, 0x70,
+	0x74, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x30, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77,
+	0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
+	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x74, 0x61, 0x72, 0x74, 0x75, 0x70, 0x53, 0x63, 0x72, 0x69,
+	0x70, 0x74, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x7f, 0x0a, 0x19, 0x47, 0x65,
+	0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x75, 0x73,
+	0x74, 0x52, 0x65, 0x70, 0x6f, 0x72, 0x74, 0x12, 0x2d, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
+	0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x75, 0x73, 0x74, 0x52, 0x65, 0x70, 0x6f, 0x72, 0x74, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2e, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72,
+	0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
+	0x65, 0x6e, 0x74, 0x54, 0x72, 0x75, 0x73, 0x74, 0x52, 0x65, 0x70, 0x6f, 0x72, 0x74, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01, 0x12, 0x73, 0x0a, 0x15, 0x47,
+	0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x48, 0x6f, 0x73,
+	0x74, 0x4b, 0x65, 0x79, 0x12, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
 	0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x48, 0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
-	0x22, 0x03, 0x90, 0x02, 0x01, 0x12, 0x82, 0x01, 0x0a, 0x1a, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76,
-	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x53, 0x74,
-	0x61, 0x74, 0x75, 0x73, 0x12, 0x2e, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
-	0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52, 0x65, 0x71,
-	0x75, 0x65, 0x73, 0x74, 0x1a, 0x2f, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
-	0x76, 0x31, 0x2e, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52, 0x65, 0x73,
-	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01, 0x12, 0x87, 0x01, 0x0a, 0x1b, 0x53,
-	0x74, 0x72, 0x65, 0x61, 0x6d, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74,
-	0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x4c, 0x6f, 0x67, 0x73, 0x12, 0x2f, 0x2e, 0x63, 0x6f, 0x64,
-	0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x45,
-	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e,
-	0x4c, 0x6f, 0x67, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x30, 0x2e, 0x63, 0x6f,
-	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d,
+	0x74, 0x48, 0x6f, 0x73, 0x74, 0x4b, 0x65, 0x79, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
+	0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65,
+	0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x48, 0x6f, 0x73, 0x74,
+	0x4b, 0x65, 0x79, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01,
+	0x12, 0x82, 0x01, 0x0a, 0x1a, 0x47, 0x65, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
+	0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x12,
+	0x2e, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65,
+	0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d,
+	0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a,
+	0x2f, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x65,
+	0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d,
+	0x6f, 0x6e, 0x53, 0x74, 0x61, 0x74, 0x75, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65,
+	0x22, 0x03, 0x90, 0x02, 0x01, 0x12, 0x87, 0x01, 0x0a, 0x1b, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d,
 	0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f,
-	0x6e, 0x4c, 0x6f, 0x67, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90,
-	0x02, 0x01, 0x30, 0x01, 0x12, 0x74, 0x0a, 0x17, 0x52, 0x65, 0x70, 0x61, 0x69, 0x72, 0x45, 0x6e,
-	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x12,
-	0x2b, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65,
-	0x70, 0x61, 0x69, 0x72, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44,
-	0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2c, 0x2e, 0x63,
-	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x70, 0x61, 0x69,
-	0x72, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d,
-	0x6f, 0x6e, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x6e, 0x0a, 0x15, 0x52, 0x65,
-	0x74, 0x72, 0x79, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x65,
-	0x74, 0x75, 0x70, 0x12, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76,
-	0x31, 0x2e, 0x52, 0x65, 0x74, 0x72, 0x79, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
-	0x6e, 0x74, 0x53, 0x65, 0x74, 0x75, 0x70, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2a,
+	0x6e, 0x4c, 0x6f, 0x67, 0x73, 0x12, 0x2f, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
+	0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
+	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x4c, 0x6f, 0x67, 0x73, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x30, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72,
+	0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x45, 0x6e, 0x76, 0x69, 0x72,
+	0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x4c, 0x6f, 0x67, 0x73,
+	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01, 0x30, 0x01, 0x12,
+	0x74, 0x0a, 0x17, 0x52, 0x65, 0x70, 0x61, 0x69, 0x72, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
+	0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x12, 0x2b, 0x2e, 0x63, 0x6f, 0x64,
+	0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x70, 0x61, 0x69, 0x72, 0x45,
+	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e,
+	0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2c, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69,
+	0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x70, 0x61, 0x69, 0x72, 0x45, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x44, 0x61, 0x65, 0x6d, 0x6f, 0x6e, 0x52, 0x65, 0x73,
+	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x6e, 0x0a, 0x15, 0x52, 0x65, 0x74, 0x72, 0x79, 0x45, 0x6e,
+	0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x65, 0x74, 0x75, 0x70, 0x12, 0x29,
 	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x74,
 	0x72, 0x79, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x65, 0x74,
-	0x75, 0x70, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x73, 0x0a, 0x15, 0x4c, 0x69,
-	0x73, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63,
-	0x65, 0x73, 0x73, 0x12, 0x29, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76,
-	0x31, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2a,
+	0x75, 0x70, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65,
+	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x74, 0x72, 0x79, 0x45, 0x6e, 0x76,
+	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x53, 0x65, 0x74, 0x75, 0x70, 0x52, 0x65, 0x73,
+	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x73, 0x0a, 0x15, 0x4c, 0x69, 0x73, 0x74, 0x45, 0x6e, 0x76,
+	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x12, 0x29,
 	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73,
 	0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65,
-	0x73, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01, 0x12,
-	0x71, 0x0a, 0x16, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
-	0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x12, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65,
-	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x45, 0x6e, 0x76,
+	0x73, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65,
+	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x4c, 0x69, 0x73, 0x74, 0x45, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x73,
+	0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01, 0x12, 0x71, 0x0a, 0x16, 0x47, 0x72,
+	0x61, 0x6e, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63,
+	0x63, 0x65, 0x73, 0x73, 0x12, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
+	0x76, 0x31, 0x2e, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d,
+	0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74,
+	0x1a, 0x2b, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x47,
+	0x72, 0x61, 0x6e, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41,
+	0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x74, 0x0a,
+	0x17, 0x52, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65,
+	0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x12, 0x2b, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77,
+	0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x45, 0x6e, 0x76,
 	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65,
-	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2b, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
-	0x2e, 0x76, 0x31, 0x2e, 0x47, 0x72, 0x61, 0x6e, 0x74, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
-	0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e,
-	0x73, 0x65, 0x12, 0x74, 0x0a, 0x17, 0x52, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x45, 0x6e, 0x76, 0x69,
-	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x12, 0x2b, 0x2e,
-	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x76, 0x6f,
-	0x6b, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63,
-	0x65, 0x73, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2c, 0x2e, 0x63, 0x6f, 0x64,
-	0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x45,
-	0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73,
-	0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x12, 0x73, 0x0a, 0x16, 0x57, 0x61, 0x74, 0x63,
+	0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2c, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
+	0x2e, 0x76, 0x31, 0x2e, 0x52, 0x65, 0x76, 0x6f, 0x6b, 0x65, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f,
+	0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x41, 0x63, 0x63, 0x65, 0x73, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f,
+	0x6e, 0x73, 0x65, 0x12, 0x73, 0x0a, 0x16, 0x57, 0x61, 0x74, 0x63, 0x68, 0x45, 0x6e, 0x76, 0x69,
+	0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x12, 0x2a, 0x2e,
+	0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x57, 0x61, 0x74, 0x63,
 	0x68, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x43, 0x72, 0x65, 0x61,
-	0x74, 0x65, 0x12, 0x2a, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31,
-	0x2e, 0x57, 0x61, 0x74, 0x63, 0x68, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e,
-	0x74, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2b,
-	0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x57, 0x61, 0x74,
-	0x63, 0x68, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x43, 0x72, 0x65,
-	0x61, 0x74, 0x65, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x30, 0x01, 0x12, 0x54, 0x0a,
-	0x0a, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x4c, 0x6f, 0x67, 0x73, 0x12, 0x1e, 0x2e, 0x63, 0x6f,
-	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d,
-	0x4c, 0x6f, 0x67, 0x73, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1f, 0x2e, 0x63, 0x6f,
-	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d,
-	0x4c, 0x6f, 0x67, 0x73, 0x52, 0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02,
-	0x01, 0x30, 0x01, 0x42, 0xb3, 0x01, 0x0a, 0x0f, 0x63, 0x6f, 0x6d, 0x2e, 0x63, 0x6f, 0x64, 0x65,
-	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x42, 0x10, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e,
-	0x6d, 0x65, 0x6e, 0x74, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a, 0x41, 0x67, 0x69, 0x74,
-	0x68, 0x75, 0x62, 0x2e, 0x63, 0x6f, 0x6d, 0x2f, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
-	0x73, 0x68, 0x2f, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2f, 0x6c, 0x69, 0x62, 0x73,
-	0x2f, 0x67, 0x65, 0x6e, 0x2d, 0x67, 0x6f, 0x2f, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
-	0x2f, 0x76, 0x31, 0x3b, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x76, 0x31, 0xa2, 0x02,
-	0x03, 0x43, 0x58, 0x58, 0xaa, 0x02, 0x0b, 0x43, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
-	0x56, 0x31, 0xca, 0x02, 0x0b, 0x43, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x5c, 0x56, 0x31,
-	0xe2, 0x02, 0x17, 0x43, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x5c, 0x56, 0x31, 0x5c, 0x47,
-	0x50, 0x42, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x0c, 0x43, 0x6f, 0x64,
-	0x65, 0x77, 0x69, 0x72, 0x65, 0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f,
-	0x33,
+	0x74, 0x65, 0x52, 0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x2b, 0x2e, 0x63, 0x6f, 0x64, 0x65,
+	0x77, 0x69, 0x72, 0x65, 0x2e, 0x76, 0x31, 0x2e, 0x57, 0x61, 0x74, 0x63, 0x68, 0x45, 0x6e, 0x76,
+	0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x43, 0x72, 0x65, 0x61, 0x74, 0x65, 0x52, 0x65,
+	0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x30, 0x01, 0x12, 0x54, 0x0a, 0x0a, 0x53, 0x74, 0x72, 0x65,
+	0x61, 0x6d, 0x4c, 0x6f, 0x67, 0x73, 0x12, 0x1e, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72,
+	0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x4c, 0x6f, 0x67, 0x73, 0x52,
+	0x65, 0x71, 0x75, 0x65, 0x73, 0x74, 0x1a, 0x1f, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72,
+	0x65, 0x2e, 0x76, 0x31, 0x2e, 0x53, 0x74, 0x72, 0x65, 0x61, 0x6d, 0x4c, 0x6f, 0x67, 0x73, 0x52,
+	0x65, 0x73, 0x70, 0x6f, 0x6e, 0x73, 0x65, 0x22, 0x03, 0x90, 0x02, 0x01, 0x30, 0x01, 0x42, 0xb3,
+	0x01, 0x0a, 0x0f, 0x63, 0x6f, 0x6d, 0x2e, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e,
+	0x76, 0x31, 0x42, 0x10, 0x45, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, 0x65, 0x6e, 0x74, 0x50,
+	0x72, 0x6f, 0x74, 0x6f, 0x50, 0x01, 0x5a, 0x41, 0x67, 0x69, 0x74, 0x68, 0x75, 0x62, 0x2e, 0x63,
+	0x6f, 0x6d, 0x2f, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x73, 0x68, 0x2f, 0x63, 0x6f,
+	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2f, 0x6c, 0x69, 0x62, 0x73, 0x2f, 0x67, 0x65, 0x6e, 0x2d,
+	0x67, 0x6f, 0x2f, 0x63, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2f, 0x76, 0x31, 0x3b, 0x63,
+	0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x76, 0x31, 0xa2, 0x02, 0x03, 0x43, 0x58, 0x58, 0xaa,
+	0x02, 0x0b, 0x43, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x2e, 0x56, 0x31, 0xca, 0x02, 0x0b,
+	0x43, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x5c, 0x56, 0x31, 0xe2, 0x02, 0x17, 0x43, 0x6f,
+	0x64, 0x65, 0x77, 0x69, 0x72, 0x65, 0x5c, 0x56, 0x31, 0x5c, 0x47, 0x50, 0x42, 0x4d, 0x65, 0x74,
+	0x61, 0x64, 0x61, 0x74, 0x61, 0xea, 0x02, 0x0c, 0x43, 0x6f, 0x64, 0x65, 0x77, 0x69, 0x72, 0x65,
+	0x3a, 0x3a, 0x56, 0x31, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 })
 
 var (
@@ -8236,7 +8458,7 @@ func file_codewire_v1_environment_proto_rawDescGZIP() []byte {
 }
 
 var file_codewire_v1_environment_proto_enumTypes = make([]protoimpl.EnumInfo, 12)
-var file_codewire_v1_environment_proto_msgTypes = make([]protoimpl.MessageInfo, 88)
+var file_codewire_v1_environment_proto_msgTypes = make([]protoimpl.MessageInfo, 92)
 var file_codewire_v1_environment_proto_goTypes = []any{
 	(EnvironmentState)(0),                         // 0: codewire.v1.EnvironmentState
 	(DesiredState)(0),                             // 1: codewire.v1.DesiredState
@@ -8282,109 +8504,113 @@ var file_codewire_v1_environment_proto_goTypes = []any{
 	(*StopEnvironmentResponse)(nil),               // 41: codewire.v1.StopEnvironmentResponse
 	(*StartEnvironmentRequest)(nil),               // 42: codewire.v1.StartEnvironmentRequest
 	(*StartEnvironmentResponse)(nil),              // 43: codewire.v1.StartEnvironmentResponse
-	(*ProtectEnvironmentRequest)(nil),             // 44: codewire.v1.ProtectEnvironmentRequest
-	(*ProtectEnvironmentResponse)(nil),            // 45: codewire.v1.ProtectEnvironmentResponse
-	(*UnprotectEnvironmentRequest)(nil),           // 46: codewire.v1.UnprotectEnvironmentRequest
-	(*UnprotectEnvironmentResponse)(nil),          // 47: codewire.v1.UnprotectEnvironmentResponse
-	(*CancelEnvironmentDeletionRequest)(nil),      // 48: codewire.v1.CancelEnvironmentDeletionRequest
-	(*CancelEnvironmentDeletionResponse)(nil),     // 49: codewire.v1.CancelEnvironmentDeletionResponse
-	(*ExtendEnvironmentTtlRequest)(nil),           // 50: codewire.v1.ExtendEnvironmentTtlRequest
-	(*ExtendEnvironmentTtlResponse)(nil),          // 51: codewire.v1.ExtendEnvironmentTtlResponse
-	(*SetEnvironmentIdleStopRequest)(nil),         // 52: codewire.v1.SetEnvironmentIdleStopRequest
-	(*SetEnvironmentIdleStopResponse)(nil),        // 53: codewire.v1.SetEnvironmentIdleStopResponse
-	(*SetEnvironmentIdleSuspendRequest)(nil),      // 54: codewire.v1.SetEnvironmentIdleSuspendRequest
-	(*SetEnvironmentIdleSuspendResponse)(nil),     // 55: codewire.v1.SetEnvironmentIdleSuspendResponse
-	(*SetEnvironmentIdleHibernateRequest)(nil),    // 56: codewire.v1.SetEnvironmentIdleHibernateRequest
-	(*SetEnvironmentIdleHibernateResponse)(nil),   // 57: codewire.v1.SetEnvironmentIdleHibernateResponse
-	(*HibernateEnvironmentRequest)(nil),           // 58: codewire.v1.HibernateEnvironmentRequest
-	(*HibernateEnvironmentResponse)(nil),          // 59: codewire.v1.HibernateEnvironmentResponse
-	(*SetEnvironmentStartupScriptRequest)(nil),    // 60: codewire.v1.SetEnvironmentStartupScriptRequest
-	(*SetEnvironmentStartupScriptResponse)(nil),   // 61: codewire.v1.SetEnvironmentStartupScriptResponse
-	(*AccessGrant)(nil),                           // 62: codewire.v1.AccessGrant
-	(*ListEnvironmentAccessRequest)(nil),          // 63: codewire.v1.ListEnvironmentAccessRequest
-	(*ListEnvironmentAccessResponse)(nil),         // 64: codewire.v1.ListEnvironmentAccessResponse
-	(*GrantEnvironmentAccessRequest)(nil),         // 65: codewire.v1.GrantEnvironmentAccessRequest
-	(*GrantEnvironmentAccessResponse)(nil),        // 66: codewire.v1.GrantEnvironmentAccessResponse
-	(*RevokeEnvironmentAccessRequest)(nil),        // 67: codewire.v1.RevokeEnvironmentAccessRequest
-	(*RevokeEnvironmentAccessResponse)(nil),       // 68: codewire.v1.RevokeEnvironmentAccessResponse
-	(*GetEnvironmentTrustReportRequest)(nil),      // 69: codewire.v1.GetEnvironmentTrustReportRequest
-	(*GetEnvironmentTrustReportResponse)(nil),     // 70: codewire.v1.GetEnvironmentTrustReportResponse
-	(*EnvironmentTrustReport)(nil),                // 71: codewire.v1.EnvironmentTrustReport
-	(*TrustReportEnvironment)(nil),                // 72: codewire.v1.TrustReportEnvironment
-	(*TrustReportRuntime)(nil),                    // 73: codewire.v1.TrustReportRuntime
-	(*TrustReportPlacement)(nil),                  // 74: codewire.v1.TrustReportPlacement
-	(*TrustReportImages)(nil),                     // 75: codewire.v1.TrustReportImages
-	(*TrustReportProvenance)(nil),                 // 76: codewire.v1.TrustReportProvenance
-	(*TrustReportAttestation)(nil),                // 77: codewire.v1.TrustReportAttestation
-	(*TrustReportTrustee)(nil),                    // 78: codewire.v1.TrustReportTrustee
-	(*TrustReportSummary)(nil),                    // 79: codewire.v1.TrustReportSummary
-	(*WatchEnvironmentCreateRequest)(nil),         // 80: codewire.v1.WatchEnvironmentCreateRequest
-	(*WatchEnvironmentCreateResponse)(nil),        // 81: codewire.v1.WatchEnvironmentCreateResponse
-	(*PrepareProgress)(nil),                       // 82: codewire.v1.PrepareProgress
-	(*PrepareComplete)(nil),                       // 83: codewire.v1.PrepareComplete
-	(*RepoConfig)(nil),                            // 84: codewire.v1.RepoConfig
-	(*StreamLogsRequest)(nil),                     // 85: codewire.v1.StreamLogsRequest
-	(*StreamLogsResponse)(nil),                    // 86: codewire.v1.StreamLogsResponse
-	(*StreamHeartbeat)(nil),                       // 87: codewire.v1.StreamHeartbeat
-	(*EnvironmentLog)(nil),                        // 88: codewire.v1.EnvironmentLog
-	(*EnvironmentDaemonDiagnostic)(nil),           // 89: codewire.v1.EnvironmentDaemonDiagnostic
-	(*EnvironmentDaemonStatus)(nil),               // 90: codewire.v1.EnvironmentDaemonStatus
-	(*GetEnvironmentDaemonStatusRequest)(nil),     // 91: codewire.v1.GetEnvironmentDaemonStatusRequest
-	(*GetEnvironmentDaemonStatusResponse)(nil),    // 92: codewire.v1.GetEnvironmentDaemonStatusResponse
-	(*StreamEnvironmentDaemonLogsRequest)(nil),    // 93: codewire.v1.StreamEnvironmentDaemonLogsRequest
-	(*StreamEnvironmentDaemonLogsResponse)(nil),   // 94: codewire.v1.StreamEnvironmentDaemonLogsResponse
-	(*RepairEnvironmentDaemonRequest)(nil),        // 95: codewire.v1.RepairEnvironmentDaemonRequest
-	(*RepairEnvironmentDaemonResponse)(nil),       // 96: codewire.v1.RepairEnvironmentDaemonResponse
-	(*RetryEnvironmentSetupRequest)(nil),          // 97: codewire.v1.RetryEnvironmentSetupRequest
-	(*RetryEnvironmentSetupResponse)(nil),         // 98: codewire.v1.RetryEnvironmentSetupResponse
-	nil,                                           // 99: codewire.v1.TrustReportAttestation.MetadataEntry
-	(*timestamppb.Timestamp)(nil),                 // 100: google.protobuf.Timestamp
-	(*Port)(nil),                                  // 101: codewire.v1.Port
-	(*EnvironmentNetworkPolicy)(nil),              // 102: codewire.v1.EnvironmentNetworkPolicy
-	(*durationpb.Duration)(nil),                   // 103: google.protobuf.Duration
-	(*ProjectSpec)(nil),                           // 104: codewire.v1.ProjectSpec
-	(*ProjectSecretBindings)(nil),                 // 105: codewire.v1.ProjectSecretBindings
-	(*ProjectCredentialBinding)(nil),              // 106: codewire.v1.ProjectCredentialBinding
-	(*Preset)(nil),                                // 107: codewire.v1.Preset
-	(*structpb.Struct)(nil),                       // 108: google.protobuf.Struct
+	(*SuspendEnvironmentRequest)(nil),             // 44: codewire.v1.SuspendEnvironmentRequest
+	(*SuspendEnvironmentResponse)(nil),            // 45: codewire.v1.SuspendEnvironmentResponse
+	(*ResumeEnvironmentRequest)(nil),              // 46: codewire.v1.ResumeEnvironmentRequest
+	(*ResumeEnvironmentResponse)(nil),             // 47: codewire.v1.ResumeEnvironmentResponse
+	(*ProtectEnvironmentRequest)(nil),             // 48: codewire.v1.ProtectEnvironmentRequest
+	(*ProtectEnvironmentResponse)(nil),            // 49: codewire.v1.ProtectEnvironmentResponse
+	(*UnprotectEnvironmentRequest)(nil),           // 50: codewire.v1.UnprotectEnvironmentRequest
+	(*UnprotectEnvironmentResponse)(nil),          // 51: codewire.v1.UnprotectEnvironmentResponse
+	(*CancelEnvironmentDeletionRequest)(nil),      // 52: codewire.v1.CancelEnvironmentDeletionRequest
+	(*CancelEnvironmentDeletionResponse)(nil),     // 53: codewire.v1.CancelEnvironmentDeletionResponse
+	(*ExtendEnvironmentTtlRequest)(nil),           // 54: codewire.v1.ExtendEnvironmentTtlRequest
+	(*ExtendEnvironmentTtlResponse)(nil),          // 55: codewire.v1.ExtendEnvironmentTtlResponse
+	(*SetEnvironmentIdleStopRequest)(nil),         // 56: codewire.v1.SetEnvironmentIdleStopRequest
+	(*SetEnvironmentIdleStopResponse)(nil),        // 57: codewire.v1.SetEnvironmentIdleStopResponse
+	(*SetEnvironmentIdleSuspendRequest)(nil),      // 58: codewire.v1.SetEnvironmentIdleSuspendRequest
+	(*SetEnvironmentIdleSuspendResponse)(nil),     // 59: codewire.v1.SetEnvironmentIdleSuspendResponse
+	(*SetEnvironmentIdleHibernateRequest)(nil),    // 60: codewire.v1.SetEnvironmentIdleHibernateRequest
+	(*SetEnvironmentIdleHibernateResponse)(nil),   // 61: codewire.v1.SetEnvironmentIdleHibernateResponse
+	(*HibernateEnvironmentRequest)(nil),           // 62: codewire.v1.HibernateEnvironmentRequest
+	(*HibernateEnvironmentResponse)(nil),          // 63: codewire.v1.HibernateEnvironmentResponse
+	(*SetEnvironmentStartupScriptRequest)(nil),    // 64: codewire.v1.SetEnvironmentStartupScriptRequest
+	(*SetEnvironmentStartupScriptResponse)(nil),   // 65: codewire.v1.SetEnvironmentStartupScriptResponse
+	(*AccessGrant)(nil),                           // 66: codewire.v1.AccessGrant
+	(*ListEnvironmentAccessRequest)(nil),          // 67: codewire.v1.ListEnvironmentAccessRequest
+	(*ListEnvironmentAccessResponse)(nil),         // 68: codewire.v1.ListEnvironmentAccessResponse
+	(*GrantEnvironmentAccessRequest)(nil),         // 69: codewire.v1.GrantEnvironmentAccessRequest
+	(*GrantEnvironmentAccessResponse)(nil),        // 70: codewire.v1.GrantEnvironmentAccessResponse
+	(*RevokeEnvironmentAccessRequest)(nil),        // 71: codewire.v1.RevokeEnvironmentAccessRequest
+	(*RevokeEnvironmentAccessResponse)(nil),       // 72: codewire.v1.RevokeEnvironmentAccessResponse
+	(*GetEnvironmentTrustReportRequest)(nil),      // 73: codewire.v1.GetEnvironmentTrustReportRequest
+	(*GetEnvironmentTrustReportResponse)(nil),     // 74: codewire.v1.GetEnvironmentTrustReportResponse
+	(*EnvironmentTrustReport)(nil),                // 75: codewire.v1.EnvironmentTrustReport
+	(*TrustReportEnvironment)(nil),                // 76: codewire.v1.TrustReportEnvironment
+	(*TrustReportRuntime)(nil),                    // 77: codewire.v1.TrustReportRuntime
+	(*TrustReportPlacement)(nil),                  // 78: codewire.v1.TrustReportPlacement
+	(*TrustReportImages)(nil),                     // 79: codewire.v1.TrustReportImages
+	(*TrustReportProvenance)(nil),                 // 80: codewire.v1.TrustReportProvenance
+	(*TrustReportAttestation)(nil),                // 81: codewire.v1.TrustReportAttestation
+	(*TrustReportTrustee)(nil),                    // 82: codewire.v1.TrustReportTrustee
+	(*TrustReportSummary)(nil),                    // 83: codewire.v1.TrustReportSummary
+	(*WatchEnvironmentCreateRequest)(nil),         // 84: codewire.v1.WatchEnvironmentCreateRequest
+	(*WatchEnvironmentCreateResponse)(nil),        // 85: codewire.v1.WatchEnvironmentCreateResponse
+	(*PrepareProgress)(nil),                       // 86: codewire.v1.PrepareProgress
+	(*PrepareComplete)(nil),                       // 87: codewire.v1.PrepareComplete
+	(*RepoConfig)(nil),                            // 88: codewire.v1.RepoConfig
+	(*StreamLogsRequest)(nil),                     // 89: codewire.v1.StreamLogsRequest
+	(*StreamLogsResponse)(nil),                    // 90: codewire.v1.StreamLogsResponse
+	(*StreamHeartbeat)(nil),                       // 91: codewire.v1.StreamHeartbeat
+	(*EnvironmentLog)(nil),                        // 92: codewire.v1.EnvironmentLog
+	(*EnvironmentDaemonDiagnostic)(nil),           // 93: codewire.v1.EnvironmentDaemonDiagnostic
+	(*EnvironmentDaemonStatus)(nil),               // 94: codewire.v1.EnvironmentDaemonStatus
+	(*GetEnvironmentDaemonStatusRequest)(nil),     // 95: codewire.v1.GetEnvironmentDaemonStatusRequest
+	(*GetEnvironmentDaemonStatusResponse)(nil),    // 96: codewire.v1.GetEnvironmentDaemonStatusResponse
+	(*StreamEnvironmentDaemonLogsRequest)(nil),    // 97: codewire.v1.StreamEnvironmentDaemonLogsRequest
+	(*StreamEnvironmentDaemonLogsResponse)(nil),   // 98: codewire.v1.StreamEnvironmentDaemonLogsResponse
+	(*RepairEnvironmentDaemonRequest)(nil),        // 99: codewire.v1.RepairEnvironmentDaemonRequest
+	(*RepairEnvironmentDaemonResponse)(nil),       // 100: codewire.v1.RepairEnvironmentDaemonResponse
+	(*RetryEnvironmentSetupRequest)(nil),          // 101: codewire.v1.RetryEnvironmentSetupRequest
+	(*RetryEnvironmentSetupResponse)(nil),         // 102: codewire.v1.RetryEnvironmentSetupResponse
+	nil,                                           // 103: codewire.v1.TrustReportAttestation.MetadataEntry
+	(*timestamppb.Timestamp)(nil),                 // 104: google.protobuf.Timestamp
+	(*Port)(nil),                                  // 105: codewire.v1.Port
+	(*EnvironmentNetworkPolicy)(nil),              // 106: codewire.v1.EnvironmentNetworkPolicy
+	(*durationpb.Duration)(nil),                   // 107: google.protobuf.Duration
+	(*ProjectSpec)(nil),                           // 108: codewire.v1.ProjectSpec
+	(*ProjectSecretBindings)(nil),                 // 109: codewire.v1.ProjectSecretBindings
+	(*ProjectCredentialBinding)(nil),              // 110: codewire.v1.ProjectCredentialBinding
+	(*Preset)(nil),                                // 111: codewire.v1.Preset
+	(*structpb.Struct)(nil),                       // 112: google.protobuf.Struct
 }
 var file_codewire_v1_environment_proto_depIdxs = []int32{
 	0,   // 0: codewire.v1.Environment.state:type_name -> codewire.v1.EnvironmentState
 	1,   // 1: codewire.v1.Environment.desired_state:type_name -> codewire.v1.DesiredState
-	100, // 2: codewire.v1.Environment.state_changed_at:type_name -> google.protobuf.Timestamp
-	100, // 3: codewire.v1.Environment.shutdown_at:type_name -> google.protobuf.Timestamp
-	100, // 4: codewire.v1.Environment.created_at:type_name -> google.protobuf.Timestamp
-	100, // 5: codewire.v1.Environment.started_at:type_name -> google.protobuf.Timestamp
-	100, // 6: codewire.v1.Environment.stopped_at:type_name -> google.protobuf.Timestamp
-	100, // 7: codewire.v1.Environment.destroyed_at:type_name -> google.protobuf.Timestamp
-	100, // 8: codewire.v1.Environment.deletion_requested_at:type_name -> google.protobuf.Timestamp
-	100, // 9: codewire.v1.Environment.deletion_grace_until:type_name -> google.protobuf.Timestamp
-	101, // 10: codewire.v1.Environment.ports:type_name -> codewire.v1.Port
+	104, // 2: codewire.v1.Environment.state_changed_at:type_name -> google.protobuf.Timestamp
+	104, // 3: codewire.v1.Environment.shutdown_at:type_name -> google.protobuf.Timestamp
+	104, // 4: codewire.v1.Environment.created_at:type_name -> google.protobuf.Timestamp
+	104, // 5: codewire.v1.Environment.started_at:type_name -> google.protobuf.Timestamp
+	104, // 6: codewire.v1.Environment.stopped_at:type_name -> google.protobuf.Timestamp
+	104, // 7: codewire.v1.Environment.destroyed_at:type_name -> google.protobuf.Timestamp
+	104, // 8: codewire.v1.Environment.deletion_requested_at:type_name -> google.protobuf.Timestamp
+	104, // 9: codewire.v1.Environment.deletion_grace_until:type_name -> google.protobuf.Timestamp
+	105, // 10: codewire.v1.Environment.ports:type_name -> codewire.v1.Port
 	2,   // 11: codewire.v1.Environment.isolation_tier:type_name -> codewire.v1.IsolationTier
 	18,  // 12: codewire.v1.Environment.source_selection:type_name -> codewire.v1.EnvironmentSourceSelection
 	3,   // 13: codewire.v1.Environment.network_state:type_name -> codewire.v1.NetworkAttachmentState
 	4,   // 14: codewire.v1.Environment.network_failure:type_name -> codewire.v1.NetworkAttachmentFailure
-	102, // 15: codewire.v1.Environment.network_policy:type_name -> codewire.v1.EnvironmentNetworkPolicy
-	100, // 16: codewire.v1.Environment.restarted_at:type_name -> google.protobuf.Timestamp
+	106, // 15: codewire.v1.Environment.network_policy:type_name -> codewire.v1.EnvironmentNetworkPolicy
+	104, // 16: codewire.v1.Environment.restarted_at:type_name -> google.protobuf.Timestamp
 	13,  // 17: codewire.v1.Environment.host:type_name -> codewire.v1.EnvironmentHost
-	100, // 18: codewire.v1.Environment.suspended_at:type_name -> google.protobuf.Timestamp
-	100, // 19: codewire.v1.Environment.hibernated_at:type_name -> google.protobuf.Timestamp
+	104, // 18: codewire.v1.Environment.suspended_at:type_name -> google.protobuf.Timestamp
+	104, // 19: codewire.v1.Environment.hibernated_at:type_name -> google.protobuf.Timestamp
 	0,   // 20: codewire.v1.ListEnvironmentsRequest.state:type_name -> codewire.v1.EnvironmentState
 	12,  // 21: codewire.v1.ListEnvironmentsResponse.environments:type_name -> codewire.v1.Environment
-	103, // 22: codewire.v1.ListEnvironmentsResponse.poll_interval:type_name -> google.protobuf.Duration
+	107, // 22: codewire.v1.ListEnvironmentsResponse.poll_interval:type_name -> google.protobuf.Duration
 	2,   // 23: codewire.v1.CreateEnvironmentRequest.isolation_tier:type_name -> codewire.v1.IsolationTier
-	104, // 24: codewire.v1.CreateEnvironmentRequest.project_spec:type_name -> codewire.v1.ProjectSpec
+	108, // 24: codewire.v1.CreateEnvironmentRequest.project_spec:type_name -> codewire.v1.ProjectSpec
 	17,  // 25: codewire.v1.CreateEnvironmentRequest.placement:type_name -> codewire.v1.EnvironmentPlacement
-	105, // 26: codewire.v1.EnvironmentSourceSelection.secrets:type_name -> codewire.v1.ProjectSecretBindings
-	106, // 27: codewire.v1.EnvironmentSourceSelection.credentials:type_name -> codewire.v1.ProjectCredentialBinding
+	109, // 26: codewire.v1.EnvironmentSourceSelection.secrets:type_name -> codewire.v1.ProjectSecretBindings
+	110, // 27: codewire.v1.EnvironmentSourceSelection.credentials:type_name -> codewire.v1.ProjectCredentialBinding
 	18,  // 28: codewire.v1.UpdateEnvironmentSourcesRequest.expected:type_name -> codewire.v1.EnvironmentSourceSelection
 	18,  // 29: codewire.v1.UpdateEnvironmentSourcesRequest.replacement:type_name -> codewire.v1.EnvironmentSourceSelection
 	18,  // 30: codewire.v1.UpdateEnvironmentSourcesResponse.selection:type_name -> codewire.v1.EnvironmentSourceSelection
 	5,   // 31: codewire.v1.UpdateEnvironmentSourcesResponse.outcome:type_name -> codewire.v1.EnvironmentSourcesUpdateOutcome
 	12,  // 32: codewire.v1.CreateEnvironmentResponse.environment:type_name -> codewire.v1.Environment
 	12,  // 33: codewire.v1.GetEnvironmentResponse.environment:type_name -> codewire.v1.Environment
-	103, // 34: codewire.v1.GetEnvironmentResponse.poll_interval:type_name -> google.protobuf.Duration
-	104, // 35: codewire.v1.GetEnvironmentProjectSpecResponse.project_spec:type_name -> codewire.v1.ProjectSpec
+	107, // 34: codewire.v1.GetEnvironmentResponse.poll_interval:type_name -> google.protobuf.Duration
+	108, // 35: codewire.v1.GetEnvironmentProjectSpecResponse.project_spec:type_name -> codewire.v1.ProjectSpec
 	28,  // 36: codewire.v1.EnvironmentResizePlan.previous_resources:type_name -> codewire.v1.EnvironmentResources
 	28,  // 37: codewire.v1.EnvironmentResizePlan.desired_resources:type_name -> codewire.v1.EnvironmentResources
 	8,   // 38: codewire.v1.EnvironmentResizePlan.execution_mode:type_name -> codewire.v1.EnvironmentResizeExecutionMode
@@ -8393,9 +8619,9 @@ var file_codewire_v1_environment_proto_depIdxs = []int32{
 	28,  // 41: codewire.v1.EnvironmentResizeOperation.last_applied_resources:type_name -> codewire.v1.EnvironmentResources
 	6,   // 42: codewire.v1.EnvironmentResizeOperation.state:type_name -> codewire.v1.EnvironmentResizeOperationState
 	30,  // 43: codewire.v1.EnvironmentResizeOperation.failure:type_name -> codewire.v1.EnvironmentResizeFailure
-	100, // 44: codewire.v1.EnvironmentResizeOperation.created_at:type_name -> google.protobuf.Timestamp
-	100, // 45: codewire.v1.EnvironmentResizeOperation.updated_at:type_name -> google.protobuf.Timestamp
-	100, // 46: codewire.v1.EnvironmentResizeOperation.completed_at:type_name -> google.protobuf.Timestamp
+	104, // 44: codewire.v1.EnvironmentResizeOperation.created_at:type_name -> google.protobuf.Timestamp
+	104, // 45: codewire.v1.EnvironmentResizeOperation.updated_at:type_name -> google.protobuf.Timestamp
+	104, // 46: codewire.v1.EnvironmentResizeOperation.completed_at:type_name -> google.protobuf.Timestamp
 	7,   // 47: codewire.v1.EnvironmentResizeOperation.disruption_policy:type_name -> codewire.v1.EnvironmentResizeDisruptionPolicy
 	8,   // 48: codewire.v1.EnvironmentResizeOperation.planned_mode:type_name -> codewire.v1.EnvironmentResizeExecutionMode
 	8,   // 49: codewire.v1.EnvironmentResizeOperation.applied_mode:type_name -> codewire.v1.EnvironmentResizeExecutionMode
@@ -8404,44 +8630,44 @@ var file_codewire_v1_environment_proto_depIdxs = []int32{
 	7,   // 52: codewire.v1.ResizeEnvironmentRequest.disruption_policy:type_name -> codewire.v1.EnvironmentResizeDisruptionPolicy
 	31,  // 53: codewire.v1.ResizeEnvironmentResponse.operation:type_name -> codewire.v1.EnvironmentResizeOperation
 	12,  // 54: codewire.v1.ResizeEnvironmentResponse.environment:type_name -> codewire.v1.Environment
-	103, // 55: codewire.v1.ResizeEnvironmentResponse.poll_interval:type_name -> google.protobuf.Duration
+	107, // 55: codewire.v1.ResizeEnvironmentResponse.poll_interval:type_name -> google.protobuf.Duration
 	31,  // 56: codewire.v1.GetEnvironmentResizeOperationResponse.operation:type_name -> codewire.v1.EnvironmentResizeOperation
 	12,  // 57: codewire.v1.GetEnvironmentResizeOperationResponse.environment:type_name -> codewire.v1.Environment
-	103, // 58: codewire.v1.GetEnvironmentResizeOperationResponse.poll_interval:type_name -> google.protobuf.Duration
+	107, // 58: codewire.v1.GetEnvironmentResizeOperationResponse.poll_interval:type_name -> google.protobuf.Duration
 	9,   // 59: codewire.v1.StartEnvironmentResponse.outcome:type_name -> codewire.v1.StartOutcome
 	0,   // 60: codewire.v1.SetEnvironmentStartupScriptResponse.state:type_name -> codewire.v1.EnvironmentState
 	10,  // 61: codewire.v1.AccessGrant.permission:type_name -> codewire.v1.AccessPermission
-	100, // 62: codewire.v1.AccessGrant.created_at:type_name -> google.protobuf.Timestamp
-	62,  // 63: codewire.v1.ListEnvironmentAccessResponse.access_grants:type_name -> codewire.v1.AccessGrant
+	104, // 62: codewire.v1.AccessGrant.created_at:type_name -> google.protobuf.Timestamp
+	66,  // 63: codewire.v1.ListEnvironmentAccessResponse.access_grants:type_name -> codewire.v1.AccessGrant
 	10,  // 64: codewire.v1.GrantEnvironmentAccessRequest.permission:type_name -> codewire.v1.AccessPermission
-	62,  // 65: codewire.v1.GrantEnvironmentAccessResponse.access_grant:type_name -> codewire.v1.AccessGrant
-	71,  // 66: codewire.v1.GetEnvironmentTrustReportResponse.trust_report:type_name -> codewire.v1.EnvironmentTrustReport
-	72,  // 67: codewire.v1.EnvironmentTrustReport.environment:type_name -> codewire.v1.TrustReportEnvironment
-	73,  // 68: codewire.v1.EnvironmentTrustReport.runtime:type_name -> codewire.v1.TrustReportRuntime
-	74,  // 69: codewire.v1.EnvironmentTrustReport.placement:type_name -> codewire.v1.TrustReportPlacement
-	75,  // 70: codewire.v1.EnvironmentTrustReport.images:type_name -> codewire.v1.TrustReportImages
-	76,  // 71: codewire.v1.EnvironmentTrustReport.provenance:type_name -> codewire.v1.TrustReportProvenance
-	77,  // 72: codewire.v1.EnvironmentTrustReport.attestation:type_name -> codewire.v1.TrustReportAttestation
-	78,  // 73: codewire.v1.EnvironmentTrustReport.trustee:type_name -> codewire.v1.TrustReportTrustee
-	79,  // 74: codewire.v1.EnvironmentTrustReport.summary:type_name -> codewire.v1.TrustReportSummary
+	66,  // 65: codewire.v1.GrantEnvironmentAccessResponse.access_grant:type_name -> codewire.v1.AccessGrant
+	75,  // 66: codewire.v1.GetEnvironmentTrustReportResponse.trust_report:type_name -> codewire.v1.EnvironmentTrustReport
+	76,  // 67: codewire.v1.EnvironmentTrustReport.environment:type_name -> codewire.v1.TrustReportEnvironment
+	77,  // 68: codewire.v1.EnvironmentTrustReport.runtime:type_name -> codewire.v1.TrustReportRuntime
+	78,  // 69: codewire.v1.EnvironmentTrustReport.placement:type_name -> codewire.v1.TrustReportPlacement
+	79,  // 70: codewire.v1.EnvironmentTrustReport.images:type_name -> codewire.v1.TrustReportImages
+	80,  // 71: codewire.v1.EnvironmentTrustReport.provenance:type_name -> codewire.v1.TrustReportProvenance
+	81,  // 72: codewire.v1.EnvironmentTrustReport.attestation:type_name -> codewire.v1.TrustReportAttestation
+	82,  // 73: codewire.v1.EnvironmentTrustReport.trustee:type_name -> codewire.v1.TrustReportTrustee
+	83,  // 74: codewire.v1.EnvironmentTrustReport.summary:type_name -> codewire.v1.TrustReportSummary
 	2,   // 75: codewire.v1.TrustReportEnvironment.isolation_tier:type_name -> codewire.v1.IsolationTier
-	99,  // 76: codewire.v1.TrustReportAttestation.metadata:type_name -> codewire.v1.TrustReportAttestation.MetadataEntry
+	103, // 76: codewire.v1.TrustReportAttestation.metadata:type_name -> codewire.v1.TrustReportAttestation.MetadataEntry
 	16,  // 77: codewire.v1.WatchEnvironmentCreateRequest.draft:type_name -> codewire.v1.CreateEnvironmentRequest
-	82,  // 78: codewire.v1.WatchEnvironmentCreateResponse.progress:type_name -> codewire.v1.PrepareProgress
-	83,  // 79: codewire.v1.WatchEnvironmentCreateResponse.complete:type_name -> codewire.v1.PrepareComplete
+	86,  // 78: codewire.v1.WatchEnvironmentCreateResponse.progress:type_name -> codewire.v1.PrepareProgress
+	87,  // 79: codewire.v1.WatchEnvironmentCreateResponse.complete:type_name -> codewire.v1.PrepareComplete
 	16,  // 80: codewire.v1.PrepareComplete.draft:type_name -> codewire.v1.CreateEnvironmentRequest
-	107, // 81: codewire.v1.PrepareComplete.resolved_preset:type_name -> codewire.v1.Preset
-	84,  // 82: codewire.v1.PrepareComplete.repo_config:type_name -> codewire.v1.RepoConfig
-	104, // 83: codewire.v1.RepoConfig.project_spec:type_name -> codewire.v1.ProjectSpec
-	88,  // 84: codewire.v1.StreamLogsResponse.log:type_name -> codewire.v1.EnvironmentLog
-	87,  // 85: codewire.v1.StreamLogsResponse.heartbeat:type_name -> codewire.v1.StreamHeartbeat
-	100, // 86: codewire.v1.StreamHeartbeat.sent_at:type_name -> google.protobuf.Timestamp
-	108, // 87: codewire.v1.EnvironmentLog.metadata:type_name -> google.protobuf.Struct
-	100, // 88: codewire.v1.EnvironmentLog.created_at:type_name -> google.protobuf.Timestamp
+	111, // 81: codewire.v1.PrepareComplete.resolved_preset:type_name -> codewire.v1.Preset
+	88,  // 82: codewire.v1.PrepareComplete.repo_config:type_name -> codewire.v1.RepoConfig
+	108, // 83: codewire.v1.RepoConfig.project_spec:type_name -> codewire.v1.ProjectSpec
+	92,  // 84: codewire.v1.StreamLogsResponse.log:type_name -> codewire.v1.EnvironmentLog
+	91,  // 85: codewire.v1.StreamLogsResponse.heartbeat:type_name -> codewire.v1.StreamHeartbeat
+	104, // 86: codewire.v1.StreamHeartbeat.sent_at:type_name -> google.protobuf.Timestamp
+	112, // 87: codewire.v1.EnvironmentLog.metadata:type_name -> google.protobuf.Struct
+	104, // 88: codewire.v1.EnvironmentLog.created_at:type_name -> google.protobuf.Timestamp
 	11,  // 89: codewire.v1.EnvironmentDaemonStatus.state:type_name -> codewire.v1.EnvironmentDaemonState
-	89,  // 90: codewire.v1.EnvironmentDaemonStatus.diagnostics:type_name -> codewire.v1.EnvironmentDaemonDiagnostic
-	90,  // 91: codewire.v1.GetEnvironmentDaemonStatusResponse.status:type_name -> codewire.v1.EnvironmentDaemonStatus
-	90,  // 92: codewire.v1.RepairEnvironmentDaemonResponse.status:type_name -> codewire.v1.EnvironmentDaemonStatus
+	93,  // 90: codewire.v1.EnvironmentDaemonStatus.diagnostics:type_name -> codewire.v1.EnvironmentDaemonDiagnostic
+	94,  // 91: codewire.v1.GetEnvironmentDaemonStatusResponse.status:type_name -> codewire.v1.EnvironmentDaemonStatus
+	94,  // 92: codewire.v1.RepairEnvironmentDaemonResponse.status:type_name -> codewire.v1.EnvironmentDaemonStatus
 	14,  // 93: codewire.v1.EnvironmentService.ListEnvironments:input_type -> codewire.v1.ListEnvironmentsRequest
 	16,  // 94: codewire.v1.EnvironmentService.CreateEnvironment:input_type -> codewire.v1.CreateEnvironmentRequest
 	22,  // 95: codewire.v1.EnvironmentService.GetEnvironment:input_type -> codewire.v1.GetEnvironmentRequest
@@ -8452,60 +8678,64 @@ var file_codewire_v1_environment_proto_depIdxs = []int32{
 	38,  // 100: codewire.v1.EnvironmentService.DeleteEnvironment:input_type -> codewire.v1.DeleteEnvironmentRequest
 	40,  // 101: codewire.v1.EnvironmentService.StopEnvironment:input_type -> codewire.v1.StopEnvironmentRequest
 	42,  // 102: codewire.v1.EnvironmentService.StartEnvironment:input_type -> codewire.v1.StartEnvironmentRequest
-	19,  // 103: codewire.v1.EnvironmentService.UpdateEnvironmentSources:input_type -> codewire.v1.UpdateEnvironmentSourcesRequest
-	44,  // 104: codewire.v1.EnvironmentService.ProtectEnvironment:input_type -> codewire.v1.ProtectEnvironmentRequest
-	46,  // 105: codewire.v1.EnvironmentService.UnprotectEnvironment:input_type -> codewire.v1.UnprotectEnvironmentRequest
-	48,  // 106: codewire.v1.EnvironmentService.CancelEnvironmentDeletion:input_type -> codewire.v1.CancelEnvironmentDeletionRequest
-	50,  // 107: codewire.v1.EnvironmentService.ExtendEnvironmentTtl:input_type -> codewire.v1.ExtendEnvironmentTtlRequest
-	52,  // 108: codewire.v1.EnvironmentService.SetEnvironmentIdleStop:input_type -> codewire.v1.SetEnvironmentIdleStopRequest
-	54,  // 109: codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend:input_type -> codewire.v1.SetEnvironmentIdleSuspendRequest
-	56,  // 110: codewire.v1.EnvironmentService.SetEnvironmentIdleHibernate:input_type -> codewire.v1.SetEnvironmentIdleHibernateRequest
-	58,  // 111: codewire.v1.EnvironmentService.HibernateEnvironment:input_type -> codewire.v1.HibernateEnvironmentRequest
-	60,  // 112: codewire.v1.EnvironmentService.SetEnvironmentStartupScript:input_type -> codewire.v1.SetEnvironmentStartupScriptRequest
-	69,  // 113: codewire.v1.EnvironmentService.GetEnvironmentTrustReport:input_type -> codewire.v1.GetEnvironmentTrustReportRequest
-	26,  // 114: codewire.v1.EnvironmentService.GetEnvironmentHostKey:input_type -> codewire.v1.GetEnvironmentHostKeyRequest
-	91,  // 115: codewire.v1.EnvironmentService.GetEnvironmentDaemonStatus:input_type -> codewire.v1.GetEnvironmentDaemonStatusRequest
-	93,  // 116: codewire.v1.EnvironmentService.StreamEnvironmentDaemonLogs:input_type -> codewire.v1.StreamEnvironmentDaemonLogsRequest
-	95,  // 117: codewire.v1.EnvironmentService.RepairEnvironmentDaemon:input_type -> codewire.v1.RepairEnvironmentDaemonRequest
-	97,  // 118: codewire.v1.EnvironmentService.RetryEnvironmentSetup:input_type -> codewire.v1.RetryEnvironmentSetupRequest
-	63,  // 119: codewire.v1.EnvironmentService.ListEnvironmentAccess:input_type -> codewire.v1.ListEnvironmentAccessRequest
-	65,  // 120: codewire.v1.EnvironmentService.GrantEnvironmentAccess:input_type -> codewire.v1.GrantEnvironmentAccessRequest
-	67,  // 121: codewire.v1.EnvironmentService.RevokeEnvironmentAccess:input_type -> codewire.v1.RevokeEnvironmentAccessRequest
-	80,  // 122: codewire.v1.EnvironmentService.WatchEnvironmentCreate:input_type -> codewire.v1.WatchEnvironmentCreateRequest
-	85,  // 123: codewire.v1.EnvironmentService.StreamLogs:input_type -> codewire.v1.StreamLogsRequest
-	15,  // 124: codewire.v1.EnvironmentService.ListEnvironments:output_type -> codewire.v1.ListEnvironmentsResponse
-	21,  // 125: codewire.v1.EnvironmentService.CreateEnvironment:output_type -> codewire.v1.CreateEnvironmentResponse
-	23,  // 126: codewire.v1.EnvironmentService.GetEnvironment:output_type -> codewire.v1.GetEnvironmentResponse
-	25,  // 127: codewire.v1.EnvironmentService.GetEnvironmentProjectSpec:output_type -> codewire.v1.GetEnvironmentProjectSpecResponse
-	33,  // 128: codewire.v1.EnvironmentService.PlanEnvironmentResize:output_type -> codewire.v1.PlanEnvironmentResizeResponse
-	35,  // 129: codewire.v1.EnvironmentService.ResizeEnvironment:output_type -> codewire.v1.ResizeEnvironmentResponse
-	37,  // 130: codewire.v1.EnvironmentService.GetEnvironmentResizeOperation:output_type -> codewire.v1.GetEnvironmentResizeOperationResponse
-	39,  // 131: codewire.v1.EnvironmentService.DeleteEnvironment:output_type -> codewire.v1.DeleteEnvironmentResponse
-	41,  // 132: codewire.v1.EnvironmentService.StopEnvironment:output_type -> codewire.v1.StopEnvironmentResponse
-	43,  // 133: codewire.v1.EnvironmentService.StartEnvironment:output_type -> codewire.v1.StartEnvironmentResponse
-	20,  // 134: codewire.v1.EnvironmentService.UpdateEnvironmentSources:output_type -> codewire.v1.UpdateEnvironmentSourcesResponse
-	45,  // 135: codewire.v1.EnvironmentService.ProtectEnvironment:output_type -> codewire.v1.ProtectEnvironmentResponse
-	47,  // 136: codewire.v1.EnvironmentService.UnprotectEnvironment:output_type -> codewire.v1.UnprotectEnvironmentResponse
-	49,  // 137: codewire.v1.EnvironmentService.CancelEnvironmentDeletion:output_type -> codewire.v1.CancelEnvironmentDeletionResponse
-	51,  // 138: codewire.v1.EnvironmentService.ExtendEnvironmentTtl:output_type -> codewire.v1.ExtendEnvironmentTtlResponse
-	53,  // 139: codewire.v1.EnvironmentService.SetEnvironmentIdleStop:output_type -> codewire.v1.SetEnvironmentIdleStopResponse
-	55,  // 140: codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend:output_type -> codewire.v1.SetEnvironmentIdleSuspendResponse
-	57,  // 141: codewire.v1.EnvironmentService.SetEnvironmentIdleHibernate:output_type -> codewire.v1.SetEnvironmentIdleHibernateResponse
-	59,  // 142: codewire.v1.EnvironmentService.HibernateEnvironment:output_type -> codewire.v1.HibernateEnvironmentResponse
-	61,  // 143: codewire.v1.EnvironmentService.SetEnvironmentStartupScript:output_type -> codewire.v1.SetEnvironmentStartupScriptResponse
-	70,  // 144: codewire.v1.EnvironmentService.GetEnvironmentTrustReport:output_type -> codewire.v1.GetEnvironmentTrustReportResponse
-	27,  // 145: codewire.v1.EnvironmentService.GetEnvironmentHostKey:output_type -> codewire.v1.GetEnvironmentHostKeyResponse
-	92,  // 146: codewire.v1.EnvironmentService.GetEnvironmentDaemonStatus:output_type -> codewire.v1.GetEnvironmentDaemonStatusResponse
-	94,  // 147: codewire.v1.EnvironmentService.StreamEnvironmentDaemonLogs:output_type -> codewire.v1.StreamEnvironmentDaemonLogsResponse
-	96,  // 148: codewire.v1.EnvironmentService.RepairEnvironmentDaemon:output_type -> codewire.v1.RepairEnvironmentDaemonResponse
-	98,  // 149: codewire.v1.EnvironmentService.RetryEnvironmentSetup:output_type -> codewire.v1.RetryEnvironmentSetupResponse
-	64,  // 150: codewire.v1.EnvironmentService.ListEnvironmentAccess:output_type -> codewire.v1.ListEnvironmentAccessResponse
-	66,  // 151: codewire.v1.EnvironmentService.GrantEnvironmentAccess:output_type -> codewire.v1.GrantEnvironmentAccessResponse
-	68,  // 152: codewire.v1.EnvironmentService.RevokeEnvironmentAccess:output_type -> codewire.v1.RevokeEnvironmentAccessResponse
-	81,  // 153: codewire.v1.EnvironmentService.WatchEnvironmentCreate:output_type -> codewire.v1.WatchEnvironmentCreateResponse
-	86,  // 154: codewire.v1.EnvironmentService.StreamLogs:output_type -> codewire.v1.StreamLogsResponse
-	124, // [124:155] is the sub-list for method output_type
-	93,  // [93:124] is the sub-list for method input_type
+	44,  // 103: codewire.v1.EnvironmentService.SuspendEnvironment:input_type -> codewire.v1.SuspendEnvironmentRequest
+	46,  // 104: codewire.v1.EnvironmentService.ResumeEnvironment:input_type -> codewire.v1.ResumeEnvironmentRequest
+	19,  // 105: codewire.v1.EnvironmentService.UpdateEnvironmentSources:input_type -> codewire.v1.UpdateEnvironmentSourcesRequest
+	48,  // 106: codewire.v1.EnvironmentService.ProtectEnvironment:input_type -> codewire.v1.ProtectEnvironmentRequest
+	50,  // 107: codewire.v1.EnvironmentService.UnprotectEnvironment:input_type -> codewire.v1.UnprotectEnvironmentRequest
+	52,  // 108: codewire.v1.EnvironmentService.CancelEnvironmentDeletion:input_type -> codewire.v1.CancelEnvironmentDeletionRequest
+	54,  // 109: codewire.v1.EnvironmentService.ExtendEnvironmentTtl:input_type -> codewire.v1.ExtendEnvironmentTtlRequest
+	56,  // 110: codewire.v1.EnvironmentService.SetEnvironmentIdleStop:input_type -> codewire.v1.SetEnvironmentIdleStopRequest
+	58,  // 111: codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend:input_type -> codewire.v1.SetEnvironmentIdleSuspendRequest
+	60,  // 112: codewire.v1.EnvironmentService.SetEnvironmentIdleHibernate:input_type -> codewire.v1.SetEnvironmentIdleHibernateRequest
+	62,  // 113: codewire.v1.EnvironmentService.HibernateEnvironment:input_type -> codewire.v1.HibernateEnvironmentRequest
+	64,  // 114: codewire.v1.EnvironmentService.SetEnvironmentStartupScript:input_type -> codewire.v1.SetEnvironmentStartupScriptRequest
+	73,  // 115: codewire.v1.EnvironmentService.GetEnvironmentTrustReport:input_type -> codewire.v1.GetEnvironmentTrustReportRequest
+	26,  // 116: codewire.v1.EnvironmentService.GetEnvironmentHostKey:input_type -> codewire.v1.GetEnvironmentHostKeyRequest
+	95,  // 117: codewire.v1.EnvironmentService.GetEnvironmentDaemonStatus:input_type -> codewire.v1.GetEnvironmentDaemonStatusRequest
+	97,  // 118: codewire.v1.EnvironmentService.StreamEnvironmentDaemonLogs:input_type -> codewire.v1.StreamEnvironmentDaemonLogsRequest
+	99,  // 119: codewire.v1.EnvironmentService.RepairEnvironmentDaemon:input_type -> codewire.v1.RepairEnvironmentDaemonRequest
+	101, // 120: codewire.v1.EnvironmentService.RetryEnvironmentSetup:input_type -> codewire.v1.RetryEnvironmentSetupRequest
+	67,  // 121: codewire.v1.EnvironmentService.ListEnvironmentAccess:input_type -> codewire.v1.ListEnvironmentAccessRequest
+	69,  // 122: codewire.v1.EnvironmentService.GrantEnvironmentAccess:input_type -> codewire.v1.GrantEnvironmentAccessRequest
+	71,  // 123: codewire.v1.EnvironmentService.RevokeEnvironmentAccess:input_type -> codewire.v1.RevokeEnvironmentAccessRequest
+	84,  // 124: codewire.v1.EnvironmentService.WatchEnvironmentCreate:input_type -> codewire.v1.WatchEnvironmentCreateRequest
+	89,  // 125: codewire.v1.EnvironmentService.StreamLogs:input_type -> codewire.v1.StreamLogsRequest
+	15,  // 126: codewire.v1.EnvironmentService.ListEnvironments:output_type -> codewire.v1.ListEnvironmentsResponse
+	21,  // 127: codewire.v1.EnvironmentService.CreateEnvironment:output_type -> codewire.v1.CreateEnvironmentResponse
+	23,  // 128: codewire.v1.EnvironmentService.GetEnvironment:output_type -> codewire.v1.GetEnvironmentResponse
+	25,  // 129: codewire.v1.EnvironmentService.GetEnvironmentProjectSpec:output_type -> codewire.v1.GetEnvironmentProjectSpecResponse
+	33,  // 130: codewire.v1.EnvironmentService.PlanEnvironmentResize:output_type -> codewire.v1.PlanEnvironmentResizeResponse
+	35,  // 131: codewire.v1.EnvironmentService.ResizeEnvironment:output_type -> codewire.v1.ResizeEnvironmentResponse
+	37,  // 132: codewire.v1.EnvironmentService.GetEnvironmentResizeOperation:output_type -> codewire.v1.GetEnvironmentResizeOperationResponse
+	39,  // 133: codewire.v1.EnvironmentService.DeleteEnvironment:output_type -> codewire.v1.DeleteEnvironmentResponse
+	41,  // 134: codewire.v1.EnvironmentService.StopEnvironment:output_type -> codewire.v1.StopEnvironmentResponse
+	43,  // 135: codewire.v1.EnvironmentService.StartEnvironment:output_type -> codewire.v1.StartEnvironmentResponse
+	45,  // 136: codewire.v1.EnvironmentService.SuspendEnvironment:output_type -> codewire.v1.SuspendEnvironmentResponse
+	47,  // 137: codewire.v1.EnvironmentService.ResumeEnvironment:output_type -> codewire.v1.ResumeEnvironmentResponse
+	20,  // 138: codewire.v1.EnvironmentService.UpdateEnvironmentSources:output_type -> codewire.v1.UpdateEnvironmentSourcesResponse
+	49,  // 139: codewire.v1.EnvironmentService.ProtectEnvironment:output_type -> codewire.v1.ProtectEnvironmentResponse
+	51,  // 140: codewire.v1.EnvironmentService.UnprotectEnvironment:output_type -> codewire.v1.UnprotectEnvironmentResponse
+	53,  // 141: codewire.v1.EnvironmentService.CancelEnvironmentDeletion:output_type -> codewire.v1.CancelEnvironmentDeletionResponse
+	55,  // 142: codewire.v1.EnvironmentService.ExtendEnvironmentTtl:output_type -> codewire.v1.ExtendEnvironmentTtlResponse
+	57,  // 143: codewire.v1.EnvironmentService.SetEnvironmentIdleStop:output_type -> codewire.v1.SetEnvironmentIdleStopResponse
+	59,  // 144: codewire.v1.EnvironmentService.SetEnvironmentIdleSuspend:output_type -> codewire.v1.SetEnvironmentIdleSuspendResponse
+	61,  // 145: codewire.v1.EnvironmentService.SetEnvironmentIdleHibernate:output_type -> codewire.v1.SetEnvironmentIdleHibernateResponse
+	63,  // 146: codewire.v1.EnvironmentService.HibernateEnvironment:output_type -> codewire.v1.HibernateEnvironmentResponse
+	65,  // 147: codewire.v1.EnvironmentService.SetEnvironmentStartupScript:output_type -> codewire.v1.SetEnvironmentStartupScriptResponse
+	74,  // 148: codewire.v1.EnvironmentService.GetEnvironmentTrustReport:output_type -> codewire.v1.GetEnvironmentTrustReportResponse
+	27,  // 149: codewire.v1.EnvironmentService.GetEnvironmentHostKey:output_type -> codewire.v1.GetEnvironmentHostKeyResponse
+	96,  // 150: codewire.v1.EnvironmentService.GetEnvironmentDaemonStatus:output_type -> codewire.v1.GetEnvironmentDaemonStatusResponse
+	98,  // 151: codewire.v1.EnvironmentService.StreamEnvironmentDaemonLogs:output_type -> codewire.v1.StreamEnvironmentDaemonLogsResponse
+	100, // 152: codewire.v1.EnvironmentService.RepairEnvironmentDaemon:output_type -> codewire.v1.RepairEnvironmentDaemonResponse
+	102, // 153: codewire.v1.EnvironmentService.RetryEnvironmentSetup:output_type -> codewire.v1.RetryEnvironmentSetupResponse
+	68,  // 154: codewire.v1.EnvironmentService.ListEnvironmentAccess:output_type -> codewire.v1.ListEnvironmentAccessResponse
+	70,  // 155: codewire.v1.EnvironmentService.GrantEnvironmentAccess:output_type -> codewire.v1.GrantEnvironmentAccessResponse
+	72,  // 156: codewire.v1.EnvironmentService.RevokeEnvironmentAccess:output_type -> codewire.v1.RevokeEnvironmentAccessResponse
+	85,  // 157: codewire.v1.EnvironmentService.WatchEnvironmentCreate:output_type -> codewire.v1.WatchEnvironmentCreateResponse
+	90,  // 158: codewire.v1.EnvironmentService.StreamLogs:output_type -> codewire.v1.StreamLogsResponse
+	126, // [126:159] is the sub-list for method output_type
+	93,  // [93:126] is the sub-list for method input_type
 	93,  // [93:93] is the sub-list for extension type_name
 	93,  // [93:93] is the sub-list for extension extendee
 	0,   // [0:93] is the sub-list for field type_name
@@ -8523,11 +8753,11 @@ func file_codewire_v1_environment_proto_init() {
 	file_codewire_v1_environment_proto_msgTypes[0].OneofWrappers = []any{}
 	file_codewire_v1_environment_proto_msgTypes[4].OneofWrappers = []any{}
 	file_codewire_v1_environment_proto_msgTypes[6].OneofWrappers = []any{}
-	file_codewire_v1_environment_proto_msgTypes[69].OneofWrappers = []any{
+	file_codewire_v1_environment_proto_msgTypes[73].OneofWrappers = []any{
 		(*WatchEnvironmentCreateResponse_Progress)(nil),
 		(*WatchEnvironmentCreateResponse_Complete)(nil),
 	}
-	file_codewire_v1_environment_proto_msgTypes[74].OneofWrappers = []any{
+	file_codewire_v1_environment_proto_msgTypes[78].OneofWrappers = []any{
 		(*StreamLogsResponse_Log)(nil),
 		(*StreamLogsResponse_Heartbeat)(nil),
 	}
@@ -8537,7 +8767,7 @@ func file_codewire_v1_environment_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_codewire_v1_environment_proto_rawDesc), len(file_codewire_v1_environment_proto_rawDesc)),
 			NumEnums:      12,
-			NumMessages:   88,
+			NumMessages:   92,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

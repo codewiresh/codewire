@@ -54,8 +54,10 @@ from codewire.v1.environment_pb2 import (
     PlanEnvironmentResizeResponse,
     ListEnvironmentsResponse,
     ResizeEnvironmentResponse,
+    ResumeEnvironmentResponse,
     StartEnvironmentResponse,
     StopEnvironmentResponse,
+    SuspendEnvironmentResponse,
     IsolationTier,
 )
 from codewire.v1.exec_connect import ExecServiceWSGIApplication
@@ -357,6 +359,14 @@ class ControlPlaneFixture:
     def start_environment(self, request, ctx):
         self._require_auth(ctx)
         return StartEnvironmentResponse(status="started")
+
+    def suspend_environment(self, request, ctx):
+        self._require_auth(ctx)
+        return SuspendEnvironmentResponse(status="suspended")
+
+    def resume_environment(self, request, ctx):
+        self._require_auth(ctx)
+        return ResumeEnvironmentResponse(status="resumed")
 
     @staticmethod
     def _resize_operation(request_id: str = "req_resize") -> EnvironmentResizeOperation:

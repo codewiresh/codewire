@@ -837,6 +837,8 @@ pub(crate) enum EnvCommand {
     Report(EnvReportArgs),
     Stop(EnvTargetArgs),
     Start(EnvStartArgs),
+    Suspend(EnvTargetArgs),
+    Resume(EnvTargetArgs),
     Restart(EnvTargetArgs),
     RefreshSkills(EnvTargetArgs),
     Rm(EnvDeleteArgs),

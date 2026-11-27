@@ -662,6 +662,34 @@ class StartEnvironmentResponse(_message.Message):
     completes_with_log: bool
     def __init__(self, status: _Optional[str] = ..., outcome: _Optional[_Union[StartOutcome, str]] = ..., completes_with_log: _Optional[bool] = ...) -> None: ...
 
+class SuspendEnvironmentRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
+
+class SuspendEnvironmentResponse(_message.Message):
+    __slots__ = ("status",)
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    status: str
+    def __init__(self, status: _Optional[str] = ...) -> None: ...
+
+class ResumeEnvironmentRequest(_message.Message):
+    __slots__ = ("org_id", "environment_id")
+    ORG_ID_FIELD_NUMBER: _ClassVar[int]
+    ENVIRONMENT_ID_FIELD_NUMBER: _ClassVar[int]
+    org_id: str
+    environment_id: str
+    def __init__(self, org_id: _Optional[str] = ..., environment_id: _Optional[str] = ...) -> None: ...
+
+class ResumeEnvironmentResponse(_message.Message):
+    __slots__ = ("status",)
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    status: str
+    def __init__(self, status: _Optional[str] = ...) -> None: ...
+
 class ProtectEnvironmentRequest(_message.Message):
     __slots__ = ("org_id", "environment_id")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]

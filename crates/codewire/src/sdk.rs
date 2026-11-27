@@ -21,9 +21,9 @@ use crate::{
     CreatePortResponse, DeleteEnvironmentRequest, DeletePortRequest, DownloadFileRequest,
     Environment, EnvironmentState, ExecRequest, ExecResponse, FileEntry, GetEnvironmentRequest,
     ListFilesRequest, ListFilesResponse, ListPortsRequest, ListPortsResponse,
-    StartEnvironmentRequest, StatFileRequest, StaticTokenProvider, StopEnvironmentRequest,
-    UploadFileHeader, UploadFileRequest, UploadFileResponse, WriteFile, WriteFilesRequest,
-    download_file_response, upload_file_request,
+    ResumeEnvironmentRequest, StartEnvironmentRequest, StatFileRequest, StaticTokenProvider,
+    StopEnvironmentRequest, SuspendEnvironmentRequest, UploadFileHeader, UploadFileRequest,
+    UploadFileResponse, WriteFile, WriteFilesRequest, download_file_response, upload_file_request,
 };
 
 /// The API key the SDKs read, a `cw_` key or an OAuth access token.
@@ -484,6 +484,22 @@ impl EnvironmentHandle {
         let mut request = StartEnvironmentRequest::default();
         self.ids(&mut request.org_id, &mut request.environment_id);
         self.codewire.client.start_environment(request).await?;
+        Ok(())
+    }
+
+    /// Pauses a running `standard` environment's VM inside its Pod.
+    pub async fn suspend(&self) -> Result<(), ClientError> {
+        let mut request = SuspendEnvironmentRequest::default();
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        self.codewire.client.suspend_environment(request).await?;
+        Ok(())
+    }
+
+    /// Wakes a suspended `standard` environment's VM.
+    pub async fn resume(&self) -> Result<(), ClientError> {
+        let mut request = ResumeEnvironmentRequest::default();
+        self.ids(&mut request.org_id, &mut request.environment_id);
+        self.codewire.client.resume_environment(request).await?;
         Ok(())
     }
 

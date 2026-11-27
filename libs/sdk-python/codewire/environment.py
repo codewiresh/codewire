@@ -26,8 +26,10 @@ from codewire.v1.environment_pb2 import (
     GetEnvironmentRequest,
     PlanEnvironmentResizeRequest,
     ResizeEnvironmentRequest,
+    ResumeEnvironmentRequest,
     StartEnvironmentRequest,
     StopEnvironmentRequest,
+    SuspendEnvironmentRequest,
 )
 from codewire.v1.port_connect import PortServiceClientSync
 from codewire.v1.port_pb2 import CreatePortRequest, DeletePortRequest, PortAccess
@@ -89,6 +91,22 @@ class Environment:
         self._context.unary(
             self._environments.stop_environment,
             StopEnvironmentRequest(
+                org_id=self._context.resolve_org_id(), environment_id=self.id
+            ),
+        )
+
+    def suspend(self) -> None:
+        self._context.unary(
+            self._environments.suspend_environment,
+            SuspendEnvironmentRequest(
+                org_id=self._context.resolve_org_id(), environment_id=self.id
+            ),
+        )
+
+    def resume(self) -> None:
+        self._context.unary(
+            self._environments.resume_environment,
+            ResumeEnvironmentRequest(
                 org_id=self._context.resolve_org_id(), environment_id=self.id
             ),
         )

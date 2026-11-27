@@ -45,6 +45,8 @@ pub(crate) fn direct_environment_command(
         Command::Info(args) => EnvCommand::Info(args),
         Command::Create(args) => EnvCommand::Create(args),
         Command::Start(args) => EnvCommand::Start(args),
+        Command::Suspend(args) => EnvCommand::Suspend(args),
+        Command::Resume(args) => EnvCommand::Resume(args),
         Command::Rm(args) => EnvCommand::Rm(args),
         Command::Cp(args) => EnvCommand::Cp(args),
         Command::Runtime(args) => EnvCommand::Runtime(args),
@@ -513,8 +515,9 @@ pub(crate) fn retired_env_replacement(
         "logs" => format!("{prefix} logs{} --setup", quoted(rest)),
         "port" => retired_port_replacement(prefix, rest),
         "agent" | "runtime" | "create" | "info" | "update" | "resize" | "report" | "stop"
-        | "start" | "restart" | "refresh-skills" | "rm" | "prune" | "nuke" | "cp" | "protect"
-        | "unprotect" | "cancel-delete" | "extend" | "access" | "share" | "daemon" => {
+        | "start" | "suspend" | "resume" | "restart" | "refresh-skills" | "rm" | "prune"
+        | "nuke" | "cp" | "protect" | "unprotect" | "cancel-delete" | "extend" | "access"
+        | "share" | "daemon" => {
             format!("{prefix} {command}{}", quoted(rest))
         }
         _ => return "the top-level environment commands (`cw help --all`)".to_owned(),

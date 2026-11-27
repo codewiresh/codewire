@@ -947,6 +947,12 @@ pub(crate) async fn handle_host_environment_command(
         }
         EnvCommand::Start(a) => host_lifecycle(environment, "start", a.output).await?,
         EnvCommand::Stop(a) => host_lifecycle(environment, "stop", a.output).await?,
+        EnvCommand::Suspend(_) => {
+            anyhow::bail!("suspend applies to cloud sandboxes on the standard runtime");
+        }
+        EnvCommand::Resume(_) => {
+            anyhow::bail!("resume applies to cloud sandboxes on the standard runtime");
+        }
         EnvCommand::Restart(a) => {
             host_lifecycle(environment.clone(), "stop", a.output).await?;
             host_lifecycle(environment, "start", a.output).await?;

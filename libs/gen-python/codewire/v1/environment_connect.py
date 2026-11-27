@@ -18,7 +18,7 @@ from connectrpc.protocol import ProtocolType
 from connectrpc.server import ConnectASGIApplication, ConnectWSGIApplication, Endpoint, EndpointSync
 from pyqwest import Client, SyncClient
 
-from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, HibernateEnvironmentRequest, HibernateEnvironmentResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, SetEnvironmentIdleHibernateRequest, SetEnvironmentIdleHibernateResponse, SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse, SetEnvironmentIdleSuspendRequest, SetEnvironmentIdleSuspendResponse, SetEnvironmentStartupScriptRequest, SetEnvironmentStartupScriptResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
+from .environment_pb2 import CancelEnvironmentDeletionRequest, CancelEnvironmentDeletionResponse, CreateEnvironmentRequest, CreateEnvironmentResponse, DeleteEnvironmentRequest, DeleteEnvironmentResponse, ExtendEnvironmentTtlRequest, ExtendEnvironmentTtlResponse, GetEnvironmentDaemonStatusRequest, GetEnvironmentDaemonStatusResponse, GetEnvironmentHostKeyRequest, GetEnvironmentHostKeyResponse, GetEnvironmentProjectSpecRequest, GetEnvironmentProjectSpecResponse, GetEnvironmentRequest, GetEnvironmentResizeOperationRequest, GetEnvironmentResizeOperationResponse, GetEnvironmentResponse, GetEnvironmentTrustReportRequest, GetEnvironmentTrustReportResponse, GrantEnvironmentAccessRequest, GrantEnvironmentAccessResponse, HibernateEnvironmentRequest, HibernateEnvironmentResponse, ListEnvironmentAccessRequest, ListEnvironmentAccessResponse, ListEnvironmentsRequest, ListEnvironmentsResponse, PlanEnvironmentResizeRequest, PlanEnvironmentResizeResponse, ProtectEnvironmentRequest, ProtectEnvironmentResponse, RepairEnvironmentDaemonRequest, RepairEnvironmentDaemonResponse, ResizeEnvironmentRequest, ResizeEnvironmentResponse, ResumeEnvironmentRequest, ResumeEnvironmentResponse, RetryEnvironmentSetupRequest, RetryEnvironmentSetupResponse, RevokeEnvironmentAccessRequest, RevokeEnvironmentAccessResponse, SetEnvironmentIdleHibernateRequest, SetEnvironmentIdleHibernateResponse, SetEnvironmentIdleStopRequest, SetEnvironmentIdleStopResponse, SetEnvironmentIdleSuspendRequest, SetEnvironmentIdleSuspendResponse, SetEnvironmentStartupScriptRequest, SetEnvironmentStartupScriptResponse, StartEnvironmentRequest, StartEnvironmentResponse, StopEnvironmentRequest, StopEnvironmentResponse, StreamEnvironmentDaemonLogsRequest, StreamEnvironmentDaemonLogsResponse, StreamLogsRequest, StreamLogsResponse, SuspendEnvironmentRequest, SuspendEnvironmentResponse, UnprotectEnvironmentRequest, UnprotectEnvironmentResponse, UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse, WatchEnvironmentCreateRequest, WatchEnvironmentCreateResponse
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterable, Iterator, Mapping
@@ -63,6 +63,12 @@ class EnvironmentService(Protocol):
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def start_environment(self, request: StartEnvironmentRequest, ctx: RequestContext[StartEnvironmentRequest, StartEnvironmentResponse]) -> StartEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def suspend_environment(self, request: SuspendEnvironmentRequest, ctx: RequestContext[SuspendEnvironmentRequest, SuspendEnvironmentResponse]) -> SuspendEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    async def resume_environment(self, request: ResumeEnvironmentRequest, ctx: RequestContext[ResumeEnvironmentRequest, ResumeEnvironmentResponse]) -> ResumeEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
     async def update_environment_sources(self, request: UpdateEnvironmentSourcesRequest, ctx: RequestContext[UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse]) -> UpdateEnvironmentSourcesResponse:
@@ -241,6 +247,26 @@ class EnvironmentServiceASGIApplication(ConnectASGIApplication[EnvironmentServic
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=svc.start_environment,
+                ),
+                "/codewire.v1.EnvironmentService/SuspendEnvironment": Endpoint.unary(
+                    method=MethodInfo(
+                        name="SuspendEnvironment",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=SuspendEnvironmentRequest,
+                        output=SuspendEnvironmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.suspend_environment,
+                ),
+                "/codewire.v1.EnvironmentService/ResumeEnvironment": Endpoint.unary(
+                    method=MethodInfo(
+                        name="ResumeEnvironment",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=ResumeEnvironmentRequest,
+                        output=ResumeEnvironmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=svc.resume_environment,
                 ),
                 "/codewire.v1.EnvironmentService/UpdateEnvironmentSources": Endpoint.unary(
                     method=MethodInfo(
@@ -694,6 +720,46 @@ class EnvironmentServiceClient(ConnectClient):
                 service_name="codewire.v1.EnvironmentService",
                 input=StartEnvironmentRequest,
                 output=StartEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def suspend_environment(
+        self,
+        request: SuspendEnvironmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SuspendEnvironmentResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SuspendEnvironment",
+                service_name="codewire.v1.EnvironmentService",
+                input=SuspendEnvironmentRequest,
+                output=SuspendEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+
+    async def resume_environment(
+        self,
+        request: ResumeEnvironmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ResumeEnvironmentResponse:
+        return await self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ResumeEnvironment",
+                service_name="codewire.v1.EnvironmentService",
+                input=ResumeEnvironmentRequest,
+                output=ResumeEnvironmentResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,
@@ -1159,6 +1225,12 @@ class EnvironmentServiceSync(Protocol):
     def start_environment(self, request: StartEnvironmentRequest, ctx: RequestContext[StartEnvironmentRequest, StartEnvironmentResponse]) -> StartEnvironmentResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
+    def suspend_environment(self, request: SuspendEnvironmentRequest, ctx: RequestContext[SuspendEnvironmentRequest, SuspendEnvironmentResponse]) -> SuspendEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
+    def resume_environment(self, request: ResumeEnvironmentRequest, ctx: RequestContext[ResumeEnvironmentRequest, ResumeEnvironmentResponse]) -> ResumeEnvironmentResponse:
+        raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
+
     def update_environment_sources(self, request: UpdateEnvironmentSourcesRequest, ctx: RequestContext[UpdateEnvironmentSourcesRequest, UpdateEnvironmentSourcesResponse]) -> UpdateEnvironmentSourcesResponse:
         raise ConnectError(Code.UNIMPLEMENTED, 'Not implemented')
 
@@ -1333,6 +1405,26 @@ class EnvironmentServiceWSGIApplication(ConnectWSGIApplication):
                         idempotency_level=IdempotencyLevel.UNKNOWN,
                     ),
                     function=service.start_environment,
+                ),
+                "/codewire.v1.EnvironmentService/SuspendEnvironment": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="SuspendEnvironment",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=SuspendEnvironmentRequest,
+                        output=SuspendEnvironmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.suspend_environment,
+                ),
+                "/codewire.v1.EnvironmentService/ResumeEnvironment": EndpointSync.unary(
+                    method=MethodInfo(
+                        name="ResumeEnvironment",
+                        service_name="codewire.v1.EnvironmentService",
+                        input=ResumeEnvironmentRequest,
+                        output=ResumeEnvironmentResponse,
+                        idempotency_level=IdempotencyLevel.UNKNOWN,
+                    ),
+                    function=service.resume_environment,
                 ),
                 "/codewire.v1.EnvironmentService/UpdateEnvironmentSources": EndpointSync.unary(
                     method=MethodInfo(
@@ -1777,6 +1869,44 @@ class EnvironmentServiceClientSync(ConnectClientSync):
                 service_name="codewire.v1.EnvironmentService",
                 input=StartEnvironmentRequest,
                 output=StartEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def suspend_environment(
+        self,
+        request: SuspendEnvironmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> SuspendEnvironmentResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="SuspendEnvironment",
+                service_name="codewire.v1.EnvironmentService",
+                input=SuspendEnvironmentRequest,
+                output=SuspendEnvironmentResponse,
+                idempotency_level=IdempotencyLevel.UNKNOWN,
+            ),
+            headers=headers,
+            timeout_ms=timeout_ms,
+        )
+    def resume_environment(
+        self,
+        request: ResumeEnvironmentRequest,
+        *,
+        headers: Headers | Mapping[str, str] | None = None, 
+        timeout_ms: int | None = None,
+    ) -> ResumeEnvironmentResponse:
+        return self.execute_unary(
+            request=request,
+            method=MethodInfo(
+                name="ResumeEnvironment",
+                service_name="codewire.v1.EnvironmentService",
+                input=ResumeEnvironmentRequest,
+                output=ResumeEnvironmentResponse,
                 idempotency_level=IdempotencyLevel.UNKNOWN,
             ),
             headers=headers,

@@ -63,6 +63,12 @@ const (
 	// EnvironmentServiceStartEnvironmentProcedure is the fully-qualified name of the
 	// EnvironmentService's StartEnvironment RPC.
 	EnvironmentServiceStartEnvironmentProcedure = "/codewire.v1.EnvironmentService/StartEnvironment"
+	// EnvironmentServiceSuspendEnvironmentProcedure is the fully-qualified name of the
+	// EnvironmentService's SuspendEnvironment RPC.
+	EnvironmentServiceSuspendEnvironmentProcedure = "/codewire.v1.EnvironmentService/SuspendEnvironment"
+	// EnvironmentServiceResumeEnvironmentProcedure is the fully-qualified name of the
+	// EnvironmentService's ResumeEnvironment RPC.
+	EnvironmentServiceResumeEnvironmentProcedure = "/codewire.v1.EnvironmentService/ResumeEnvironment"
 	// EnvironmentServiceUpdateEnvironmentSourcesProcedure is the fully-qualified name of the
 	// EnvironmentService's UpdateEnvironmentSources RPC.
 	EnvironmentServiceUpdateEnvironmentSourcesProcedure = "/codewire.v1.EnvironmentService/UpdateEnvironmentSources"
@@ -144,6 +150,12 @@ type EnvironmentServiceClient interface {
 	DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error)
 	StopEnvironment(context.Context, *connect.Request[v1.StopEnvironmentRequest]) (*connect.Response[v1.StopEnvironmentResponse], error)
 	StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error)
+	// Pauses a running `standard` environment's VM inside its Pod, keeping
+	// every process, open file and connection (#5529). Any use or
+	// ResumeEnvironment wakes it in milliseconds.
+	SuspendEnvironment(context.Context, *connect.Request[v1.SuspendEnvironmentRequest]) (*connect.Response[v1.SuspendEnvironmentResponse], error)
+	// Wakes a suspended `standard` environment's VM inside its Pod (#5529).
+	ResumeEnvironment(context.Context, *connect.Request[v1.ResumeEnvironmentRequest]) (*connect.Response[v1.ResumeEnvironmentResponse], error)
 	// Replaces only application-secret sources and provider-profile selection.
 	// Running environments require explicit restart confirmation; workspace data
 	// is preserved. This is not an arbitrary ProjectSpec update operation.
@@ -263,6 +275,18 @@ func NewEnvironmentServiceClient(httpClient connect.HTTPClient, baseURL string, 
 			httpClient,
 			baseURL+EnvironmentServiceStartEnvironmentProcedure,
 			connect.WithSchema(environmentServiceMethods.ByName("StartEnvironment")),
+			connect.WithClientOptions(opts...),
+		),
+		suspendEnvironment: connect.NewClient[v1.SuspendEnvironmentRequest, v1.SuspendEnvironmentResponse](
+			httpClient,
+			baseURL+EnvironmentServiceSuspendEnvironmentProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("SuspendEnvironment")),
+			connect.WithClientOptions(opts...),
+		),
+		resumeEnvironment: connect.NewClient[v1.ResumeEnvironmentRequest, v1.ResumeEnvironmentResponse](
+			httpClient,
+			baseURL+EnvironmentServiceResumeEnvironmentProcedure,
+			connect.WithSchema(environmentServiceMethods.ByName("ResumeEnvironment")),
 			connect.WithClientOptions(opts...),
 		),
 		updateEnvironmentSources: connect.NewClient[v1.UpdateEnvironmentSourcesRequest, v1.UpdateEnvironmentSourcesResponse](
@@ -412,6 +436,8 @@ type environmentServiceClient struct {
 	deleteEnvironment             *connect.Client[v1.DeleteEnvironmentRequest, v1.DeleteEnvironmentResponse]
 	stopEnvironment               *connect.Client[v1.StopEnvironmentRequest, v1.StopEnvironmentResponse]
 	startEnvironment              *connect.Client[v1.StartEnvironmentRequest, v1.StartEnvironmentResponse]
+	suspendEnvironment            *connect.Client[v1.SuspendEnvironmentRequest, v1.SuspendEnvironmentResponse]
+	resumeEnvironment             *connect.Client[v1.ResumeEnvironmentRequest, v1.ResumeEnvironmentResponse]
 	updateEnvironmentSources      *connect.Client[v1.UpdateEnvironmentSourcesRequest, v1.UpdateEnvironmentSourcesResponse]
 	protectEnvironment            *connect.Client[v1.ProtectEnvironmentRequest, v1.ProtectEnvironmentResponse]
 	unprotectEnvironment          *connect.Client[v1.UnprotectEnvironmentRequest, v1.UnprotectEnvironmentResponse]
@@ -483,6 +509,16 @@ func (c *environmentServiceClient) StopEnvironment(ctx context.Context, req *con
 // StartEnvironment calls codewire.v1.EnvironmentService.StartEnvironment.
 func (c *environmentServiceClient) StartEnvironment(ctx context.Context, req *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error) {
 	return c.startEnvironment.CallUnary(ctx, req)
+}
+
+// SuspendEnvironment calls codewire.v1.EnvironmentService.SuspendEnvironment.
+func (c *environmentServiceClient) SuspendEnvironment(ctx context.Context, req *connect.Request[v1.SuspendEnvironmentRequest]) (*connect.Response[v1.SuspendEnvironmentResponse], error) {
+	return c.suspendEnvironment.CallUnary(ctx, req)
+}
+
+// ResumeEnvironment calls codewire.v1.EnvironmentService.ResumeEnvironment.
+func (c *environmentServiceClient) ResumeEnvironment(ctx context.Context, req *connect.Request[v1.ResumeEnvironmentRequest]) (*connect.Response[v1.ResumeEnvironmentResponse], error) {
+	return c.resumeEnvironment.CallUnary(ctx, req)
 }
 
 // UpdateEnvironmentSources calls codewire.v1.EnvironmentService.UpdateEnvironmentSources.
@@ -606,6 +642,12 @@ type EnvironmentServiceHandler interface {
 	DeleteEnvironment(context.Context, *connect.Request[v1.DeleteEnvironmentRequest]) (*connect.Response[v1.DeleteEnvironmentResponse], error)
 	StopEnvironment(context.Context, *connect.Request[v1.StopEnvironmentRequest]) (*connect.Response[v1.StopEnvironmentResponse], error)
 	StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error)
+	// Pauses a running `standard` environment's VM inside its Pod, keeping
+	// every process, open file and connection (#5529). Any use or
+	// ResumeEnvironment wakes it in milliseconds.
+	SuspendEnvironment(context.Context, *connect.Request[v1.SuspendEnvironmentRequest]) (*connect.Response[v1.SuspendEnvironmentResponse], error)
+	// Wakes a suspended `standard` environment's VM inside its Pod (#5529).
+	ResumeEnvironment(context.Context, *connect.Request[v1.ResumeEnvironmentRequest]) (*connect.Response[v1.ResumeEnvironmentResponse], error)
 	// Replaces only application-secret sources and provider-profile selection.
 	// Running environments require explicit restart confirmation; workspace data
 	// is preserved. This is not an arbitrary ProjectSpec update operation.
@@ -721,6 +763,18 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 		EnvironmentServiceStartEnvironmentProcedure,
 		svc.StartEnvironment,
 		connect.WithSchema(environmentServiceMethods.ByName("StartEnvironment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceSuspendEnvironmentHandler := connect.NewUnaryHandler(
+		EnvironmentServiceSuspendEnvironmentProcedure,
+		svc.SuspendEnvironment,
+		connect.WithSchema(environmentServiceMethods.ByName("SuspendEnvironment")),
+		connect.WithHandlerOptions(opts...),
+	)
+	environmentServiceResumeEnvironmentHandler := connect.NewUnaryHandler(
+		EnvironmentServiceResumeEnvironmentProcedure,
+		svc.ResumeEnvironment,
+		connect.WithSchema(environmentServiceMethods.ByName("ResumeEnvironment")),
 		connect.WithHandlerOptions(opts...),
 	)
 	environmentServiceUpdateEnvironmentSourcesHandler := connect.NewUnaryHandler(
@@ -877,6 +931,10 @@ func NewEnvironmentServiceHandler(svc EnvironmentServiceHandler, opts ...connect
 			environmentServiceStopEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceStartEnvironmentProcedure:
 			environmentServiceStartEnvironmentHandler.ServeHTTP(w, r)
+		case EnvironmentServiceSuspendEnvironmentProcedure:
+			environmentServiceSuspendEnvironmentHandler.ServeHTTP(w, r)
+		case EnvironmentServiceResumeEnvironmentProcedure:
+			environmentServiceResumeEnvironmentHandler.ServeHTTP(w, r)
 		case EnvironmentServiceUpdateEnvironmentSourcesProcedure:
 			environmentServiceUpdateEnvironmentSourcesHandler.ServeHTTP(w, r)
 		case EnvironmentServiceProtectEnvironmentProcedure:
@@ -966,6 +1024,14 @@ func (UnimplementedEnvironmentServiceHandler) StopEnvironment(context.Context, *
 
 func (UnimplementedEnvironmentServiceHandler) StartEnvironment(context.Context, *connect.Request[v1.StartEnvironmentRequest]) (*connect.Response[v1.StartEnvironmentResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.StartEnvironment is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) SuspendEnvironment(context.Context, *connect.Request[v1.SuspendEnvironmentRequest]) (*connect.Response[v1.SuspendEnvironmentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.SuspendEnvironment is not implemented"))
+}
+
+func (UnimplementedEnvironmentServiceHandler) ResumeEnvironment(context.Context, *connect.Request[v1.ResumeEnvironmentRequest]) (*connect.Response[v1.ResumeEnvironmentResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.EnvironmentService.ResumeEnvironment is not implemented"))
 }
 
 func (UnimplementedEnvironmentServiceHandler) UpdateEnvironmentSources(context.Context, *connect.Request[v1.UpdateEnvironmentSourcesRequest]) (*connect.Response[v1.UpdateEnvironmentSourcesResponse], error) {

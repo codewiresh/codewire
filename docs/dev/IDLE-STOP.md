@@ -179,6 +179,30 @@ minutes (owner, 2026-11-21, #5484: suspend "after 15 minutes idle"), as
   isn't `standard` is refused with `failed_precondition`, naming why.
 - **`cw info`** prints `IdleSuspend: 15m` or `IdleSuspend: off`.
 
+### Manual suspend and resume
+
+An environment owner may pause a running `standard` Sandbox on demand without
+waiting for an idle timeout, and any operator may wake it explicitly:
+
+- **`cw suspend ENV`** calls `SuspendEnvironment` (`owner` access):
+  - asks the Sandbox's daemon to suspend (the same `Suspend` RPC idle suspend
+    uses) and marks `suspended_at` once accepted;
+  - already suspended: returns `already suspended`, and `cw suspend` prints
+    `Environment NAME is already suspended.` and exits 0 without waking it;
+  - not running: refused with `invalid_state`;
+  - non-`standard` runtime (`commodity`, `confidential`, etc.) or an older
+    runtime image that cannot suspend: refused with `suspend_unsupported`;
+  - local VM: refused with a message directing the user to `cw stop`.
+- **`cw resume ENV`** calls `ResumeEnvironment` (`operator` access):
+  - opens a wake connection to the Sandbox's daemon on port 7777 (the same
+    wake path `environment_wakes` uses) and waits briefly for the daemon's
+    wake report to clear `suspended_at`;
+  - already running and not suspended: returns `already running`, and
+    `cw resume` prints `Environment NAME is already running.` and exits 0;
+  - stopped: refused with `invalid_state` directing the user to `cw start`;
+  - non-`standard` runtime: refused with `suspend_unsupported`;
+  - local VM: refused with a message directing the user to `cw start`.
+
 Idle stop keeps its own clock. A suspended Sandbox that reaches its idle
 stop timeout is stopped as above, and the stop resumes the VM first so the
 guest shuts down cleanly.

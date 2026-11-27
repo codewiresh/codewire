@@ -446,6 +446,14 @@ pub(super) const ENVIRONMENT_RPC_SEMANTICS: &[RpcSemantics] = &[
         RpcBehavior::UnimplementedPlatformOnly,
     ),
     rpc(
+        proto::ENVIRONMENT_SERVICE_SUSPEND_ENVIRONMENT_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
+        proto::ENVIRONMENT_SERVICE_RESUME_ENVIRONMENT_SPEC,
+        RpcBehavior::UnimplementedPlatformOnly,
+    ),
+    rpc(
         proto::ENVIRONMENT_SERVICE_SET_ENVIRONMENT_IDLE_HIBERNATE_SPEC,
         RpcBehavior::UnimplementedPlatformOnly,
     ),

@@ -151,6 +151,111 @@ pub(super) async fn start(
     Ok(())
 }
 
+const SUSPENDING_LABEL: &str = "Suspending environment";
+const RESUMING_LABEL: &str = "Resuming environment";
+
+/// `cw suspend ENV` in the cloud: pauses a running `standard` sandbox's VM
+/// inside its Pod, keeping every process, open file and connection (#5529).
+pub(super) async fn suspend(
+    environment_client: &EnvironmentClient,
+    org_id: &str,
+    args: EnvTargetArgs,
+) -> anyhow::Result<()> {
+    let environment_id =
+        resolve_environment_id(environment_client, org_id, &args.environment).await?;
+    let caps = crate::commands::lifecycle_output::capabilities(args.output);
+    let shown = display_name_for(
+        environment_client,
+        org_id,
+        &environment_id,
+        &args.environment,
+        &caps,
+    )
+    .await;
+    let name = shown.name.clone();
+    let mut line = StatusLine::new(std::io::stderr(), &caps);
+    line.begin(SUSPENDING_LABEL)?;
+    let response = environment_client
+        .suspend_environment(org_id, &environment_id)
+        .await;
+    let response = match response {
+        Ok(response) => {
+            line.clear()?;
+            response
+        }
+        Err(error) => {
+            line.fail(SUSPENDING_LABEL)?;
+            return Err(error);
+        }
+    };
+    if response.status == "already suspended" {
+        return print_already(&args, &name, Already::Suspended, &caps);
+    }
+    match args.output {
+        OutputFormat::Json => {
+            let response = StatusResponse {
+                status: "suspended".to_owned(),
+            };
+            print_env_status(&args.environment, &response, args.output)?;
+        }
+        OutputFormat::Text => {
+            super::lifecycle::suspend_result(&name, shown.host.as_deref()).print(&caps);
+        }
+    }
+    Ok(())
+}
+
+/// `cw resume ENV` in the cloud: wakes a suspended `standard` sandbox's VM
+/// inside its Pod (#5529).
+pub(super) async fn resume(
+    environment_client: &EnvironmentClient,
+    org_id: &str,
+    args: EnvTargetArgs,
+) -> anyhow::Result<()> {
+    let environment_id =
+        resolve_environment_id(environment_client, org_id, &args.environment).await?;
+    let caps = crate::commands::lifecycle_output::capabilities(args.output);
+    let shown = display_name_for(
+        environment_client,
+        org_id,
+        &environment_id,
+        &args.environment,
+        &caps,
+    )
+    .await;
+    let name = shown.name.clone();
+    let mut line = StatusLine::new(std::io::stderr(), &caps);
+    line.begin(RESUMING_LABEL)?;
+    let response = environment_client
+        .resume_environment(org_id, &environment_id)
+        .await;
+    let response = match response {
+        Ok(response) => {
+            line.clear()?;
+            response
+        }
+        Err(error) => {
+            line.fail(RESUMING_LABEL)?;
+            return Err(error);
+        }
+    };
+    if response.status == "already running" {
+        return print_already(&args, &name, Already::Running, &caps);
+    }
+    match args.output {
+        OutputFormat::Json => {
+            let response = StatusResponse {
+                status: "running".to_owned(),
+            };
+            print_env_status(&args.environment, &response, args.output)?;
+        }
+        OutputFormat::Text => {
+            super::lifecycle::resume_result(&name, shown.host.as_deref()).print(&caps);
+        }
+    }
+    Ok(())
+}
+
 /// Whether the platform refused a stop or a start because the environment
 /// is already `state`: it refuses either as `invalid_state` for every state
 /// it can't act from, so the state is read once to tell them apart.
@@ -181,6 +286,7 @@ fn print_already(
             let status = match already {
                 Already::Stopped => "stopped",
                 Already::Running => "running",
+                Already::Suspended => "suspended",
             };
             let response = StatusResponse {
                 status: status.to_owned(),
@@ -375,5 +481,82 @@ mod tests {
         assert!(already_stopped_when(codewire_client::EnvironmentState::Stopped).await);
         assert!(!already_stopped_when(codewire_client::EnvironmentState::Starting).await);
         assert!(!already_stopped_when(codewire_client::EnvironmentState::Error).await);
+    }
+
+    #[tokio::test]
+    async fn suspend_and_resume_call_their_rpcs_and_handle_idempotency() {
+        const SUSPEND: &str = "/codewire.v1.EnvironmentService/SuspendEnvironment";
+        const RESUME: &str = "/codewire.v1.EnvironmentService/ResumeEnvironment";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(GET))
+            .respond_with(environment(codewire_client::EnvironmentState::Running))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(SUSPEND))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(buffa::Message::encode_to_vec(
+                        &codewire_client::SuspendEnvironmentResponse {
+                            status: "suspended".into(),
+                            ..Default::default()
+                        },
+                    )),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(RESUME))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/proto")
+                    .set_body_bytes(buffa::Message::encode_to_vec(
+                        &codewire_client::ResumeEnvironmentResponse {
+                            status: "already running".into(),
+                            ..Default::default()
+                        },
+                    )),
+            )
+            .mount(&server)
+            .await;
+        let client = EnvironmentClient::new(&config::ResolvedPlatformConfig::static_token(
+            server.uri(),
+            "synthetic-lifecycle-token",
+            true,
+            None,
+        ))
+        .unwrap();
+        const ENV_ID: &str = "11111111-1111-4111-8111-111111111111";
+        suspend(
+            &client,
+            "org_demo",
+            EnvTargetArgs {
+                environment: ENV_ID.into(),
+                output: OutputFormat::Json,
+            },
+        )
+        .await
+        .expect("suspend succeeds");
+        resume(
+            &client,
+            "org_demo",
+            EnvTargetArgs {
+                environment: ENV_ID.into(),
+                output: OutputFormat::Json,
+            },
+        )
+        .await
+        .expect("resume succeeds idempotently");
+    }
+
+    #[test]
+    fn cli_parses_suspend_and_resume_top_level_commands() {
+        use clap::Parser as _;
+        let suspended = crate::Cli::try_parse_from(["cw", "suspend", "app"]).expect("cw suspend");
+        assert!(matches!(suspended.command, crate::Command::Suspend(_)));
+        let resumed = crate::Cli::try_parse_from(["cw", "resume", "app"]).expect("cw resume");
+        assert!(matches!(resumed.command, crate::Command::Resume(_)));
     }
 }

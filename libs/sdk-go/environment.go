@@ -37,6 +37,16 @@ func (e *Environment) Stop(ctx context.Context) error {
 	return e.client.Environments.Stop(ctx, e.Id)
 }
 
+// Suspend pauses a running standard environment's VM inside its Pod.
+func (e *Environment) Suspend(ctx context.Context) error {
+	return e.client.Environments.Suspend(ctx, e.Id)
+}
+
+// Resume wakes a suspended standard environment's VM.
+func (e *Environment) Resume(ctx context.Context) error {
+	return e.client.Environments.Resume(ctx, e.Id)
+}
+
 // Resize starts an idempotent platform resize for this environment.
 func (e *Environment) Resize(ctx context.Context, body ResizeEnvironmentRequest) (*EnvironmentResizeOperation, error) {
 	return e.client.Environments.Resize(ctx, e.Id, body)

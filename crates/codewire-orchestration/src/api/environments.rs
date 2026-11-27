@@ -1449,6 +1449,7 @@ mod admission;
 mod idle_hibernate;
 mod idle_suspend;
 mod start;
+mod suspend;
 
 pub(crate) use idle_hibernate::{
     hibernate_environment_core, require_standard_for_idle_hibernate,
@@ -1461,6 +1462,7 @@ pub(crate) use idle_suspend::{
 };
 
 pub(crate) use start::start_environment_core;
+pub(crate) use suspend::{resume_environment_core, suspend_environment_core};
 
 pub(crate) use admission::{QuotaRequest, check_credit_in, check_not_suspended_in, check_quota_in};
 #[cfg(test)]

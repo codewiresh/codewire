@@ -234,6 +234,30 @@ export class Environments {
     }
   }
 
+  /** Pause a running standard environment's VM inside its Pod. */
+  async suspend(envId: string): Promise<void> {
+    try {
+      await this.clients.environments.suspendEnvironment({
+        orgId: resolveOrgId(this.orgId),
+        environmentId: envId,
+      });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
+  /** Wake a suspended standard environment's VM. */
+  async resume(envId: string): Promise<void> {
+    try {
+      await this.clients.environments.resumeEnvironment({
+        orgId: resolveOrgId(this.orgId),
+        environmentId: envId,
+      });
+    } catch (error) {
+      throw mapConnectError(error);
+    }
+  }
+
   /** Replace only application-secret sources and provider-profile selection.
    * The caller supplies the exact current selection and generation as the
    * concurrency fence; this method never fetches and retries on conflict. */

@@ -48,9 +48,10 @@ use crate::api::environments::{
     Environment, EnvironmentPort, ListEnvironmentsQuery, StartOutcomeCore,
     cancel_environment_deletion_core, delete_environment_core, extend_environment_ttl_core,
     get_environment_core, hibernate_environment_core, list_environments_core,
-    protect_environment_core, require_org_member, set_environment_idle_hibernate_core,
-    set_environment_idle_stop_core, set_environment_idle_suspend_core, start_environment_core,
-    stop_environment_core, unprotect_environment_core,
+    protect_environment_core, require_org_member, resume_environment_core,
+    set_environment_idle_hibernate_core, set_environment_idle_stop_core,
+    set_environment_idle_suspend_core, start_environment_core, stop_environment_core,
+    suspend_environment_core, unprotect_environment_core,
 };
 use crate::api::host_key::{RecordedHostKeys, get_environment_host_key_core};
 use crate::api::logs::{
@@ -430,6 +431,40 @@ impl proto::EnvironmentService for EnvironmentConnectService {
             status: result.status.into(),
             outcome: proto_start_outcome(result.outcome).into(),
             completes_with_log: true,
+            ..Default::default()
+        })
+    }
+
+    async fn suspend_environment(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::SuspendEnvironmentRequest>,
+    ) -> ServiceResult<proto::SuspendEnvironmentResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result =
+            suspend_environment_core(&self.state, &user, request.org_id, request.environment_id)
+                .await
+                .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::SuspendEnvironmentResponse {
+            status: result.status.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn resume_environment(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::ResumeEnvironmentRequest>,
+    ) -> ServiceResult<proto::ResumeEnvironmentResponse> {
+        let user = auth_user(&ctx)?.clone();
+        let request = request.view();
+        let result =
+            resume_environment_core(&self.state, &user, request.org_id, request.environment_id)
+                .await
+                .map_err(|error| environment_rpc_error(&error, &ctx))?;
+        connectrpc::Response::ok(proto::ResumeEnvironmentResponse {
+            status: result.status.into(),
             ..Default::default()
         })
     }

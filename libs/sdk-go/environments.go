@@ -244,6 +244,30 @@ func (s *EnvironmentService) Start(ctx context.Context, envID string) error {
 	return connectSDKError(err)
 }
 
+// Suspend pauses a running standard environment's VM inside its Pod.
+func (s *EnvironmentService) Suspend(ctx context.Context, envID string) error {
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return err
+	}
+	_, err = s.client.environments.SuspendEnvironment(ctx, connect.NewRequest(&codewirev1.SuspendEnvironmentRequest{
+		OrgId: orgID, EnvironmentId: envID,
+	}))
+	return connectSDKError(err)
+}
+
+// Resume wakes a suspended standard environment's VM.
+func (s *EnvironmentService) Resume(ctx context.Context, envID string) error {
+	orgID, err := s.client.resolveOrgID()
+	if err != nil {
+		return err
+	}
+	_, err = s.client.environments.ResumeEnvironment(ctx, connect.NewRequest(&codewirev1.ResumeEnvironmentRequest{
+		OrgId: orgID, EnvironmentId: envID,
+	}))
+	return connectSDKError(err)
+}
+
 // UpdateEnvironmentSources replaces only application-secret sources and the
 // provider-profile selection. The caller supplies the exact current selection
 // and operation generation; running environments restart only when explicitly

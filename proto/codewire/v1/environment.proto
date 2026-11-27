@@ -37,6 +37,12 @@ service EnvironmentService {
   rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (DeleteEnvironmentResponse);
   rpc StopEnvironment(StopEnvironmentRequest) returns (StopEnvironmentResponse);
   rpc StartEnvironment(StartEnvironmentRequest) returns (StartEnvironmentResponse);
+  // Pauses a running `standard` environment's VM inside its Pod, keeping
+  // every process, open file and connection (#5529). Any use or
+  // ResumeEnvironment wakes it in milliseconds.
+  rpc SuspendEnvironment(SuspendEnvironmentRequest) returns (SuspendEnvironmentResponse);
+  // Wakes a suspended `standard` environment's VM inside its Pod (#5529).
+  rpc ResumeEnvironment(ResumeEnvironmentRequest) returns (ResumeEnvironmentResponse);
   // Replaces only application-secret sources and provider-profile selection.
   // Running environments require explicit restart confirmation; workspace data
   // is preserved. This is not an arbitrary ProjectSpec update operation.
@@ -570,6 +576,24 @@ message StartEnvironmentResponse {
   // setup when the start retried a create. Unset from older servers, whose
   // starts write no such row (#3938).
   bool completes_with_log = 3;
+}
+
+message SuspendEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message SuspendEnvironmentResponse {
+  string status = 1;
+}
+
+message ResumeEnvironmentRequest {
+  string org_id = 1;
+  string environment_id = 2;
+}
+
+message ResumeEnvironmentResponse {
+  string status = 1;
 }
 
 message ProtectEnvironmentRequest {

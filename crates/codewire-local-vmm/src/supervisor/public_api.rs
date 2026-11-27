@@ -1742,6 +1742,22 @@ impl proto::EnvironmentService for SupervisorRpc {
         unsupported()
     }
 
+    async fn suspend_environment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::SuspendEnvironmentRequest>,
+    ) -> ServiceResult<proto::SuspendEnvironmentResponse> {
+        unsupported()
+    }
+
+    async fn resume_environment(
+        &self,
+        _ctx: RequestContext,
+        _request: ServiceRequest<'_, proto::ResumeEnvironmentRequest>,
+    ) -> ServiceResult<proto::ResumeEnvironmentResponse> {
+        unsupported()
+    }
+
     async fn set_environment_idle_hibernate(
         &self,
         _ctx: RequestContext,

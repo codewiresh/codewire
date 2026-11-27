@@ -208,8 +208,8 @@ const HELP_SECTIONS: &[HelpSection] = &[
     HelpSection::everyday(
         "Environments",
         &[
-            "ls", "info", "create", "start", "stop", "restart", "retry", "rm", "use", "current",
-            "snapshot",
+            "ls", "info", "create", "start", "stop", "suspend", "resume", "restart", "retry", "rm",
+            "use", "current", "snapshot",
         ],
     ),
     HelpSection::everyday(
@@ -698,6 +698,16 @@ enum Command {
         long_about = "Start a stopped environment, or recover one in error:\n  cw start ENV\n\nIn error, a local VM's failed VM is stopped first, as `cw stop` would, and a cloud environment retries its create, which replaces a failed Pod. A cloud start returns once the environment is usable: its Git identity is set and its startup script has finished, as after `cw create`. A long startup script makes the start as long; start servers in a session instead. Ctrl-C ends only the wait."
     )]
     Start(EnvStartArgs),
+    #[command(
+        about = "Pause a running cloud sandbox's VM in place",
+        long_about = "Pause a running standard cloud sandbox's VM inside its Pod, keeping every process, open file and connection while using no CPU:\n  cw suspend ENV\n\nAny use (`cw shell`, `cw exec`, SSH, preview) or `cw resume ENV` wakes it in milliseconds."
+    )]
+    Suspend(EnvTargetArgs),
+    #[command(
+        about = "Wake a suspended cloud sandbox",
+        long_about = "Wake a suspended standard cloud sandbox's VM immediately:\n  cw resume ENV\n\nTo start a stopped environment, use `cw start ENV`."
+    )]
+    Resume(EnvTargetArgs),
     #[command(
         about = "Run a cloud Sandbox's failed setup again",
         long_about = "Run a cloud Sandbox's failed setup again, from the step it failed at, and follow it to its end:\n  cw retry ENV\n\nFix what failed first, in `cw shell ENV`. Steps that completed don't run again. A retry from the clone step clones the repositories again, which deletes their directories and any edits made there; it asks first, and --yes confirms it without asking. Ctrl-C ends only the wait."
@@ -1188,6 +1198,8 @@ where
         command @ (Command::Info(_)
         | Command::Create(_)
         | Command::Start(_)
+        | Command::Suspend(_)
+        | Command::Resume(_)
         | Command::Rm(_)
         | Command::Cp(_)
         | Command::Runtime(_)

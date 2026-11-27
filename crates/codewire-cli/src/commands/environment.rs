@@ -248,38 +248,54 @@ pub(crate) async fn handle_env_command(
             handle_unified_environment_resize(globals, placement, resize).await
         }
         EnvCommand::Start(target) => {
-            handle_unified_environment_lifecycle(
+            Box::pin(handle_unified_environment_lifecycle(
                 globals,
                 placement,
                 UnifiedEnvironmentLifecycle::Start(target),
-            )
+            ))
             .await
         }
         EnvCommand::Stop(target) => {
-            handle_unified_environment_lifecycle(
+            Box::pin(handle_unified_environment_lifecycle(
                 globals,
                 placement,
                 UnifiedEnvironmentLifecycle::Stop(target),
-            )
+            ))
+            .await
+        }
+        EnvCommand::Suspend(target) => {
+            Box::pin(handle_unified_environment_lifecycle(
+                globals,
+                placement,
+                UnifiedEnvironmentLifecycle::Suspend(target),
+            ))
+            .await
+        }
+        EnvCommand::Resume(target) => {
+            Box::pin(handle_unified_environment_lifecycle(
+                globals,
+                placement,
+                UnifiedEnvironmentLifecycle::Resume(target),
+            ))
             .await
         }
         EnvCommand::Restart(target) => {
-            handle_unified_environment_lifecycle(
+            Box::pin(handle_unified_environment_lifecycle(
                 globals,
                 placement,
                 UnifiedEnvironmentLifecycle::Restart(target),
-            )
+            ))
             .await
         }
         EnvCommand::RefreshSkills(target) => {
             handle_unified_environment_refresh_skills(globals, placement, target).await
         }
         EnvCommand::Rm(target) => {
-            handle_unified_environment_lifecycle(
+            Box::pin(handle_unified_environment_lifecycle(
                 globals,
                 placement,
                 UnifiedEnvironmentLifecycle::Remove(target),
-            )
+            ))
             .await
         }
         EnvCommand::Access(access) => {
@@ -664,6 +680,12 @@ async fn handle_platform_env_command_with_created(
         EnvCommand::Start(args) => {
             stop_start::start(&platform, &environment_client, &org_id, args.target).await?;
         }
+        EnvCommand::Suspend(args) => {
+            Box::pin(stop_start::suspend(&environment_client, &org_id, args)).await?;
+        }
+        EnvCommand::Resume(args) => {
+            Box::pin(stop_start::resume(&environment_client, &org_id, args)).await?;
+        }
         EnvCommand::Restart(_) => {
             anyhow::bail!("restart is supported only for local environments");
         }
@@ -824,6 +846,8 @@ async fn handle_platform_env_command_with_created(
 enum UnifiedEnvironmentLifecycle {
     Start(EnvStartArgs),
     Stop(EnvTargetArgs),
+    Suspend(EnvTargetArgs),
+    Resume(EnvTargetArgs),
     Restart(EnvTargetArgs),
     Remove(EnvDeleteArgs),
 }
@@ -832,7 +856,9 @@ impl UnifiedEnvironmentLifecycle {
     fn environment(&self) -> &str {
         match self {
             Self::Start(args) => &args.environment,
-            Self::Stop(args) | Self::Restart(args) => &args.environment,
+            Self::Stop(args) | Self::Suspend(args) | Self::Resume(args) | Self::Restart(args) => {
+                &args.environment
+            }
             Self::Remove(args) => &args.environment,
         }
     }
@@ -841,6 +867,8 @@ impl UnifiedEnvironmentLifecycle {
         match self {
             Self::Start(_) => "start",
             Self::Stop(_) => "stop",
+            Self::Suspend(_) => "suspend",
+            Self::Resume(_) => "resume",
             Self::Restart(_) => "restart",
             Self::Remove(_) => "rm",
         }
@@ -1711,6 +1739,18 @@ async fn handle_unified_environment_lifecycle(
             Box::pin(stop_native_environment(&name, args.output)).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        (UnifiedEnvironmentTarget::NativeLocal(_), UnifiedEnvironmentLifecycle::Suspend(_)) => {
+            anyhow::bail!(
+                "suspend applies to cloud sandboxes on the standard runtime; use `cw stop` for a local VM"
+            )
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        (UnifiedEnvironmentTarget::NativeLocal(_), UnifiedEnvironmentLifecycle::Resume(_)) => {
+            anyhow::bail!(
+                "resume applies to cloud sandboxes on the standard runtime; use `cw start` for a local VM"
+            )
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Restart(args),
@@ -1720,32 +1760,31 @@ async fn handle_unified_environment_lifecycle(
             UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Remove(args),
         ) => Box::pin(remove_native_environment(&name, args.yes, args.output)).await,
-        (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Start(args)) => {
-            handle_platform_env_command(globals, EnvCommand::Start(args.of(id))).await
-        }
-        (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Stop(args)) => {
-            handle_platform_env_command(
-                globals,
-                EnvCommand::Stop(EnvTargetArgs {
+        (UnifiedEnvironmentTarget::Platform(id), lifecycle) => {
+            let command = match lifecycle {
+                UnifiedEnvironmentLifecycle::Start(args) => EnvCommand::Start(args.of(id)),
+                UnifiedEnvironmentLifecycle::Stop(args) => EnvCommand::Stop(EnvTargetArgs {
                     environment: id,
                     output: args.output,
                 }),
-            )
-            .await
-        }
-        (UnifiedEnvironmentTarget::Platform(_), UnifiedEnvironmentLifecycle::Restart(_)) => {
-            anyhow::bail!("restart is supported only for local environments")
-        }
-        (UnifiedEnvironmentTarget::Platform(id), UnifiedEnvironmentLifecycle::Remove(args)) => {
-            handle_platform_env_command(
-                globals,
-                EnvCommand::Rm(EnvDeleteArgs {
+                UnifiedEnvironmentLifecycle::Suspend(args) => EnvCommand::Suspend(EnvTargetArgs {
+                    environment: id,
+                    output: args.output,
+                }),
+                UnifiedEnvironmentLifecycle::Resume(args) => EnvCommand::Resume(EnvTargetArgs {
+                    environment: id,
+                    output: args.output,
+                }),
+                UnifiedEnvironmentLifecycle::Restart(_) => {
+                    anyhow::bail!("restart is supported only for local environments")
+                }
+                UnifiedEnvironmentLifecycle::Remove(args) => EnvCommand::Rm(EnvDeleteArgs {
                     environment: id,
                     yes: args.yes,
                     output: args.output,
                 }),
-            )
-            .await
+            };
+            Box::pin(handle_platform_env_command(globals, command)).await
         }
     }
 }

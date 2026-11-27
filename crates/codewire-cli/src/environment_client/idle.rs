@@ -44,4 +44,42 @@ impl EnvironmentClient {
             status: response.status,
         })
     }
+
+    pub async fn suspend_environment(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<StatusResponse> {
+        let response = self
+            .inner
+            .suspend_environment(rpc::SuspendEnvironmentRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        Ok(StatusResponse {
+            status: response.status,
+        })
+    }
+
+    pub async fn resume_environment(
+        &self,
+        org_id: &str,
+        environment_id: &str,
+    ) -> anyhow::Result<StatusResponse> {
+        let response = self
+            .inner
+            .resume_environment(rpc::ResumeEnvironmentRequest {
+                org_id: org_id.to_string(),
+                environment_id: environment_id.to_string(),
+                ..Default::default()
+            })
+            .await
+            .map_err(display_client_error)?;
+        Ok(StatusResponse {
+            status: response.status,
+        })
+    }
 }

@@ -26,6 +26,28 @@ impl CodewireClient {
             .map_err(ClientError::from)
     }
 
+    pub async fn suspend_environment(
+        &self,
+        request: SuspendEnvironmentRequest,
+    ) -> Result<SuspendEnvironmentResponse, ClientError> {
+        self.environments
+            .suspend_environment_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
+    pub async fn resume_environment(
+        &self,
+        request: ResumeEnvironmentRequest,
+    ) -> Result<ResumeEnvironmentResponse, ClientError> {
+        self.environments
+            .resume_environment_with_options(request, self.auth_options().await?)
+            .await
+            .map(|response| response.into_owned())
+            .map_err(ClientError::from)
+    }
+
     pub async fn set_environment_idle_hibernate(
         &self,
         request: SetEnvironmentIdleHibernateRequest,

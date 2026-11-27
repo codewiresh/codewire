@@ -251,6 +251,23 @@ pub(crate) fn stop_result(name: &str, host: Option<&str>) -> ResultBlock {
         .next(Address::platform(host).command("start", name))
 }
 
+/// What a finished suspend says. `host` is the host it runs on, if any.
+pub(crate) fn suspend_result(name: &str, host: Option<&str>) -> ResultBlock {
+    ResultBlock::new(Status::Done, format!("Environment {name} suspended"))
+        .detail(format!(
+            "{} · processes and open files kept; any use wakes it",
+            platform_location_label(host)
+        ))
+        .next(Address::platform(host).command("resume", name))
+}
+
+/// What a finished resume says. `host` is the host it runs on, if any.
+pub(crate) fn resume_result(name: &str, host: Option<&str>) -> ResultBlock {
+    ResultBlock::new(Status::Done, format!("Environment {name} resumed"))
+        .detail(platform_location_label(host))
+        .next(Address::platform(host).command("shell", name))
+}
+
 /// What a removal did, from one read after it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CloudRemoval {

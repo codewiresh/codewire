@@ -32,9 +32,11 @@ from codewire.v1.environment_pb2 import (
     PlanEnvironmentResizeRequest,
     ListEnvironmentsRequest,
     ResizeEnvironmentRequest,
+    ResumeEnvironmentRequest,
     SetEnvironmentStartupScriptRequest,
     StartEnvironmentRequest,
     StopEnvironmentRequest,
+    SuspendEnvironmentRequest,
     UpdateEnvironmentSourcesRequest,
     IsolationTier,
 )
@@ -332,6 +334,22 @@ class Environments:
         self._context.unary(
             self._client.start_environment,
             StartEnvironmentRequest(
+                org_id=self._context.resolve_org_id(), environment_id=env_id
+            ),
+        )
+
+    def suspend(self, env_id: str) -> None:
+        self._context.unary(
+            self._client.suspend_environment,
+            SuspendEnvironmentRequest(
+                org_id=self._context.resolve_org_id(), environment_id=env_id
+            ),
+        )
+
+    def resume(self, env_id: str) -> None:
+        self._context.unary(
+            self._client.resume_environment,
+            ResumeEnvironmentRequest(
                 org_id=self._context.resolve_org_id(), environment_id=env_id
             ),
         )
