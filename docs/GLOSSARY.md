@@ -87,6 +87,26 @@ checkpoints of local VMs on Linux or a Mac, and `cw create --local --checkpoint`
 one into new environments with fresh identity. A VM checkpoint stays on the
 host that made it. Cloud environments do not have VM checkpoints yet.
 
+## Suspended
+
+An environment whose VM is paused in memory inside its Pod (on `standard`,
+`dev/IDLE-STOP.md`, "Suspend") or on the host (target for local VMs on Linux,
+`#5529`). Its processes, memory and connections are kept, it uses no CPU, and
+the first connection resumes it. It is not a stop. Inside orchestration, the
+Sandbox operating mode named `Suspended` is today's stop and is not this
+state.
+
+## Hibernated
+
+An environment whose VM's memory and device state have been written to disk
+outside guest reach and whose VM process has exited (on `standard`, its Pod is
+deleted; target, not shipped, `dev/SANDBOX-SLEEP.md`, `#6647`; local VMs on
+Linux follow under `#5529`). The host or node gets its CPU and memory back,
+and the next start restores the VM with its processes still running. The
+memory file belongs to the environment and is not a VM checkpoint: it is never
+listed, is restored at most once, and is excluded from product snapshots and
+forks.
+
 ## Session
 
 A running process inside an environment, often an AI agent or shell command.

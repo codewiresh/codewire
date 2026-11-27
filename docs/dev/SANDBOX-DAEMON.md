@@ -607,8 +607,20 @@ Every hosted workspace binds at claim time, confidential ones included
   starting after both. Create, start, a Pod replaced while running, resize,
   daemon repair and setup recovery all bind this way. Stop and destroy release the binding
   only after the Pod is gone. The `workspace_bind` stage measures it.
-- **Rotating the session secret** changes every daemon credential. Bound
-  daemons never re-bind, so it requires restarting the workspace Pods.
+- **Rotating the session secret** changes every daemon credential. A running
+  daemon never re-binds, so rotating the session secret requires restarting
+  the workspace Pods.
+  - **Re-bind after a restore** (target, not shipped, `#6647`, agreed with
+    `cw-security` on `#5484`): a daemon restored from a hibernate on
+    `standard` binds again, as the new Pod's daemon, before it serves; a
+    running daemon still never re-binds. Before the frozen workload thaws,
+    guest init reseeds the RNG and moves boot secrets, the supervisor delivers
+    the new Pod's settings and projected tokens, and guest init deletes the
+    old `/codewire/run/daemon/credential`. Ports `7777`, `2222` and tailnet
+    stay closed until the new `BindWorkspace` succeeds; the re-bind creates a
+    fresh tailnet node key and disco key in memory, and the coordinator drops
+    the old node key in the same bind
+    ([`SANDBOX-SLEEP.md`](SANDBOX-SLEEP.md), "After a restore").
 - **No environment-token mode.** The daemon serves SSH and the tailnet only
   once bound, so nothing renders an environment token. A Sandbox rendered
   before binding is upgraded to the identity-free rendering on its next start,

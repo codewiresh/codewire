@@ -73,6 +73,28 @@ record of the resume. Nothing the guest says moves a second between rates.
   `end_reason` `vm_boot_ended`, and the new boot's records, a new
   generation, split it from there.
 
+## A hibernated stretch (`standard`, `#6647`)
+
+**Target, not shipped (`#6647`).** A `standard` Sandbox hibernated to its
+encrypted volume ([`SANDBOX-SLEEP.md`](SANDBOX-SLEEP.md)) has no Pod running.
+Its charge follows the same host-observed rule as suspend: nothing the guest
+says moves a second between rates.
+
+- **Opening:** when orchestration observes the runtime's `vm-hibernate-record`
+  `"event":"hibernated"` Pod log line at the Pod's stop, its running or paused
+  session closes at the hibernate stop as any stop does, and the billing loop
+  opens a `hibernated` session (`rate_kind = 'hibernated'`) at the Sandbox's
+  allocated `disk_gib`.
+- **Rate:** a `hibernated` session draws only its allocated disk, at the rate
+  card's storage rate (`parked_storage_per_gib_hour`, `0` until an
+  administrator sets one in ["Prices"](#prices)). Its vCPU and memory draw
+  nothing, and the unbilled volume headroom reserved for the memory file is
+  not added to `disk_gib`.
+- **Closing:** the `hibernated` session closes when the Sandbox starts
+  (restoring or falling back to a cold boot, where its new running session
+  opens at bind), when `cw stop` clears its hibernate state, or when the
+  Sandbox is destroyed.
+
 ## When it ends, and why
 
 A session opens and ends from the Sandbox object, never from its Pod or

@@ -651,18 +651,35 @@ Pod: the supervisor, Cloud Hypervisor and guest that run a local VM
     destination organization's flag.
   - An environment whose recorded profile the deployment no longer offers is
     refused at start, never moved.
-- **Suspend** (target, not shipped, #5529): a `standard` Sandbox with
-  `idle_suspend` on pauses its VM inside its Pod after that much idle time,
-  keeping its processes. A connection on the Pod's published ports, or a
-  stop, resumes it; the guest can only ask to be paused. Off by default, set
-  like `idle_stop`; a suspended second is billed only from the runtime's own
-  pause record, never from anything the guest says, at a rate that is 0
-  until set. Kata profiles never
-  suspend, and hibernate comes later. The contract, including every
-  periodic call that must not wake a suspended Sandbox, is
-  [docs/dev/IDLE-STOP.md](docs/dev/IDLE-STOP.md), "Suspend". Internally,
-  orchestration's `RuntimeDriver::scale_down`/`scale_up` are the stop and
-  start (agent-sandbox's `operatingMode: Suspended`), never this.
+- **Suspend and hibernate** (`standard` only):
+  - **Suspend** (`#5529`): a `standard` Sandbox with `idle_suspend` on pauses
+    its VM inside its Pod after that much idle time, keeping its processes. A
+    connection on the Pod's published ports, or a stop, resumes it; the guest
+    can only ask to be paused. Off by default, set like `idle_stop`; a
+    suspended second is billed only from the runtime's own pause record, never
+    from anything the guest says, at the admin pricing table's storage rate
+    (`0` until set). The contract, including every periodic call that must not
+    wake a suspended Sandbox, is
+    [docs/dev/IDLE-STOP.md](docs/dev/IDLE-STOP.md), "Suspend". Internally,
+    orchestration's `RuntimeDriver::scale_down`/`scale_up` are the stop and
+    start (agent-sandbox's `operatingMode: Suspended`), never this.
+  - **Hibernate** (target, not shipped, `#6647`): a `standard` Sandbox with
+    `idle_hibernate` on (off by default, `on` = 6 hours, taking `idle_stop`'s
+    place on `standard`) or on `cw hibernate NAME` writes its VM's memory and
+    device state to its LUKS-encrypted volume outside guest reach at Pod
+    SIGTERM and deletes the Pod. The next start restores the VM with its
+    processes, sessions, files, name, preview URL and tailnet identity intact
+    under the hibernate record's digests (kept in the admission allowlist for
+    30 days), or falls back cleanly to a cold disk boot saying processes were
+    lost. A restored daemon binds again as the new Pod's daemon before serving
+    (`7777`, `2222` and tailnet stay closed until re-bind answers; RNG is
+    reseeded, new Pod tokens are delivered and the old credential is deleted
+    before thaw; the coordinator drops the old tailnet node key in the same
+    bind), and the memory file is restored at most once, excluded from product
+    snapshots and forks, and deleted after re-bind. Kata profiles
+    (`commodity`, `confidential`) never suspend or hibernate and refuse by
+    name. The contract is
+    [docs/dev/SANDBOX-SLEEP.md](docs/dev/SANDBOX-SLEEP.md).
 - **Not on `standard` at first:** a user's own image, private images, and
   snapshots and forks.
 

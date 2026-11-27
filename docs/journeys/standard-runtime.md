@@ -29,6 +29,8 @@ parts the table names; the rest are not yet observed.
 | `standard-organization-move` | not yet observed | not yet observed | not yet observed |
 | `standard-suspend` | not yet observed | not yet observed | not yet observed |
 | `standard-systemd` | not yet observed | not yet observed | not yet observed |
+| `standard-hibernate` | not yet observed | not yet observed | not yet observed |
+| `standard-hibernate-fallback` | not yet observed | not yet observed | not yet observed |
 
 ## Before the walk
 
@@ -419,3 +421,110 @@ Contract: [`docs/dev/SYSTEMD-WORKSPACE.md`](../dev/SYSTEMD-WORKSPACE.md), "On th
   4. `cw exec --in std-sd -- docker run --rm busybox echo ok`, verify `sudo -n mount -t tmpfs none /mnt` fails, and verify `socket(AF_VSOCK, SOCK_STREAM)` fails with `EAFNOSUPPORT` both as `codewire` and under `sudo -n`.
 - **Proof:** step 1 prints `systemd`, `running`, `0`, `cgroup2fs`; step 2 shows `masked` / `masked-runtime`, `running`, and `/run/user/1000`; step 3 prints `active` across restart; step 4 runs Docker while refusing both `mount` and `AF_VSOCK`, and `cw stop` completes cleanly well inside the Pod grace period.
 - **Observed:** not yet observed on Dev (local `/dev/kvm` A/B verification passed on 2026-11-27; Dev walk follows merge and Dev promotion).
+
+## `standard-hibernate`: a `standard` sandbox hibernates to its volume and restores with processes intact
+
+Target, not shipped (`#6647`). The contract is
+[`docs/dev/SANDBOX-SLEEP.md`](../dev/SANDBOX-SLEEP.md) and
+[`docs/dev/SANDBOX-DAEMON.md`](../dev/SANDBOX-DAEMON.md) ("Claim-time
+workspace binding").
+
+- **Entry points:** `idle_hibernate` in `codewire.yaml`,
+  `cw create --idle-hibernate`, `cw update NAME --idle-hibernate`,
+  `cw hibernate NAME`, `cw start NAME`, start-on-access (`cw exec`,
+  `cw shell`, `ssh`, preview visit), `cw ls`, `cw info`, and the dashboard
+  state pill.
+- **States to exercise:**
+  - `idle_hibernate` off (the default): an idle sandbox never hibernates;
+  - `idle_hibernate` on (`5m` in the walk) and manual `cw hibernate NAME`
+    from both `running` and `suspended`: `cw ls` reads `hibernated`, the Pod
+    is gone, and the PVC stays;
+  - `cw hibernate NAME` and `--idle-hibernate` on a `commodity` or
+    `confidential` sandbox: refused, naming the runtime profile;
+  - `--idle-suspend 10m --idle-hibernate 5m`: refused, naming both settings;
+  - restore by `cw start NAME` and by start-on-access: the running process
+    keeps its PID and keeps writing, files and durable sessions stay, the
+    guest clock matches the host, and the name, preview URL and tailnet
+    name/address stay;
+  - `cw-security` re-bind and memory-file boundaries (`#5484`, `#6647`):
+    - new Pod tokens replace checkpointed copies before the workload thaws
+      and before re-bind;
+    - a request to the new Pod's port `7777` between restore and re-bind is
+      refused;
+    - after re-bind, the old Pod's daemon credential and an old credential
+      bridge epoch handle are refused;
+    - the re-bind makes a fresh tailnet node key and the coordinator drops
+      the old node key in the same bind;
+    - the memory file sits outside guest reach, is restored at most once,
+      and is deleted from the volume after re-bind succeeds;
+  - product disk snapshot and fork of a hibernated sandbox: the memory file
+    is excluded;
+  - billing: the running/paused session closes at the host-observed
+    `hibernated` record and a `hibernated` session draws only allocated
+    `disk_gib` (excluding memory-file headroom) at the admin pricing table's
+    storage rate (`0` until set, `#5782`);
+  - `#6367`: no-token-at-rest scan of the hibernate memory image finds
+    placeholders only, and proxied credentials still work / honor revocation
+    after restore.
+- **Driving it:**
+  1. `cw --cloud create --name std-h --idle-hibernate 5m` (no command yet,
+     `#6647`), start a background loop writing its PID and counter to
+     `/tmp/beat` and a file in `/workspace/keep`, and publish a preview port.
+  2. `cw hibernate std-h` (and separately let a fresh sandbox cross its
+     `idle_hibernate` timeout): `cw ls` reads `hibernated`, `cw info std-h`
+     names when and why it hibernated, and the operator confirms the Pod is
+     gone while the PVC remains.
+  3. On a `commodity` sandbox, run `cw hibernate` and
+     `cw update --idle-hibernate 5m`: both refuse and name `commodity`.
+  4. `cw start std-h` (and separately wake a hibernated sandbox via
+     start-on-access): `cw exec --in std-h -- cat /tmp/beat` read twice shows
+     the same PID still ticking, `/workspace/keep` is intact, `date` matches
+     the host clock, and the preview URL serves under the same hostname.
+  5. Operator's half (and automated boundary tests): verify port `7777` is
+     refused between restore and re-bind; verify the old daemon credential
+     and an old credential bridge epoch handle are refused after re-bind;
+     verify the coordinator no longer holds the old tailnet node key; verify
+     the memory file is absent from the volume after re-bind; verify a
+     snapshot/fork excludes the memory file; verify billing recorded the
+     hibernated stretch from host-observed records at the admin storage rate.
+- **Proof:** unchanged process PID and advancing `/tmp/beat` across Pod
+  deletion and recreation (new Pod UID), the `commodity` refusal naming the
+  runtime, each `cw-security` refusal (7777 pre-bind, old daemon credential,
+  old epoch handle, dropped old tailnet node key), absence of the memory file
+  post-bind and in snapshots, and billing's host-observed `hibernated`
+  session matching the Pod log record.
+- **Gotchas:** record the hibernate write duration, restore duration, and
+  re-bind duration; clean up all scratch sandboxes by exact name with
+  `cw rm --yes NAME`.
+- **Observed:** not yet observed.
+
+## `standard-hibernate-fallback`: an unrestorable hibernate boots cleanly from the disks
+
+Target, not shipped (`#6647`). The contract is
+[`docs/dev/SANDBOX-SLEEP.md`](../dev/SANDBOX-SLEEP.md), "When a restore
+cannot happen (fallback)".
+
+- **Entry points:** `cw start NAME`, `cw info NAME`, and the dashboard
+  Sandbox page.
+- **States to exercise:**
+  - memory file missing, incomplete, or damaged on the volume;
+  - workspace image disk rebuilt (`image_disk_id` or `build_id` mismatch);
+  - VMM `sha256` or runtime image digest mismatch, or runtime image past its
+    30-day admission allow window;
+  - restore generation already consumed (restore-once guard).
+- **Driving it:**
+  1. Hibernate a scratch `standard` sandbox that has a file written in
+     `/workspace/keep` and `~/keep` plus a background process.
+  2. Induce each unrestorable condition in turn (corrupt/truncate the memory
+     file on the scratch volume, mismatch the image disk build or VMM/runtime
+     digest, or expire the hibernate record past the 30-day allow window).
+  3. Run `cw start NAME`, then `cw info NAME` and
+     `cw exec --in NAME -- cat /workspace/keep ~/keep`.
+- **Proof:** the start succeeds via cold boot from the disks without hanging
+  or failing, `/workspace/keep` and `~/keep` are intact, the background
+  process from before hibernate is gone, the broken memory file is deleted
+  from the volume, and `cw start` and `cw info` clearly state that processes
+  were lost and files were kept, naming why restore could not happen.
+- **Gotchas:** never mutate a non-scratch sandbox volume; remove scratch
+  sandboxes by exact name at the end.
+- **Observed:** not yet observed.

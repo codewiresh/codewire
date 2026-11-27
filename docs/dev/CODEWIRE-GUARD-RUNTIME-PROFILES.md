@@ -455,7 +455,22 @@ the request.
 
 **Storage.** The VM's disks are files on the Sandbox's filesystem volume,
 opened with direct I/O so that the guest's writes are not also held in a
-page cache charged to the Pod.
+page cache charged to the Pod. Target, not shipped (`#6647`): a `standard`
+Sandbox's volume also carries unbilled headroom for its hibernate memory file
+(on thin LVM with discards, so real blocks are used only while a memory file
+is present); the memory file and its sibling metadata sit under
+`/state/runtime/`, readable only by the container's non-root user and outside
+every path the guest can reach ([`SANDBOX-SLEEP.md`](SANDBOX-SLEEP.md)).
+
+**Hibernate digest allow window (target, not shipped, `#6647`).** Restoring a
+hibernated `standard` Sandbox renders the new Pod with the hibernate record's
+runtime image digest and workspace image-disk digest rather than the current
+release's. Those digests stay in the `standard` admission allowlist for
+30 days after a Sandbox hibernates on them, and the restoring Pod may carry
+only the literal `CODEWIRE_VM_RESTORE_GENERATION` setting in addition to the
+standard Pod variables. After 30 days (or if a digest is removed from the
+allowlist), orchestration clears the hibernate record and starts the Sandbox
+cold on the current release's digests, reporting that processes were lost.
 
 **What changes for an operator.** `kubectl exec` into `workspace` lands in
 the runtime's container, outside the VM. The container's log carries the

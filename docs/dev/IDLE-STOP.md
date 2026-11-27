@@ -155,8 +155,12 @@ its VM pauses inside its Pod, keeping every process, open file and
 connection, and uses no CPU. Any use resumes it in milliseconds. This is not
 the stop above, and not a scale-down: the Pod, its volume, its address and
 its tailnet identity stay. `commodity` and `confidential` (Kata) Sandboxes
-never suspend. **Hibernate** (the VM's memory written to the volume and the
-Pod deleted) comes later, as `idle_hibernate`, at 6 hours.
+never suspend. **Hibernate** (target, not shipped, `#6647`: the VM's memory
+written to its LUKS-encrypted volume outside guest reach and the Pod deleted,
+triggered by `idle_hibernate` — off by default, `on` is 6 hours, taking
+`idle_stop`'s place on `standard`, and strictly greater than `idle_suspend`
+when both are on — or `cw hibernate NAME`) is specified in
+[`SANDBOX-SLEEP.md`](SANDBOX-SLEEP.md).
 
 ### The setting
 

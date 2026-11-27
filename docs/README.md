@@ -38,6 +38,9 @@ directory each.
   graphical desktop over VNC, written before the code (#3223).
 - [dev/SYSTEMD-WORKSPACE.md](dev/SYSTEMD-WORKSPACE.md): an opt-in workspace
   image in which sessions see systemd as PID 1, written before the code (#5638).
+- [dev/SANDBOX-SLEEP.md](dev/SANDBOX-SLEEP.md): the contract for `standard`
+  Sandboxes that hibernate and restore with processes intact, written before
+  the code (#6647).
 
 ## Using `cw`
 
