@@ -542,7 +542,7 @@ pub(crate) struct InitArgs {
     cpu: Option<String>,
     #[arg(long, help = "Memory in MB")]
     memory: Option<i32>,
-    #[arg(long, help = "Disk in GB (cloud default 80, at most 200)")]
+    #[arg(long, help = "Disk in GB (cloud default 120, at most 200)")]
     disk: Option<i32>,
     #[arg(long, value_parser = ["standard", "confidential"], help = "Product isolation tier")]
     isolation: Option<String>,

@@ -1,7 +1,7 @@
 ---
 title: Resources and limits
 description: What every environment gets, the sizes you can choose, what an organization can run at once, and what each state keeps and costs.
-updated: 2026-10-27
+updated: 2026-11-27
 weight: 2
 ---
 
@@ -15,7 +15,7 @@ machine; hosted sandboxes also count against their organization's limits.
 | --- | --- | --- |
 | vCPU | 2 | 2 |
 | Memory | 4 GiB | 8 GiB |
-| Disk | 20 GiB | 80 GiB (50 GiB confidential) |
+| Disk | 20 GiB | 120 GiB (50 GiB confidential) |
 | Docker data disk | 8 GiB, separate | inside the disk; all of it but 2 GiB |
 | Address | none; ports you publish on `127.0.0.1` | HTTPS preview URLs and SSH from anywhere you are signed in |
 | Runs until | you stop it | you stop it, or its `--ttl` ends |

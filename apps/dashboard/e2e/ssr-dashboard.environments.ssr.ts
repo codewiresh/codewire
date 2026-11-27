@@ -428,7 +428,7 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Startup Script")).toHaveValue("bun run dev");
     await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("2000");
     await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("8192");
-    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("80");
+    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("120");
     await expect(page.getByLabel("Delete after")).toHaveValue("");
     await expect(page.getByLabel("Workspace image")).toHaveValue(
       "registry.example.test/team/workspace:v1",

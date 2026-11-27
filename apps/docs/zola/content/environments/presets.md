@@ -1,7 +1,7 @@
 ---
 title: Images and presets
 description: Save an image, install and startup commands, resources and a lifetime once in the organization, and create hosted sandboxes from it.
-updated: 2026-11-19
+updated: 2026-11-27
 weight: 4
 aliases: ["/guides/presets"]
 ---
@@ -74,7 +74,7 @@ cw run --in ana-web --name check --no-tty -- redis-cli --version
 
 ```text
 ana-web · cloud VM
-  2 vCPU · 16 GiB RAM · 80 GiB disk
+  2 vCPU · 16 GiB RAM · 120 GiB disk
 ✓ Started session ana-web/check · cloud
 redis-cli 7.0.15
 ```

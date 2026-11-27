@@ -122,11 +122,11 @@ fn confidential_tier_settings_leave_commodity_pools_unchanged() {
         confidential_workspace_storage_class: "linstor-confidential".into(),
         ..dev_cfg()
     };
-    // Dev's configured shapes, plus the 80 GiB hosted default (#3571).
+    // Dev's configured shapes, plus the 120 GiB hosted default.
     let hosted_default = WorkspaceShape {
         cpu_millicores: 2000,
         memory_mib: 8192,
-        disk_gib: 80,
+        disk_gib: 120,
     };
     for shape in shapes().into_iter().chain([hosted_default]) {
         let commodity_only = render_configured_warm_pool(&dev_cfg(), shape, 2).unwrap();

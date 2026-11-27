@@ -496,7 +496,7 @@ copies (`native/sources.rs` and `environment/sources.rs`). `run`, `init` and
 | Command | Local | Cloud | Same or gap |
 | --- | --- | --- | --- |
 | `create --name N --yes`, result | `✓ Environment N created · local VM`, the size, Credentials, Secrets, Network, `→ cw --local shell N` | The same lines, `cloud VM` | same |
-| Default size | 2 vCPU · 4 GiB RAM · 20 GiB disk | 2 vCPU · 8 GiB RAM · 80 GiB disk | intended: a local VM uses this computer's memory and disk |
+| Default size | 2 vCPU · 4 GiB RAM · 20 GiB disk | 2 vCPU · 8 GiB RAM · 120 GiB disk | intended: a local VM uses this computer's memory and disk |
 | Progress | Preparing sources, Checking the VM runtime, Preparing the image, Starting the VM, Booting the workspace. The first create downloads the runtime (219 MiB) and says so | Creating sandbox, Waiting for SSH access, Waiting for the workspace daemon, Configuring environment | intended: different machinery, each in the user's terms |
 | A name already in use | Refused before anything: `local environment "N" already exists (remove it with cw --local rm N or choose another --name)` | Refused by the service, under the organization lock, in the same sentence: `cloud environment "N" already exists (remove it with cw --cloud rm N or choose another --name)`. A removed environment's name is free | Same in both now (242addf606); was R1: the cloud created a second `N` |
 | Without `--yes`, no terminal | Creates when there is nothing to confirm; with a secret project, refuses: "Applying sources needs --yes outside an interactive terminal or with JSON output; nothing was changed", `→ --yes` | Created, with nothing to confirm; with sources to confirm, the same refusal | Same in both now (#6182); was R4: two copies of the rule |

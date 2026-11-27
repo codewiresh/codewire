@@ -1675,7 +1675,7 @@ pub(crate) const MEMORY_CHOICES: &[(u32, &str)] = &[
     (8_192, "8 GiB"),
     (16_384, "16 GiB"),
 ];
-/// Disk choices run up to the hosted limit of 200 GiB (#3554); 80 GiB is the
+/// Disk choices run up to the hosted limit of 200 GiB (#3554); 120 GiB is the
 /// default.
 pub(crate) const DISK_CHOICES: &[(u32, &str)] = &[
     (10, "10 GiB"),

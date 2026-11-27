@@ -1981,12 +1981,12 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         }],
         install_command: String::new(),
         startup_script: String::new(),
-        // The platform default size (owner, 2026-10-27: "2 vcpu 8gib 80gib
-        // should be default size"; #3554), which is also the default
-        // warm-pool shape, so a dashboard create can start warm.
+        // The platform default size (2 vCPU, 8 GiB, 120 GiB; owner,
+        // 2026-11-27), matching the default warm-pool shape so a dashboard
+        // create can start warm.
         cpu: "2000".to_owned(),
         memory: "8192".to_owned(),
-        disk: "80".to_owned(),
+        disk: "120".to_owned(),
         ttl: String::new(),
         isolation_tier: "standard".to_owned(),
         confidential_available: false,
@@ -2999,7 +2999,7 @@ mod tests {
         assert!(html.contains("name=\"cpu\" aria-describedby=\"environment-cpu-help\"><option value=\"1000\">1 vCPU</option><option value=\"2000\" selected>2 vCPU</option>"));
         assert!(html.contains("<option value=\"2048\">2 GiB</option><option value=\"4096\">4 GiB</option><option value=\"8192\" selected>8 GiB</option><option value=\"16384\">16 GiB</option></select>"));
         assert!(html.contains(
-            "<option value=\"10\">10 GiB</option><option value=\"20\">20 GiB</option><option value=\"40\">40 GiB</option><option value=\"80\" selected>80 GiB</option><option value=\"120\">120 GiB</option><option value=\"160\">160 GiB</option><option value=\"200\">200 GiB</option></select>"
+            "<option value=\"10\">10 GiB</option><option value=\"20\">20 GiB</option><option value=\"40\">40 GiB</option><option value=\"80\">80 GiB</option><option value=\"120\" selected>120 GiB</option><option value=\"160\">160 GiB</option><option value=\"200\">200 GiB</option></select>"
         ));
         assert!(!html.contains("Platform default"));
     }

@@ -90,7 +90,7 @@ async fn db_a_restore_without_a_disk_gets_the_snapshots_size() -> anyhow::Result
             .execute(&db.pool)
             .await?;
         }
-        // One preset names no disk, so the create default (80 GiB) applies;
+        // One preset names no disk, so the create default (120 GiB) applies;
         // the other names 50 GiB.
         sqlx::query(
             "INSERT INTO environment_presets (id, org_id, name, build_status, project_spec) VALUES \
@@ -102,8 +102,8 @@ async fn db_a_restore_without_a_disk_gets_the_snapshots_size() -> anyhow::Result
         )
         .execute(&db.pool)
         .await?;
-        snapshot(&db, "snap-100", "disk-alice", 100 * GIB).await?;
-        snapshot(&db, "snap-over-100", "disk-alice", 100 * GIB + 1).await?;
+        snapshot(&db, "snap-140", "disk-alice", 140 * GIB).await?;
+        snapshot(&db, "snap-over-140", "disk-alice", 140 * GIB + 1).await?;
         snapshot(&db, "snap-60", "disk-alice", 60 * GIB).await?;
         snapshot(&db, "snap-bob", "disk-bob", 150 * GIB).await?;
 
@@ -112,17 +112,17 @@ async fn db_a_restore_without_a_disk_gets_the_snapshots_size() -> anyhow::Result
 
         // No disk named: the snapshot's size, rounded up to a whole GiB,
         // over the create default and a preset's smaller disk alike.
-        anyhow::ensure!(fork(&state, "disk-default", "snap-100", "plain", None).await? == 100);
-        anyhow::ensure!(fork(&state, "disk-50", "snap-100", "preset", None).await? == 100);
+        anyhow::ensure!(fork(&state, "disk-default", "snap-140", "plain", None).await? == 140);
+        anyhow::ensure!(fork(&state, "disk-50", "snap-140", "preset", None).await? == 140);
         anyhow::ensure!(
-            fork(&state, "disk-default", "snap-over-100", "rounded", None).await? == 101
+            fork(&state, "disk-default", "snap-over-140", "rounded", None).await? == 141
         );
         // A default already larger than the snapshot stays.
-        anyhow::ensure!(fork(&state, "disk-default", "snap-60", "larger", None).await? == 80);
+        anyhow::ensure!(fork(&state, "disk-default", "snap-60", "larger", None).await? == 120);
         // A named disk is the request's: at least the snapshot works...
-        anyhow::ensure!(fork(&state, "disk-default", "snap-100", "named", Some(120)).await? == 120);
+        anyhow::ensure!(fork(&state, "disk-default", "snap-140", "named", Some(160)).await? == 160);
         // ...and smaller is refused with the snapshot's size.
-        let refused = fork(&state, "disk-default", "snap-100", "small", Some(80))
+        let refused = fork(&state, "disk-default", "snap-140", "small", Some(120))
             .await
             .expect_err("a named disk smaller than the snapshot is refused");
         anyhow::ensure!(
@@ -132,7 +132,7 @@ async fn db_a_restore_without_a_disk_gets_the_snapshots_size() -> anyhow::Result
         anyhow::ensure!(
             refused
                 .to_string()
-                .contains("the disk must be at least as large as the snapshot, 100 GiB"),
+                .contains("the disk must be at least as large as the snapshot, 140 GiB"),
             "unexpected refusal: {refused}"
         );
         // Another member's snapshot reads as absent, and its size isn't used.

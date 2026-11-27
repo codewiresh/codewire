@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, desktop, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-26
+updated: 2026-11-27
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -41,7 +41,7 @@ as positionals or with `--repo`; they replace the file's repositories.
 | `--no-local-file` | Local: do not merge the `codewire.local.yaml` beside the nearest `codewire.yaml` |
 | `--path PATH` | Local: the project directory, where the `codewire.yaml` search starts (default `.`) |
 | `--path-mode mount\|copy\|clone\|empty` | Local: mount the directory live and read-write (default; the VM can change anything in it, including Git hooks and settings that git on your machine later runs, so use `clone` for untrusted code; in the VM, Git treats the mounted folder's repositories as yours and honours their own configuration and hooks, as on your machine), copy it once as it is now, clone the Git repository's committed state once, or start empty. Overrides `workspace.path_mode`; with repositories in `codewire.yaml`, `mount` uses the checkouts already in the folder and `clone` (the default) clones them |
-| `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox). A hosted sandbox defaults to 2 vCPU, 8 GiB and an 80 GiB disk, and its disk is at most 200 GiB |
+| `--cpu`, `--memory`, `--disk` | Resources, for example `--cpu 2 --memory 8GB --disk 40GB`; CPU is in cores (`0.5` or `500m` for half a core on a hosted sandbox). A hosted sandbox defaults to 2 vCPU, 8 GiB and a 120 GiB disk, and its disk is at most 200 GiB |
 | `--docker-disk SIZE`, `--no-docker` | Local: the guest Docker data disk (default 8 GiB), or no Docker daemon |
 | `--install CMD`, `--startup CMD` | Install command and startup script |
 | `--env KEY=VALUE` | Cloud: plain environment variables, saved in the environment's settings (repeatable); `KEY` alone is refused, so keep a secret with `cw secrets` |

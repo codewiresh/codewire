@@ -1,7 +1,7 @@
 ---
 title: Application secrets
 description: Store values such as DATABASE_URL in organization, personal or project scope, and select which ones an environment's processes receive.
-updated: 2026-11-23
+updated: 2026-11-27
 weight: 2
 aliases: ["/guides/application-secrets"]
 ---
@@ -43,7 +43,7 @@ Create environment app · cloud VM with these sources:
 Application secrets are visible to the workload. Credential profiles reach providers only through their handlers.
 Apply these sources? [y/N]: y
 app · cloud VM
-  2 vCPU · 8 GiB RAM · 80 GiB disk
+  2 vCPU · 8 GiB RAM · 120 GiB disk
   Credentials: none
   Secrets:     docs-demo (cloud)
 ```

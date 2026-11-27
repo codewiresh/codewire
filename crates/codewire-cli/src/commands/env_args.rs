@@ -90,7 +90,7 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "QUANTITY",
-        help = "Disk size (for example 120GB); cloud default 80GB, at most 200GB"
+        help = "Disk size (for example 160GB); cloud default 120GB, at most 200GB"
     )]
     pub(crate) disk: Option<String>,
     #[arg(

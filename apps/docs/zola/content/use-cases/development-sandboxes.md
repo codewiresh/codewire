@@ -1,7 +1,7 @@
 ---
 title: Development sandboxes
 description: A development environment per project that is the same on every machine, on your laptop with no account or hosted for a whole team, described once in codewire.yaml or a preset.
-updated: 2026-11-08
+updated: 2026-11-27
 weight: 1
 aliases: ["/use-cases/local-first", "/use-cases/team-workspaces"]
 ---
@@ -150,7 +150,7 @@ cw create --name ana-web --preset team-web --repo https://github.com/octocat/Hel
 
 ```text
 ana-web · cloud VM
-  2 vCPU · 8 GiB RAM · 80 GiB disk
+  2 vCPU · 8 GiB RAM · 120 GiB disk
   ✓ Cloning repositories  2s
   ✓ Running install command  0s
   ✓ scheduled shutdown after ttl 7200s

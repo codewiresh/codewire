@@ -1084,14 +1084,14 @@ async fn lock_organization_row(
     Ok(())
 }
 
-// A create that names no resources gets 2 vCPU, 8 GiB and 80 GiB (owner,
-// 2026-10-04 for CPU and memory; 2026-10-27: "2 vcpu 8gib 80gib should be
-// default size", #3554). It is the default warm-pool shape
-// 2000m/8192Mi/80Gi, so a default create can start warm. A create that sets
-// CPU or memory but no disk also gets 80 GiB.
+// A create that names no resources gets 2 vCPU, 8 GiB and 120 GiB (owner,
+// 2026-10-04 for CPU and memory; 2026-11-27 for 120 GiB disk, raised from
+// 80 GiB in #3554). It matches the default warm-pool shape
+// 2000m/8192Mi/120Gi, so a default create can start warm. A create that sets
+// CPU or memory but no disk also gets 120 GiB.
 const DEFAULT_CPU_MILLICORES: u32 = 2_000;
 const DEFAULT_MEMORY_MIB: u64 = 8_192;
-const DEFAULT_DISK_GIB: u64 = 80;
+const DEFAULT_DISK_GIB: u64 = 120;
 /// A confidential guest unpacks its images into RAM-backed storage, and the
 /// workspace image does not fit at [`DEFAULT_MEMORY_MIB`] (owner, 2026-10-30;
 /// #2497).
@@ -2718,7 +2718,7 @@ credentials: {profile: user/work}
     }
 
     #[test]
-    fn a_create_without_a_disk_gets_80_gib_and_a_confidential_one_its_own_limit() {
+    fn a_create_without_a_disk_gets_120_gib_and_a_confidential_one_its_own_limit() {
         let mut nothing = codewire_project::ProjectSpec::default();
         apply_environment_resource_defaults(&mut nothing, "standard");
         assert_eq!(
@@ -2726,17 +2726,17 @@ credentials: {profile: user/work}
             codewire_project::ResourceSpec {
                 cpu_millicores: Some(2_000),
                 memory_mib: Some(8_192),
-                disk_gib: Some(80),
+                disk_gib: Some(120),
             }
         );
 
         let mut compute_only = image_project_spec("workspace", Some(4_000), Some(16_384), None);
         apply_environment_resource_defaults(&mut compute_only, "standard");
-        assert_eq!(compute_only.resources.disk_gib, Some(80));
+        assert_eq!(compute_only.resources.disk_gib, Some(120));
 
-        let mut explicit = image_project_spec("workspace", None, None, Some(120));
+        let mut explicit = image_project_spec("workspace", None, None, Some(160));
         apply_environment_resource_defaults(&mut explicit, "standard");
-        assert_eq!(explicit.resources.disk_gib, Some(120));
+        assert_eq!(explicit.resources.disk_gib, Some(160));
 
         // A confidential volume supports at most 50 GiB, so its default is 50
         // and never trips the limit the caller did not ask for.

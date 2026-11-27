@@ -1,7 +1,7 @@
 ---
 title: Preview environments
 description: A hosted sandbox for each branch or pull request, with the app running in a session and an HTTPS preview URL, that deletes itself after a lifetime you choose.
-updated: 2026-11-19
+updated: 2026-11-27
 weight: 2
 aliases: ["/use-cases/preview-per-pull-request"]
 ---
@@ -23,7 +23,7 @@ cw create --name pr-42 --image workspace \
 
 ```text
 pr-42 · cloud VM
-  2 vCPU · 8 GiB RAM · 80 GiB disk
+  2 vCPU · 8 GiB RAM · 120 GiB disk
   ✓ Cloning repositories  2s
   ✓ scheduled shutdown after ttl 7200s
   ✓ Setup complete

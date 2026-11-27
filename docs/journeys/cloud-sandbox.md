@@ -16,7 +16,7 @@ Updated 2026-11-25.
 
 | ID | Owner | Dev | Production |
 | --- | --- | --- | --- |
-| `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed | not yet observed |
+| `sandbox-create` | cw-cleanup | observed 2026-11-14; a taken name refused (#4717) not yet observed; 120 GiB default disk (CLI and dashboard create form) not yet observed | not yet observed |
 | `sandbox-create-fails` | cw-cleanup | observed 2026-11-17 (#4483) | not yet observed; v0.4.21 lacks #4483's reasons |
 | `sandbox-credential-links` | cw-accounts | partly observed 2026-11-24 (Create's GitHub link, on every delivery) | not yet observed |
 | `sandbox-failure-trace-id` | cw-tracing | observed 2026-11-23 (#5633) | not yet observed |
@@ -86,7 +86,9 @@ Updated 2026-11-25.
 - **Proof:**
   - `cw create` exits 0 and prints "Environment walk created";
   - `cw ls` shows `walk` as `running`, and `cw info` gives it an ID, `State:
-    running` and a `StartedAt` time;
+    running`, `Disk: 120GB` (the 120 GiB hosted default, matching the dashboard
+    create form's preselected `120 GiB`; not yet observed) and a `StartedAt`
+    time;
   - the second `cw create --name walk` exits 1 with ``cloud environment
     "walk" already exists (remove it with `cw --cloud rm walk` or choose
     another --name)``, the sentence a local VM gives, and `cw ls` still

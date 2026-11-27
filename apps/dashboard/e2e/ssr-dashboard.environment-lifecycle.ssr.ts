@@ -200,7 +200,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     // CPU and memory so it fits a Kind worker, and keeps the default disk.
     await expect(page.locator("#environment-create-card").getByLabel("CPU", { exact: true })).toHaveValue("2000");
     await expect(page.locator("#environment-create-card").getByLabel("Memory", { exact: true })).toHaveValue("8192");
-    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("80");
+    await expect(page.locator("#environment-create-card").getByLabel("Disk", { exact: true })).toHaveValue("120");
     await page.locator("#environment-create-card").getByLabel("CPU", { exact: true }).selectOption("1000");
     await page.locator("#environment-create-card").getByLabel("Memory", { exact: true }).selectOption("2048");
     await page.getByLabel("Name").fill(environmentName);
@@ -237,7 +237,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     environmentId = created.id as string;
     expect(created.cpu_millicores).toBe(1000);
     expect(created.memory_mb).toBe(2048);
-    expect(created.disk_gb).toBe(80);
+    expect(created.disk_gb).toBe(120);
     expect(created.ttl_seconds).toBe(3600);
     expect(created.project_spec).toMatchObject({
       schema_version: 1,
@@ -246,14 +246,14 @@ test.describe.serial("server-rendered environment lifecycle", () => {
       startup_script: "printf 'started-explicitly\\n'",
       agents: { tools: ["codex"] },
       application_ports: [{ port: 3000, label: "web", access: "creator" }],
-      resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 80 },
+      resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 120 },
     });
     expect(created.project_spec.secrets).toMatchObject({ project: `platform:id:${secretProjectId}` });
     await waitForEnvironmentState(environmentId, ["running"], 300_000);
     await page.reload();
     let row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("running");
-    await expect(row.getByText("1 vCPU · 2 GiB · 80 GiB", { exact: true })).toBeVisible();
+    await expect(row.getByText("1 vCPU · 2 GiB · 120 GiB", { exact: true })).toBeVisible();
     await openRowActions(row);
     await expect(row.locator(".cw-row-menu-meta")).toContainText("usage");
 
@@ -639,7 +639,7 @@ test.describe.serial("server-rendered environment lifecycle", () => {
     const [deferred] = await sql`SELECT state, cpu_millicores, memory_mb FROM environments WHERE id = ${environmentId}`;
     expect(deferred).toMatchObject({ state: "stopped", cpu_millicores: 2000, memory_mb: 4096 });
     await expect(page.locator("[data-sandbox-resources]")).toHaveCount(2);
-    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["2 vCPU · 4 GiB · 80 GiB", "2 vCPU · 4 GiB · 80 GiB"], { timeout: 30_000 });
+    await expect(page.locator("[data-sandbox-resources]")).toHaveText(["2 vCPU · 4 GiB · 120 GiB", "2 vCPU · 4 GiB · 120 GiB"], { timeout: 30_000 });
     await page.goto(`/${slug}/`);
     row = page.locator("tr", { hasText: environmentName }).first();
     await expect(row.locator(".cw-status")).toContainText("stopped");
