@@ -1,0 +1,164 @@
+# Generated Helm values for self-hosted Codewire on Amazon EKS (#6706).
+# Rendered from deployments/aws-eks/values-eks.yaml.tmpl by install.sh.
+
+namespace:
+  create: false
+
+publicOrigin: "https://__DOMAIN_NAME__"
+sandboxNamespace: "codewire-sandboxes"
+sharedSecret: codewire-secrets
+
+config:
+  ENVIRONMENT: "production"
+  DERP_HOST: "__DERP_HOST__"
+  STUN_HOST: "__STUN_HOST__"
+  STUN_PORT: "3478"
+  PREVIEW_BASE_DOMAIN: "__PREVIEW_BASE_DOMAIN__"
+  TEMPORAL_HOST_PORT: "__TEMPORAL_HOST_PORT__"
+  TEMPORAL_NAMESPACE: "__TEMPORAL_NAMESPACE__"
+  IDP_SIGNUP: "invite-only"
+  PUBLIC_OIDC_ISSUER_URL: "https://__DOMAIN_NAME__"
+  FRONTEND_URL: "https://__DOMAIN_NAME__"
+  CODEWIRE_API_URL: "https://__DOMAIN_NAME__"
+  CODEWIRE_CREDIT_ENFORCEMENT: "off"
+  CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: "__IMAGE_REGISTRY__/workspace"
+  SANDBOX_WORKSPACE_STORAGE_CLASS: "codewire-gp3"
+  SANDBOX_VOLUME_SNAPSHOT_CLASS: "codewire-ebs-csi"
+  DB_HOST: "__RDS_ENDPOINT__"
+  DB_PORT: "5432"
+  DB_NAME: "codewire"
+  DB_USER: "codewire"
+  DB_SSLMODE: "require"
+
+images:
+  services:
+    repository: "__IMAGE_REGISTRY__/services"
+    tag: "__IMAGE_TAG__"
+  dashboard:
+    repository: "__IMAGE_REGISTRY__/dashboard"
+    tag: "__IMAGE_TAG__"
+  derp:
+    repository: "__IMAGE_REGISTRY__/derp"
+    tag: "__IMAGE_TAG__"
+
+edge:
+  peers:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+      podSelector:
+        matchLabels:
+          gateway.envoyproxy.io/owning-gateway-name: codewire-public
+
+ingress:
+  routes:
+    dashboard: false
+    derp: false
+    preview: false
+    coordinatorConnect: false
+    meshCoordinatorGrpc: false
+    environmentSessionGrpc: false
+    idp: false
+    billing: false
+    connect: false
+
+gateway:
+  enabled: true
+  createGateway: true
+  name: codewire-public
+  className: eg
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: codewire-nlb
+  host: "__DOMAIN_NAME__"
+  tlsSecret: "codewire-edge-tls"
+  previewHost: "__PREVIEW_WILDCARD_HOST__"
+  previewTlsSecret: "__PREVIEW_TLS_SECRET__"
+  derpHost: "__DERP_HOST__"
+  derpTlsSecret: "__DERP_TLS_SECRET__"
+
+agentSandbox:
+  enabled: __AGENT_SANDBOX_ENABLED__
+  crds: __AGENT_SANDBOX_ENABLED__
+
+runcRuntimeClass: false
+
+runtimeProfiles:
+  enabled: false
+
+dashboard:
+  enabled: true
+  replicas: __STATELESS_REPLICAS__
+  origins:
+    browserApi: "https://__DOMAIN_NAME__"
+
+idp:
+  enabled: true
+  replicas: __STATELESS_REPLICAS__
+
+billing:
+  enabled: true
+  replicas: __STATELESS_REPLICAS__
+
+orchestration:
+  enabled: true
+  replicas: 1
+  approvedImageRegistries: "ghcr.io/codewiresh/,docker.io/library/"
+  internalCertificate: true
+  udpRelayAllocatorClientCertificate: __DIRECT_ACCESS_ENABLED__
+  internalIssuer:
+    create: true
+  localKeyring:
+    enabled: __LOCAL_KEYRING_ENABLED__
+    secretName: codewire-tenant-keks
+    mountPath: /var/run/secrets/codewire/tenant-keks
+    activeKeyId: v1
+
+# Phase 1 keeps credential-service off unless ExternalOpenBao is configured;
+# Phase 2 enables credential-service natively with SecretKekMode=AwsKms.
+credentialService:
+  enabled: false
+
+coordinator:
+  enabled: __DIRECT_ACCESS_ENABLED__
+  replicas: 1
+
+derp:
+  enabled: __DIRECT_ACCESS_ENABLED__
+  replicas: __STATELESS_REPLICAS__
+
+udpRelay:
+  enabled: __DIRECT_ACCESS_ENABLED__
+
+mesh:
+  enabled: false
+
+temporal:
+  enabled: __TEMPORAL_IN_CLUSTER__
+  replicas: 1
+  postgres:
+    host: "__RDS_ENDPOINT__"
+    port: "5432"
+    user: codewire
+    passwordSecretName: codewire-db-app
+    passwordSecretKey: password
+    tlsEnabled: true
+    tlsDisableHostVerification: false
+
+databaseInit:
+  enabled: __DATABASE_INIT_ENABLED__
+  host: "__RDS_ENDPOINT__"
+  port: "5432"
+  user: codewire
+  databaseName: codewire
+  sslMode: require
+  passwordSecretName: codewire-db-app
+  passwordSecretKey: password
+
+adminBootstrap:
+  enabled: __ADMIN_BOOTSTRAP_ENABLED__
+  email: "__ADMIN_EMAIL__"
+  passwordSecretName: "codewire-admin-init"
+  passwordSecretKey: "password"

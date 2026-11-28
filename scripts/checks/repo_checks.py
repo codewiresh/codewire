@@ -40,6 +40,7 @@ from repo_policy.webpki_roots_floor import check_webpki_roots_floor
 from repo_policy.kube_tls_backend import check_kube_tls_backend
 from repo_policy.cargo_lock_integrity import check_cargo_lock_integrity
 from repo_policy.chart_deletion_guard import check_chart_deletion_guard
+from repo_policy.aws_eks_cfn import check_aws_eks_cfn
 from repo_policy.sqlx_sqlite_unused import check_sqlx_sqlite_unused
 from repo_policy.revocation_log_writers import check_revocation_log_writers
 from repo_policy.sandbox_audit_writers import check_sandbox_audit_writers
@@ -196,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     chart_guard_parser = subparsers.add_parser("chart-deletion-guard")
     chart_guard_parser.add_argument("--self-test", action="store_true")
     chart_guard_parser.set_defaults(func=check_chart_deletion_guard)
+    aws_eks_cfn_parser = subparsers.add_parser("aws-eks-cfn")
+    aws_eks_cfn_parser.add_argument("--self-test", action="store_true")
+    aws_eks_cfn_parser.set_defaults(func=check_aws_eks_cfn)
     boundary_parser = subparsers.add_parser("merge-queue-boundary")
     boundary_parser.add_argument("--self-test", action="store_true")
     boundary_parser.set_defaults(func=check_merge_queue_boundary)

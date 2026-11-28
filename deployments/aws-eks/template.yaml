@@ -1,0 +1,1287 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Self-hosted Codewire on Amazon EKS (#6706). Provisions VPC (or uses an
+  existing VPC), KMS CMK, Secrets Manager credentials and KEKs, RDS
+  PostgreSQL 17, EKS 1.33+ cluster with managed add-ons (VPC CNI NetworkPolicy,
+  EBS CSI, Pod Identity), system managed node group, self-managed KVM sandbox
+  Auto Scaling Group using AWS Nitro nested virtualization (or .metal) with
+  dynamic SSM Public Parameter AL2023 AMI and EKS Access Entry, and
+  least-privilege EKS Pod Identity roles.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Core Deployment
+        Parameters:
+          - ClusterName
+          - DomainName
+          - HostedZoneId
+          - DeploymentProfile
+          - DeletionProtection
+      - Label:
+          default: Compute & Kubernetes
+        Parameters:
+          - KubernetesVersion
+          - EksAl2023AmiId
+          - SystemInstanceType
+          - SandboxComputeMode
+          - KvmInstanceType
+          - KvmMinSize
+          - KvmDesiredSize
+          - KvmMaxSize
+      - Label:
+          default: Networking
+        Parameters:
+          - CreateVpc
+          - VpcCidr
+          - ExistingVpcId
+          - ExistingPrivateSubnetIds
+          - ExistingPublicSubnetIds
+          - AllowedApiCidrs
+      - Label:
+          default: Platform Features
+        Parameters:
+          - SecretKekMode
+          - TemporalMode
+          - EnableDirectAccess
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: codewire
+    AllowedPattern: '^[a-z][a-z0-9-]{1,30}[a-z0-9]$'
+    ConstraintDescription: Lowercase alphanumeric and hyphens, 3-32 characters.
+    Description: Prefix for the EKS cluster and supporting AWS resources.
+
+  DomainName:
+    Type: String
+    AllowedPattern: '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$'
+    ConstraintDescription: Must be a valid DNS hostname (for example codewire.example.com).
+    Description: Primary HTTPS origin hostname for Codewire.
+
+  HostedZoneId:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^[A-Z0-9]{10,32}$'
+    Description: >-
+      Optional Route53 Hosted Zone ID for automatic ACME DNS-01 certificates
+      (including *.preview.<DomainName>). Leave empty for BYO TLS and DNS.
+
+  DeploymentProfile:
+    Type: String
+    Default: Minimal
+    AllowedValues: [Minimal, HA]
+    Description: >-
+      Minimal (1 NAT GW, Single-AZ db.t4g.medium, 2 system nodes) or HA
+      (NAT GW per AZ, Multi-AZ db.m7g.large, 3 system nodes).
+
+  KubernetesVersion:
+    Type: String
+    Default: '1.33'
+    AllowedValues: ['1.33', '1.34']
+    Description: Amazon EKS Kubernetes version (1.33+ required for ImageVolume).
+
+  EksAl2023AmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/eks/optimized-ami/1.33/amazon-linux-2023/x86_64/standard/recommended/image_id
+    Description: >-
+      Dynamic SSM Public Parameter resolving the regional EKS-optimized AL2023
+      x86_64 AMI for self-managed KVM sandbox nodes (zero hardcoded AMI IDs).
+
+  SystemInstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues: [t3.large, t3.xlarge, m7i-flex.large, m7i-flex.xlarge, m7i.large, m7i.xlarge]
+    Description: x86_64 instance type for the control-plane EKS managed node group.
+
+  SandboxComputeMode:
+    Type: String
+    Default: EksKvmStandard
+    AllowedValues: [EksKvmStandard, ControlPlaneOnly]
+    Description: >-
+      EksKvmStandard (default) provisions a self-managed KVM sandbox ASG using
+      AWS Nitro nested virtualization (~$880-$940/mo total with 1x m7i.4xlarge).
+      ControlPlaneOnly runs sandboxes on enrolled hosts (cw host run).
+
+  KvmInstanceType:
+    Type: String
+    Default: m7i.4xlarge
+    AllowedValues:
+      - m7i.2xlarge
+      - m8i.2xlarge
+      - c7i.2xlarge
+      - c8i.2xlarge
+      - m7i.4xlarge
+      - m8i.4xlarge
+      - c7i.4xlarge
+      - c8i.4xlarge
+      - r7i.4xlarge
+      - r8i.4xlarge
+      - m7i.8xlarge
+      - m8i.8xlarge
+      - c7i.8xlarge
+      - c8i.8xlarge
+      - m7i.16xlarge
+      - m8i.16xlarge
+      - c7i.metal-24xl
+      - m7i.metal-24xl
+      - c8i.metal-24xl
+      - m8i.metal-24xl
+    Description: >-
+      x86_64 instance type for the KVM sandbox ASG. Non-.metal Intel 7th/8th-gen
+      instances automatically enable AWS Nitro NestedVirtualization ($0 surcharge);
+      .metal instances omit CpuOptions.NestedVirtualization automatically.
+
+  KvmMinSize:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 20
+    Description: Minimum KVM sandbox nodes when SandboxComputeMode=EksKvmStandard (0 scales to zero).
+
+  KvmDesiredSize:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 20
+    Description: Desired KVM sandbox nodes when SandboxComputeMode=EksKvmStandard.
+
+  KvmMaxSize:
+    Type: Number
+    Default: 4
+    MinValue: 0
+    MaxValue: 20
+    Description: Maximum KVM sandbox nodes when SandboxComputeMode=EksKvmStandard.
+
+  CreateVpc:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Create a new 2-AZ VPC with public and private subnets, or use existing VPC/subnets.
+
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+    AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/16$'
+    Description: /16 CIDR block for the created VPC (ignored when CreateVpc=false).
+
+  ExistingVpcId:
+    Type: String
+    Default: ''
+    Description: Existing VPC ID when CreateVpc=false.
+
+  ExistingPrivateSubnetIds:
+    Type: String
+    Default: ''
+    Description: Comma-separated list of at least two private subnet IDs when CreateVpc=false.
+
+  ExistingPublicSubnetIds:
+    Type: String
+    Default: ''
+    Description: Comma-separated list of at least two public subnet IDs when CreateVpc=false.
+
+  AllowedApiCidrs:
+    Type: String
+    AllowedPattern: '^private-only$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])(,([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2]))*$'
+    ConstraintDescription: Specify comma-separated IPv4 CIDRs (for example 203.0.113.10/32) or private-only.
+    Description: >-
+      IPv4 CIDR allowlist for the EKS public Kubernetes API endpoint, or
+      'private-only' to disable public API access.
+
+  SecretKekMode:
+    Type: String
+    Default: SecretsManagerLocalKeyring
+    AllowedValues: [SecretsManagerLocalKeyring, AwsKms, ExternalOpenBao]
+    Description: >-
+      Tenant-secret KEK mode. Phase 1 uses SecretsManagerLocalKeyring (KMS-backed
+      Secrets Manager synced via ESO). AwsKms is reserved for Phase 2.
+
+  TemporalMode:
+    Type: String
+    Default: InCluster
+    AllowedValues: [InCluster, External]
+    Description: Run Temporal in-cluster backed by RDS (InCluster) or use external Temporal Cloud.
+
+  EnableDirectAccess:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Enable coordinator, DERP (STUN 3478/UDP), and UDP relay (41641/UDP).
+
+  DeletionProtection:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable RDS DeletionProtection. Set false only for disposable verification stacks.
+
+Conditions:
+  ShouldCreateVpc: !Equals [!Ref CreateVpc, 'true']
+  IsHA: !Equals [!Ref DeploymentProfile, HA]
+  CreateSecondNat: !And
+    - !Condition ShouldCreateVpc
+    - !Condition IsHA
+  IsPublicApiEnabled: !Not [!Equals [!Ref AllowedApiCidrs, private-only]]
+  HasHostedZone: !Not [!Equals [!Ref HostedZoneId, '']]
+  EnableKvmPool: !Equals [!Ref SandboxComputeMode, EksKvmStandard]
+  IsKvmMetalInstance: !Or
+    - !Equals [!Ref KvmInstanceType, c7i.metal-24xl]
+    - !Equals [!Ref KvmInstanceType, m7i.metal-24xl]
+    - !Equals [!Ref KvmInstanceType, c8i.metal-24xl]
+    - !Equals [!Ref KvmInstanceType, m8i.metal-24xl]
+  EnableSecretsManagerKeks: !Equals [!Ref SecretKekMode, SecretsManagerLocalKeyring]
+  EnableDeletionProtection: !Equals [!Ref DeletionProtection, 'true']
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # KMS CMK (encrypts EKS Secrets, RDS, EBS GP3 volumes, and Secrets Manager)
+  # ---------------------------------------------------------------------------
+  CodewireKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'Codewire EKS platform encryption key for ${ClusterName}'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowAwsServicesViaService
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:CreateGrant
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                kms:CallerAccount: !Ref AWS::AccountId
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/eks/${ClusterName}/*'
+          - Sid: AllowAutoScalingEbsCrypto
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling*'
+          - Sid: AllowAutoScalingEbsGrants
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - kms:CreateGrant
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:PrincipalAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:PrincipalArn: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling*'
+              Bool:
+                kms:GrantIsForAWSResource: 'true'
+
+  CodewireKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/codewire-${ClusterName}'
+      TargetKeyId: !Ref CodewireKmsKey
+
+  # ---------------------------------------------------------------------------
+  # VPC & Subnets (optional; skipped when CreateVpc=false)
+  # ---------------------------------------------------------------------------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Condition: ShouldCreateVpc
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-vpc'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: ShouldCreateVpc
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-igw'
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-a'
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-b'
+        - Key: kubernetes.io/role/elb
+          Value: '1'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-a'
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Select [3, !Cidr [!Ref VpcCidr, 4, 12]]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-b'
+        - Key: kubernetes.io/role/internal-elb
+          Value: '1'
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: shared
+
+  NatEipA:
+    Type: AWS::EC2::EIP
+    Condition: ShouldCreateVpc
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Condition: ShouldCreateVpc
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-a'
+
+  NatEipB:
+    Type: AWS::EC2::EIP
+    Condition: CreateSecondNat
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateSecondNat
+    Properties:
+      AllocationId: !GetAtt NatEipB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-nat-b'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-public-rt'
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: ShouldCreateVpc
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ShouldCreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ShouldCreateVpc
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-rt-a'
+
+  PrivateDefaultRouteA:
+    Type: AWS::EC2::Route
+    Condition: ShouldCreateVpc
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+
+  PrivateSubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ShouldCreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-private-rt-b'
+
+  PrivateDefaultRouteB:
+    Type: AWS::EC2::Route
+    Condition: ShouldCreateVpc
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [CreateSecondNat, !Ref NatGatewayB, !Ref NatGatewayA]
+
+  PrivateSubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ShouldCreateVpc
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  S3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: ShouldCreateVpc
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableB
+
+  # ---------------------------------------------------------------------------
+  # Security Groups
+  # ---------------------------------------------------------------------------
+  EksClusterSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Codewire EKS control-plane additional SG for ${ClusterName}'
+      VpcId: !If [ShouldCreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-eks-sg'
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub 'Codewire RDS PostgreSQL SG for ${ClusterName}'
+      VpcId: !If [ShouldCreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref EksClusterSecurityGroup
+          Description: Allow PostgreSQL from EKS additional SG
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 127.0.0.1/32
+          Description: No outbound internet egress required from RDS
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-rds-sg'
+
+  RdsIngressFromEksManagedSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      Description: Allow PostgreSQL from EKS cluster managed SG
+
+  # ---------------------------------------------------------------------------
+  # Secrets Manager (KMS-encrypted, retained on delete)
+  # ---------------------------------------------------------------------------
+  DbCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'codewire/${ClusterName}/db-app'
+      Description: !Sub 'RDS PostgreSQL application credentials for ${ClusterName}'
+      KmsKeyId: !Ref CodewireKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"codewire"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\\'''
+
+  SessionSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'codewire/${ClusterName}/session-secret'
+      Description: !Sub 'Codewire SESSION_SECRET for ${ClusterName}'
+      KmsKeyId: !Ref CodewireKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: SESSION_SECRET
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  IdpSigningKekSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'codewire/${ClusterName}/idp-signing-keks'
+      Description: !Sub 'IdP OIDC signing KEK v1 for ${ClusterName} (retain for backup)'
+      KmsKeyId: !Ref CodewireKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: v1
+        PasswordLength: 64
+        ExcludePunctuation: true
+        ExcludeUppercase: true
+        ExcludeCharacters: ghijklmnopqrstuvwxyz
+
+  TenantKekSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: EnableSecretsManagerKeks
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'codewire/${ClusterName}/tenant-keks'
+      Description: !Sub 'Tenant secret local-keyring KEK v1 for ${ClusterName} (losing this loses tenant secrets)'
+      KmsKeyId: !Ref CodewireKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: v1
+        PasswordLength: 64
+        ExcludePunctuation: true
+        ExcludeUppercase: true
+        ExcludeCharacters: ghijklmnopqrstuvwxyz
+
+  AdminBootstrapPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub 'codewire/${ClusterName}/admin-bootstrap'
+      Description: !Sub 'Generated initial administrator password for ${ClusterName}'
+      KmsKeyId: !Ref CodewireKmsKey
+      GenerateSecretString:
+        SecretStringTemplate: '{}'
+        GenerateStringKey: password
+        PasswordLength: 24
+        RequireEachIncludedType: true
+        ExcludeCharacters: '"''\\`'
+
+  # ---------------------------------------------------------------------------
+  # RDS PostgreSQL 17
+  # ---------------------------------------------------------------------------
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub 'Private subnets for Codewire RDS (${ClusterName})'
+      SubnetIds: !If
+        - ShouldCreateVpc
+        - - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        - !Split [',', !Ref ExistingPrivateSubnetIds]
+
+  DbParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Family: postgres17
+      Description: !Sub 'Codewire PostgreSQL 17 parameters for ${ClusterName}'
+      Parameters:
+        max_locks_per_transaction: '1024'
+        rds.force_ssl: '1'
+
+  DbInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub '${ClusterName}-postgres'
+      Engine: postgres
+      EngineVersion: '17'
+      DBInstanceClass: !If [IsHA, db.m7g.large, db.t4g.medium]
+      AllocatedStorage: 50
+      MaxAllocatedStorage: 500
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref CodewireKmsKey
+      MultiAZ: !If [IsHA, true, false]
+      PubliclyAccessible: false
+      DBName: codewire
+      MasterUsername: codewire
+      MasterUserPassword: !Join
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - !Ref DbCredentialsSecret
+          - ':SecretString:password}}'
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      DBParameterGroupName: !Ref DbParameterGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroup
+      BackupRetentionPeriod: !If [IsHA, 14, 7]
+      DeletionProtection: !If [EnableDeletionProtection, true, false]
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+
+  # ---------------------------------------------------------------------------
+  # Amazon EKS Cluster & Managed Add-ons
+  # ---------------------------------------------------------------------------
+  EksClusterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/eks/${ClusterName}/cluster'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt CodewireKmsKey.Arn
+
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKSClusterPolicy'
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    DependsOn: EksClusterLogGroup
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt EksClusterRole.Arn
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
+      KubernetesNetworkConfig:
+        ServiceIpv4Cidr: 172.20.0.0/16
+      EncryptionConfig:
+        - Provider:
+            KeyArn: !GetAtt CodewireKmsKey.Arn
+          Resources:
+            - secrets
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - Type: api
+            - Type: audit
+            - Type: authenticator
+      ResourcesVpcConfig:
+        EndpointPrivateAccess: true
+        EndpointPublicAccess: !If [IsPublicApiEnabled, true, false]
+        PublicAccessCidrs: !If
+          - IsPublicApiEnabled
+          - !Split [',', !Ref AllowedApiCidrs]
+          - !Ref AWS::NoValue
+        SecurityGroupIds:
+          - !Ref EksClusterSecurityGroup
+        SubnetIds: !If
+          - ShouldCreateVpc
+          - - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+          - !Split [',', !Ref ExistingPrivateSubnetIds]
+
+  EksAddonVpcCni:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref EksCluster
+      AddonName: vpc-cni
+      ConfigurationValues: '{"enableNetworkPolicy":"true"}'
+      ResolveConflicts: OVERWRITE
+
+  EksAddonCoreDns:
+    Type: AWS::EKS::Addon
+    DependsOn: SystemNodeGroup
+    Properties:
+      ClusterName: !Ref EksCluster
+      AddonName: coredns
+      ResolveConflicts: OVERWRITE
+
+  EksAddonKubeProxy:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref EksCluster
+      AddonName: kube-proxy
+      ResolveConflicts: OVERWRITE
+
+  EksAddonPodIdentityAgent:
+    Type: AWS::EKS::Addon
+    Properties:
+      ClusterName: !Ref EksCluster
+      AddonName: eks-pod-identity-agent
+      ResolveConflicts: OVERWRITE
+
+  EksAddonEbsCsiDriver:
+    Type: AWS::EKS::Addon
+    DependsOn:
+      - SystemNodeGroup
+      - EbsCsiPodIdentityAssociation
+    Properties:
+      ClusterName: !Ref EksCluster
+      AddonName: aws-ebs-csi-driver
+      ResolveConflicts: OVERWRITE
+
+  # ---------------------------------------------------------------------------
+  # Managed Node Groups & Hardened Launch Templates (IMDSv2 hop-limit=1)
+  # ---------------------------------------------------------------------------
+  EksNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly'
+
+  SystemNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub '${ClusterName}-system-lt'
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 40
+              VolumeType: gp3
+              Encrypted: true
+              KmsKeyId: !GetAtt CodewireKmsKey.Arn
+              DeleteOnTermination: true
+
+  SystemNodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn: EksAddonVpcCni
+    Properties:
+      ClusterName: !Ref EksCluster
+      NodegroupName: !Sub '${ClusterName}-system'
+      NodeRole: !GetAtt EksNodeRole.Arn
+      AmiType: AL2023_x86_64_STANDARD
+      InstanceTypes:
+        - !Ref SystemInstanceType
+      LaunchTemplate:
+        Id: !Ref SystemNodeLaunchTemplate
+        Version: !GetAtt SystemNodeLaunchTemplate.LatestVersionNumber
+      Subnets: !If
+        - ShouldCreateVpc
+        - - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        - !Split [',', !Ref ExistingPrivateSubnetIds]
+      Labels:
+        codewire.sh/node-pool: system
+      ScalingConfig:
+        MinSize: !If [IsHA, 3, 2]
+        DesiredSize: !If [IsHA, 3, 2]
+        MaxSize: !If [IsHA, 6, 4]
+
+  # ---------------------------------------------------------------------------
+  # Self-Managed KVM Sandbox ASG (Nitro Nested Virtualization or .metal)
+  # EKS Managed Node Groups can strip CpuOptions.NestedVirtualization, so KVM
+  # nodes join as a self-managed EC2 ASG via AL2023 NodeConfig + AccessEntry.
+  # ---------------------------------------------------------------------------
+  KvmNodeRole:
+    Type: AWS::IAM::Role
+    Condition: EnableKvmPool
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly'
+
+  KvmNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Condition: EnableKvmPool
+    Properties:
+      Roles:
+        - !Ref KvmNodeRole
+
+  KvmNodeAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Condition: EnableKvmPool
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt KvmNodeRole.Arn
+      Type: EC2_LINUX
+
+  KvmNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Condition: EnableKvmPool
+    Properties:
+      LaunchTemplateName: !Sub '${ClusterName}-kvm-sandbox-lt'
+      LaunchTemplateData:
+        ImageId: !Ref EksAl2023AmiId
+        InstanceType: !Ref KvmInstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt KvmNodeInstanceProfile.Arn
+        SecurityGroupIds:
+          - !GetAtt EksCluster.ClusterSecurityGroupId
+          - !Ref EksClusterSecurityGroup
+        CpuOptions: !If
+          - IsKvmMetalInstance
+          - !Ref AWS::NoValue
+          - NestedVirtualization: enabled
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 100
+              VolumeType: gp3
+              Encrypted: true
+              KmsKeyId: !GetAtt CodewireKmsKey.Arn
+              DeleteOnTermination: true
+        UserData: !Base64
+          Fn::Sub: |
+            MIME-Version: 1.0
+            Content-Type: multipart/mixed; boundary="BOUNDARY"
+
+            --BOUNDARY
+            Content-Type: application/node.eks.aws
+
+            ---
+            apiVersion: node.eks.aws/v1alpha1
+            kind: NodeConfig
+            spec:
+              cluster:
+                name: ${EksCluster}
+                apiServerEndpoint: ${EksCluster.Endpoint}
+                certificateAuthority: ${EksCluster.CertificateAuthorityData}
+                cidr: 172.20.0.0/16
+              kubelet:
+                flags:
+                  - --node-labels=node.codewire.sh/purpose=sandbox-runtime,codewire.sh/node-pool=kvm-sandbox
+                  - --register-with-taints=node.codewire.sh/runtime-candidate=true:NoSchedule
+              containerd:
+                config: |
+                  [plugins."io.containerd.grpc.v1.cri"]
+                    device_ownership_from_security_context = true
+            --BOUNDARY--
+
+  KvmNodeAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: EnableKvmPool
+    DependsOn:
+      - EksAddonVpcCni
+      - KvmNodeAccessEntry
+    Properties:
+      AutoScalingGroupName: !Sub '${ClusterName}-kvm-sandbox-asg'
+      MinSize: !Ref KvmMinSize
+      DesiredCapacity: !Ref KvmDesiredSize
+      MaxSize: !Ref KvmMaxSize
+      VPCZoneIdentifier: !If
+        - ShouldCreateVpc
+        - - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+        - !Split [',', !Ref ExistingPrivateSubnetIds]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref KvmNodeLaunchTemplate
+        Version: !GetAtt KvmNodeLaunchTemplate.LatestVersionNumber
+      InstanceMaintenancePolicy:
+        MinHealthyPercentage: 100
+        MaxHealthyPercentage: 200
+      Tags:
+        - Key: Name
+          Value: !Sub '${ClusterName}-kvm-sandbox'
+          PropagateAtLaunch: true
+        - Key: !Sub 'kubernetes.io/cluster/${ClusterName}'
+          Value: owned
+          PropagateAtLaunch: true
+        - Key: codewire.sh/node-pool
+          Value: kvm-sandbox
+          PropagateAtLaunch: true
+
+  # ---------------------------------------------------------------------------
+  # Least-Privilege EKS Pod Identity Roles & Associations
+  # ---------------------------------------------------------------------------
+  EbsCsiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy'
+      Policies:
+        - PolicyName: EbsCsiKmsScoped
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:ListGrants
+                  - kms:RevokeGrant
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt CodewireKmsKey.Arn
+
+  EbsCsiPodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    DependsOn: EksAddonPodIdentityAgent
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: kube-system
+      ServiceAccount: ebs-csi-controller-sa
+      RoleArn: !GetAtt EbsCsiRole.Arn
+
+  ExternalSecretsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: ReadCodewireStackSecrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:codewire/${ClusterName}/*'
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt CodewireKmsKey.Arn
+
+  ExternalSecretsPodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    DependsOn: EksAddonPodIdentityAgent
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: external-secrets
+      ServiceAccount: external-secrets
+      RoleArn: !GetAtt ExternalSecretsRole.Arn
+
+  CertManagerRole:
+    Type: AWS::IAM::Role
+    Condition: HasHostedZone
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: Route53Dns01Scoped
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - route53:GetChange
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::change/*'
+              - Effect: Allow
+                Action:
+                  - route53:ChangeResourceRecordSets
+                  - route53:ListResourceRecordSets
+                Resource: !Sub 'arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}'
+
+  CertManagerPodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    Condition: HasHostedZone
+    DependsOn: EksAddonPodIdentityAgent
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: cert-manager
+      ServiceAccount: cert-manager
+      RoleArn: !GetAtt CertManagerRole.Arn
+
+  AwsLbControllerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: AwsLoadBalancerControllerNlb
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/elasticloadbalancing.amazonaws.com/AWSServiceRoleForElasticLoadBalancing'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeAccountAttributes
+                  - ec2:DescribeAddresses
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeInstances
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeTags
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:DescribeLoadBalancerAttributes
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:DescribeListenerAttributes
+                  - elasticloadbalancing:DescribeListenerCertificates
+                  - elasticloadbalancing:DescribeSSLPolicies
+                  - elasticloadbalancing:DescribeRules
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:DescribeTargetGroupAttributes
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:DescribeTags
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:DeleteSecurityGroup
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:ModifyLoadBalancerAttributes
+                  - elasticloadbalancing:SetIpAddressType
+                  - elasticloadbalancing:SetSecurityGroups
+                  - elasticloadbalancing:SetSubnets
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroupAttributes
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:RegisterTargets
+                  - elasticloadbalancing:DeregisterTargets
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/*'
+                  - !Sub 'arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:vpc/*'
+                  - !Sub 'arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/net/*'
+                  - !Sub 'arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:targetgroup/*'
+                  - !Sub 'arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:listener/net/*'
+
+  AwsLbControllerPodIdentityAssociation:
+    Type: AWS::EKS::PodIdentityAssociation
+    DependsOn: EksAddonPodIdentityAgent
+    Properties:
+      ClusterName: !Ref EksCluster
+      Namespace: kube-system
+      ServiceAccount: aws-load-balancer-controller
+      RoleArn: !GetAtt AwsLbControllerRole.Arn
+
+  # ---------------------------------------------------------------------------
+  # Non-secret SSM Metadata Document for install.sh / GitOps Consumers
+  # ---------------------------------------------------------------------------
+  EksMetadataParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/codewire/${ClusterName}/eks-outputs'
+      Type: String
+      Description: !Sub 'Non-secret EKS deployment metadata for ${ClusterName}'
+      Value: !Sub
+        - |
+          {
+            "clusterName": "${ClusterName}",
+            "region": "${AWS::Region}",
+            "vpcId": "${VpcIdValue}",
+            "domainName": "${DomainName}",
+            "hostedZoneId": "${HostedZoneId}",
+            "rdsEndpoint": "${DbInstance.Endpoint.Address}",
+            "kmsKeyArn": "${CodewireKmsKey.Arn}",
+            "secretsPrefix": "codewire/${ClusterName}",
+            "deploymentProfile": "${DeploymentProfile}",
+            "sandboxComputeMode": "${SandboxComputeMode}",
+            "kvmInstanceType": "${KvmInstanceType}",
+            "secretKekMode": "${SecretKekMode}",
+            "temporalMode": "${TemporalMode}",
+            "enableDirectAccess": "${EnableDirectAccess}"
+          }
+        - VpcIdValue: !If [ShouldCreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+      Tags:
+        app.kubernetes.io/part-of: codewire
+    Metadata:
+      Note: Uses non-secret stack metadata only.
+
+Outputs:
+  ClusterName:
+    Description: Amazon EKS cluster name.
+    Value: !Ref EksCluster
+
+  ClusterEndpoint:
+    Description: Amazon EKS Kubernetes API server endpoint.
+    Value: !GetAtt EksCluster.Endpoint
+
+  VpcId:
+    Description: VPC ID hosting the EKS cluster and RDS instance.
+    Value: !If [ShouldCreateVpc, !Ref Vpc, !Ref ExistingVpcId]
+
+  RdsEndpoint:
+    Description: Private RDS PostgreSQL 17 endpoint hostname.
+    Value: !GetAtt DbInstance.Endpoint.Address
+
+  KmsKeyArn:
+    Description: Dedicated AWS KMS CMK ARN encrypting EKS, RDS, EBS, and Secrets Manager.
+    Value: !GetAtt CodewireKmsKey.Arn
+
+  SecretsPrefix:
+    Description: Secrets Manager prefix holding stack-generated credentials and KEKs.
+    Value: !Sub 'codewire/${ClusterName}'
+
+  ValuesParameterName:
+    Description: SSM Parameter storing non-secret EKS deployment metadata.
+    Value: !Ref EksMetadataParameter
+
+  UpdateKubeconfigCommand:
+    Description: Command to configure kubectl for this EKS cluster.
+    Value: !Sub 'aws eks update-kubeconfig --region ${AWS::Region} --name ${ClusterName}'
+
+  InstallCommand:
+    Description: Bootstrap cluster controllers and deploy Codewire via Helm.
+    Value: !Sub './deployments/aws-eks/install.sh --stack-name ${AWS::StackName} --region ${AWS::Region}'
+
+  UninstallCommand:
+    Description: Safely drain LoadBalancers/PVCs before deleting the CloudFormation stack.
+    Value: !Sub './deployments/aws-eks/uninstall.sh --stack-name ${AWS::StackName} --region ${AWS::Region}'

@@ -863,6 +863,8 @@ run_repo_rules() {
   python3 scripts/checks/repo_checks.py trace-context-callers
   python3 scripts/checks/repo_checks.py identity-file-exclusions --self-test
   python3 scripts/checks/repo_checks.py identity-file-exclusions
+  python3 scripts/checks/repo_checks.py aws-eks-cfn --self-test
+  python3 scripts/checks/repo_checks.py aws-eks-cfn
   python3 scripts/checks/repo_checks.py mcp-settings --self-test
   python3 scripts/checks/repo_checks.py rust-validation-source
   python3 scripts/checks/repo_checks.py retired-reference-source
@@ -2136,6 +2138,8 @@ run_deploy() {
   install_helm
   # The Codewire chart renders what the Kustomize trees render (#2908).
   python3 -B scripts/ci/tests/test-deploy-helm-chart.py
+  # Self-hosted Amazon EKS CloudFormation policy + Helm render matrix (#6706).
+  scripts/ci/tests/test-deploy-aws-eks.sh
   # Every service on the services image runs non-root and read-only, with
   # no privilege escalation or capabilities; the check lists any exception
   # (#5505).
