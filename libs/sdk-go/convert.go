@@ -259,7 +259,76 @@ func fromProtoSecretMetadata(secret *codewirev1.SecretMetadata) (SecretMetadata,
 	if err != nil {
 		return SecretMetadata{}, err
 	}
-	return SecretMetadata{CreatedAt: createdAt, Key: secret.GetKey(), UpdatedAt: updatedAt}, nil
+	return SecretMetadata{
+		Binding:   fromProtoSecretBinding(secret.GetBinding()),
+		CreatedAt: createdAt,
+		Key:       secret.GetKey(),
+		UpdatedAt: updatedAt,
+	}, nil
+}
+
+func fromProtoSecretBinding(binding *codewirev1.SecretBinding) *SecretBinding {
+	if binding == nil {
+		return nil
+	}
+	converted := &SecretBinding{
+		Hosts:             append([]string(nil), binding.GetHosts()...),
+		Prefix:            binding.GetPrefix(),
+		Preset:            binding.GetPreset(),
+		BindingGeneration: binding.GetBindingGeneration(),
+	}
+	switch presentation := binding.GetPresentation().(type) {
+	case *codewirev1.SecretBinding_Header:
+		converted.Header = &SecretHeaderPresentation{
+			Headers: append([]string(nil), presentation.Header.GetHeaders()...),
+			Scheme:  copyStringPointer(presentation.Header.Scheme),
+		}
+	case *codewirev1.SecretBinding_Basic:
+		converted.Basic = &SecretBasicPresentation{Username: presentation.Basic.GetUsername()}
+	case *codewirev1.SecretBinding_BasicUser:
+		converted.BasicUser = &SecretBasicUserPresentation{}
+	}
+	return converted
+}
+
+// toProtoSecretBindingChange is the binding and plain fields of a set
+// request; the service fills every default.
+func toProtoSecretBindingChange(change SecretBindingChange) (*codewirev1.SecretBinding, bool, error) {
+	if err := ensureSecretBindingConverterCoverage(); err != nil {
+		return nil, false, err
+	}
+	binding := change.Binding
+	if binding == nil {
+		return nil, change.Plain, nil
+	}
+	if change.Plain {
+		return nil, false, fmt.Errorf("codewire: a secret is bound to hosts or made plain, not both")
+	}
+	converted := &codewirev1.SecretBinding{
+		Hosts:  append([]string(nil), binding.Hosts...),
+		Prefix: binding.Prefix,
+		Preset: binding.Preset,
+	}
+	presentations := 0
+	if binding.Header != nil {
+		presentations++
+		converted.Presentation = &codewirev1.SecretBinding_Header{Header: &codewirev1.SecretHeaderPresentation{
+			Headers: append([]string(nil), binding.Header.Headers...),
+			Scheme:  copyStringPointer(binding.Header.Scheme),
+		}}
+	}
+	if binding.Basic != nil {
+		presentations++
+		converted.Presentation = &codewirev1.SecretBinding_Basic{Basic: &codewirev1.SecretBasicPresentation{Username: binding.Basic.Username}}
+	}
+	if binding.BasicUser != nil {
+		presentations++
+		converted.Presentation = &codewirev1.SecretBinding_BasicUser{BasicUser: &codewirev1.SecretBasicUserPresentation{}}
+	}
+	if presentations > 1 {
+		return nil, false, fmt.Errorf("codewire: a secret binding names one presentation: header, basic or basic_user")
+	}
+	return converted, false, nil
 }
 
 func fromProtoSecretProject(project *codewirev1.SecretProject) (SecretProject, error) {
@@ -1188,9 +1257,27 @@ func ensurePresetConverterCoverage() error {
 
 func ensureSecretMetadataConverterCoverage() error {
 	secretMetadataCoverageOnce.Do(func() {
-		secretMetadataCoverageErr = ensureDescriptorCoverage("secret metadata", codewirev1.File_codewire_v1_secret_proto.Messages().ByName("SecretMetadata"), map[protoreflect.FieldNumber]protoreflect.Name{1: "key", 2: "created_at", 3: "updated_at"})
+		secretMetadataCoverageErr = ensureDescriptorCoverage("secret metadata", codewirev1.File_codewire_v1_secret_proto.Messages().ByName("SecretMetadata"), map[protoreflect.FieldNumber]protoreflect.Name{1: "key", 2: "created_at", 3: "updated_at", 4: "binding"})
+		if secretMetadataCoverageErr == nil {
+			secretMetadataCoverageErr = ensureSecretBindingConverterCoverage()
+		}
 	})
 	return secretMetadataCoverageErr
+}
+
+func ensureSecretBindingConverterCoverage() error {
+	messages := codewirev1.File_codewire_v1_secret_proto.Messages()
+	for name, fields := range map[string]map[protoreflect.FieldNumber]protoreflect.Name{
+		"SecretBinding":               {1: "hosts", 2: "header", 3: "basic", 4: "basic_user", 5: "prefix", 6: "preset", 7: "binding_generation"},
+		"SecretHeaderPresentation":    {1: "headers", 2: "scheme"},
+		"SecretBasicPresentation":     {1: "username"},
+		"SecretBasicUserPresentation": {},
+	} {
+		if err := ensureDescriptorCoverage(name, messages.ByName(protoreflect.Name(name)), fields); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureSecretProjectConverterCoverage() error {

@@ -45,6 +45,10 @@ use crate::api::secrets::{
     rename_user_secret_core, set_secret_core, set_user_secret_core,
 };
 
+mod binding;
+
+use binding::{binding_write, proto_binding};
+
 /// Registers every SecretService RPC on its generated Connect route.
 pub fn router(state: ApiState) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(SecretConnectService { state }))
@@ -85,12 +89,15 @@ impl SecretService for SecretConnectService {
     ) -> ServiceResult<SetSecretResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.view();
+        let binding = binding_write(request.binding.as_option(), request.plain)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
         set_secret_core(
             &self.state,
             &user,
             request.org_id,
             request.key,
             request.value,
+            binding,
         )
         .await
         .map_err(|error| {
@@ -161,7 +168,9 @@ impl SecretService for SecretConnectService {
     ) -> ServiceResult<SetUserSecretResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.view();
-        set_user_secret_core(&self.state, &user, request.key, request.value)
+        let binding = binding_write(request.binding.as_option(), request.plain)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
+        set_user_secret_core(&self.state, &user, request.key, request.value, binding)
             .await
             .map_err(|error| {
                 let error = secret_write_validation(error, request.key, request.value);
@@ -289,6 +298,8 @@ impl SecretService for SecretConnectService {
     ) -> ServiceResult<SetProjectSecretResponse> {
         let user = auth_user(&ctx)?.clone();
         let request = request.view();
+        let binding = binding_write(request.binding.as_option(), request.plain)
+            .map_err(|error| rpc_app_error(&error, &ctx))?;
         set_project_secret_core(
             &self.state,
             &user,
@@ -296,6 +307,7 @@ impl SecretService for SecretConnectService {
             request.secret_project_id,
             request.key,
             request.value,
+            binding,
         )
         .await
         .map_err(|error| {
@@ -425,6 +437,9 @@ fn secret_key_validation(error: AppError, key: &str) -> AppError {
     }
 }
 
+/// An empty value reaches the store, which refuses it as the value
+/// validation below unless it is a change to a bound secret that needs no
+/// value; every refusal of a binding is a coded error this leaves as it is.
 fn secret_write_validation(error: AppError, key: &str, value: &str) -> AppError {
     let error = secret_key_validation(error, key);
     if matches!(error, AppError::BadRequest(_))
@@ -469,6 +484,10 @@ fn proto_secret_metadata(secret: SecretMetadata) -> ProtoSecretMetadata {
         key: secret.key,
         created_at: optional_proto_timestamp(&secret.created_at),
         updated_at: optional_proto_timestamp(&secret.updated_at),
+        binding: secret
+            .binding
+            .map(|binding| proto_binding(binding, secret.binding_generation))
+            .into(),
         ..Default::default()
     }
 }

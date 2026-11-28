@@ -1,3 +1,4 @@
+import { create } from "@bufbuild/protobuf";
 import { fromEnvironmentNetworkPolicy } from "./network-policies.js";
 import {
   EnvironmentNetworkPolicySchema,
@@ -73,9 +74,14 @@ import {
 } from "@codewire/proto-ts/gen/codewire/v1/preset_pb";
 import {
   WorkloadSecretSource as ProtoWorkloadSecretSource,
+  SecretBasicPresentationSchema,
+  SecretBasicUserPresentationSchema,
+  SecretBindingSchema,
+  SecretHeaderPresentationSchema,
   SecretMetadataSchema,
   SecretProjectSchema,
   type ResolvedWorkloadSecretMetadata as ProtoResolvedWorkloadSecretMetadata,
+  type SecretBinding as ProtoSecretBinding,
   type SecretMetadata as ProtoSecretMetadata,
   type SecretProject as ProtoSecretProject,
 } from "@codewire/proto-ts/gen/codewire/v1/secret_pb";
@@ -102,7 +108,10 @@ import type {
   ProjectStoragePlacement as SdkProjectStoragePlacement,
   ProjectSpec,
   ResolvedWorkloadSecretMetadata,
+  SecretBinding,
+  SecretBindingChange,
   SecretMetadata,
+  SecretPresentation,
   SecretProject,
   PresetData,
   StartupScriptUpdate,
@@ -986,9 +995,78 @@ export function fromProtoPreset(value: ProtoPreset): PresetData {
 
 export function fromProtoSecretMetadata(value: ProtoSecretMetadata): SecretMetadata {
   return {
+    binding: value.binding ? fromProtoSecretBinding(value.binding) : undefined,
     key: value.key,
     created_at: timestampString(value.createdAt),
     updated_at: timestampString(value.updatedAt),
+  };
+}
+
+function fromProtoSecretPresentation(
+  value: ProtoSecretBinding["presentation"],
+): SecretPresentation | undefined {
+  switch (value.case) {
+    case "header":
+      return { kind: "header", headers: [...value.value.headers], scheme: value.value.scheme };
+    case "basic":
+      return { kind: "basic", username: optionalString(value.value.username) };
+    case "basicUser":
+      return { kind: "basic_user" };
+    default:
+      return undefined;
+  }
+}
+
+export function fromProtoSecretBinding(value: ProtoSecretBinding): SecretBinding {
+  return {
+    hosts: [...value.hosts],
+    presentation: fromProtoSecretPresentation(value.presentation),
+    prefix: optionalString(value.prefix),
+    preset: optionalString(value.preset),
+    binding_generation: numberFromInt64(value.bindingGeneration),
+  };
+}
+
+function toProtoSecretPresentation(value: SecretPresentation | undefined) {
+  switch (value?.kind) {
+    case undefined:
+      return undefined;
+    case "header":
+      return {
+        case: "header" as const,
+        value: create(SecretHeaderPresentationSchema, {
+          headers: [...(value.headers ?? [])],
+          scheme: value.scheme,
+        }),
+      };
+    case "basic":
+      return {
+        case: "basic" as const,
+        value: create(SecretBasicPresentationSchema, { username: value.username ?? "" }),
+      };
+    case "basic_user":
+      return { case: "basicUser" as const, value: create(SecretBasicUserPresentationSchema) };
+    default:
+      throw new Error(`codewire: unknown secret presentation ${JSON.stringify(value)}`);
+  }
+}
+
+/** The binding fields of a set request; the service fills every default. */
+export function toProtoSecretBindingChange(value: SecretBindingChange) {
+  if (value.binding && value.plain) {
+    throw new Error("codewire: a secret is bound to hosts or made plain, not both");
+  }
+  const binding = value.binding;
+  return {
+    binding: binding
+      ? create(SecretBindingSchema, {
+          hosts: [...binding.hosts],
+          presentation: toProtoSecretPresentation(binding.presentation),
+          prefix: binding.prefix ?? "",
+          preset: binding.preset ?? "",
+        })
+      : undefined,
+    plain: value.plain ?? false,
   };
 }
 
@@ -1304,8 +1382,18 @@ export function assertRuntimeConverterCoverage(): void {
     [1, "org_id"], [2, "preset_id"], [3, "name"], [4, "description"], [5, "slug"], [9, "default_ttl_seconds"], [22, "project_spec"],
   ]));
   assertDescriptorCoverage("secret metadata", SecretMetadataSchema.fields, new Map([
-    [1, "key"], [2, "created_at"], [3, "updated_at"],
+    [1, "key"], [2, "created_at"], [3, "updated_at"], [4, "binding"],
   ]));
+  assertDescriptorCoverage("secret binding", SecretBindingSchema.fields, new Map([
+    [1, "hosts"], [2, "header"], [3, "basic"], [4, "basic_user"], [5, "prefix"], [6, "preset"], [7, "binding_generation"],
+  ]));
+  assertDescriptorCoverage("secret header presentation", SecretHeaderPresentationSchema.fields, new Map([
+    [1, "headers"], [2, "scheme"],
+  ]));
+  assertDescriptorCoverage("secret basic presentation", SecretBasicPresentationSchema.fields, new Map([
+    [1, "username"],
+  ]));
+  assertDescriptorCoverage("secret basic-user presentation", SecretBasicUserPresentationSchema.fields, new Map());
   assertDescriptorCoverage("secret project", SecretProjectSchema.fields, new Map([
     [1, "id"], [2, "org_id"], [3, "name"], [4, "secret_count"], [5, "created_at"],
   ]));

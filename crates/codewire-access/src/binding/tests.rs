@@ -379,3 +379,76 @@ fn only_the_presentation_the_prefix_or_protection_moves_the_generation() {
     assert!(!change_moves_generation(Some(&two), Some(&one)));
     assert!(!change_moves_generation(Some(&one), Some(&one)));
 }
+
+#[test]
+fn a_binding_round_trips_through_its_stored_form() {
+    for bound in [
+        binding(
+            &["a.fancy.com", "b.fancy.com"],
+            Presentation::default_header(),
+            Some("ft_"),
+        ),
+        binding(
+            &["a.fancy.com"],
+            Presentation::header(vec![BoundHeader::parse("X-Key").unwrap()], Scheme::None).unwrap(),
+            None,
+        ),
+        binding(
+            &["git.fancy.com"],
+            Presentation::basic(Some("bot")).unwrap(),
+            None,
+        ),
+        binding(&["api.fancy.com"], Presentation::BasicUser, None),
+    ] {
+        let stored = StoredBinding::from(&bound);
+        let json = serde_json::to_string(&stored).unwrap();
+        let read: StoredBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(read.parse(&reserved()).unwrap(), bound, "{json}");
+    }
+}
+
+#[test]
+fn a_stored_binding_is_checked_again_when_read() {
+    let stored: StoredBinding = serde_json::from_str(
+        r#"{"hosts":["api.anthropic.com"],"presentation":{"kind":"basic_user"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        stored.parse(&ReservedHosts::default()),
+        Err(BindingError::ProviderHost("api.anthropic.com".into()))
+    );
+    assert!(
+        serde_json::from_str::<StoredBinding>(
+            r#"{"hosts":["a.fancy.com"],"presentation":{"kind":"basic_user"},"extra":1}"#
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_stored_preset_is_a_short_lowercase_name() {
+    let mut stored = StoredBinding::from(&binding(&["a.fancy.com"], Presentation::BasicUser, None));
+    stored.preset = Some("stripe".into());
+    assert!(stored.parse(&reserved()).is_ok());
+    for preset in ["", "Stripe", "<b>x</b>", &"p".repeat(33)] {
+        stored.preset = Some(preset.into());
+        assert_eq!(
+            stored.parse(&reserved()),
+            Err(BindingError::InvalidPreset),
+            "{preset:?}"
+        );
+    }
+}
+
+#[test]
+fn refusals_carry_stable_codes() {
+    assert_eq!(
+        BindingError::ProviderHost("x".into()).code(),
+        "bound_host_provider"
+    );
+    assert_eq!(
+        BindingError::DeploymentHost("x".into()).code(),
+        "bound_host_reserved"
+    );
+    assert_eq!(BindingError::NoHosts.code(), "secret_binding_invalid");
+}

@@ -24,14 +24,52 @@ WORKLOAD_SECRET_SOURCE_USER: WorkloadSecretSource
 WORKLOAD_SECRET_SOURCE_EXPLICIT_ENVIRONMENT: WorkloadSecretSource
 
 class SecretMetadata(_message.Message):
-    __slots__ = ("key", "created_at", "updated_at")
+    __slots__ = ("key", "created_at", "updated_at", "binding")
     KEY_FIELD_NUMBER: _ClassVar[int]
     CREATED_AT_FIELD_NUMBER: _ClassVar[int]
     UPDATED_AT_FIELD_NUMBER: _ClassVar[int]
+    BINDING_FIELD_NUMBER: _ClassVar[int]
     key: str
     created_at: _timestamp_pb2.Timestamp
     updated_at: _timestamp_pb2.Timestamp
-    def __init__(self, key: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ...) -> None: ...
+    binding: SecretBinding
+    def __init__(self, key: _Optional[str] = ..., created_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., updated_at: _Optional[_Union[datetime.datetime, _timestamp_pb2.Timestamp, _Mapping]] = ..., binding: _Optional[_Union[SecretBinding, _Mapping]] = ...) -> None: ...
+
+class SecretBinding(_message.Message):
+    __slots__ = ("hosts", "header", "basic", "basic_user", "prefix", "preset", "binding_generation")
+    HOSTS_FIELD_NUMBER: _ClassVar[int]
+    HEADER_FIELD_NUMBER: _ClassVar[int]
+    BASIC_FIELD_NUMBER: _ClassVar[int]
+    BASIC_USER_FIELD_NUMBER: _ClassVar[int]
+    PREFIX_FIELD_NUMBER: _ClassVar[int]
+    PRESET_FIELD_NUMBER: _ClassVar[int]
+    BINDING_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    hosts: _containers.RepeatedScalarFieldContainer[str]
+    header: SecretHeaderPresentation
+    basic: SecretBasicPresentation
+    basic_user: SecretBasicUserPresentation
+    prefix: str
+    preset: str
+    binding_generation: int
+    def __init__(self, hosts: _Optional[_Iterable[str]] = ..., header: _Optional[_Union[SecretHeaderPresentation, _Mapping]] = ..., basic: _Optional[_Union[SecretBasicPresentation, _Mapping]] = ..., basic_user: _Optional[_Union[SecretBasicUserPresentation, _Mapping]] = ..., prefix: _Optional[str] = ..., preset: _Optional[str] = ..., binding_generation: _Optional[int] = ...) -> None: ...
+
+class SecretHeaderPresentation(_message.Message):
+    __slots__ = ("headers", "scheme")
+    HEADERS_FIELD_NUMBER: _ClassVar[int]
+    SCHEME_FIELD_NUMBER: _ClassVar[int]
+    headers: _containers.RepeatedScalarFieldContainer[str]
+    scheme: str
+    def __init__(self, headers: _Optional[_Iterable[str]] = ..., scheme: _Optional[str] = ...) -> None: ...
+
+class SecretBasicPresentation(_message.Message):
+    __slots__ = ("username",)
+    USERNAME_FIELD_NUMBER: _ClassVar[int]
+    username: str
+    def __init__(self, username: _Optional[str] = ...) -> None: ...
+
+class SecretBasicUserPresentation(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
 
 class ListSecretsRequest(_message.Message):
     __slots__ = ("org_id", "page_size", "page_token")
@@ -52,14 +90,18 @@ class ListSecretsResponse(_message.Message):
     def __init__(self, secrets: _Optional[_Iterable[_Union[SecretMetadata, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class SetSecretRequest(_message.Message):
-    __slots__ = ("org_id", "key", "value")
+    __slots__ = ("org_id", "key", "value", "binding", "plain")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
+    BINDING_FIELD_NUMBER: _ClassVar[int]
+    PLAIN_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     key: str
     value: str
-    def __init__(self, org_id: _Optional[str] = ..., key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    binding: SecretBinding
+    plain: bool
+    def __init__(self, org_id: _Optional[str] = ..., key: _Optional[str] = ..., value: _Optional[str] = ..., binding: _Optional[_Union[SecretBinding, _Mapping]] = ..., plain: _Optional[bool] = ...) -> None: ...
 
 class SetSecretResponse(_message.Message):
     __slots__ = ()
@@ -108,12 +150,16 @@ class ListUserSecretsResponse(_message.Message):
     def __init__(self, secrets: _Optional[_Iterable[_Union[SecretMetadata, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class SetUserSecretRequest(_message.Message):
-    __slots__ = ("key", "value")
+    __slots__ = ("key", "value", "binding", "plain")
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
+    BINDING_FIELD_NUMBER: _ClassVar[int]
+    PLAIN_FIELD_NUMBER: _ClassVar[int]
     key: str
     value: str
-    def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    binding: SecretBinding
+    plain: bool
+    def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ..., binding: _Optional[_Union[SecretBinding, _Mapping]] = ..., plain: _Optional[bool] = ...) -> None: ...
 
 class SetUserSecretResponse(_message.Message):
     __slots__ = ()
@@ -220,16 +266,20 @@ class ListProjectSecretsResponse(_message.Message):
     def __init__(self, secrets: _Optional[_Iterable[_Union[SecretMetadata, _Mapping]]] = ..., next_page_token: _Optional[str] = ...) -> None: ...
 
 class SetProjectSecretRequest(_message.Message):
-    __slots__ = ("org_id", "secret_project_id", "key", "value")
+    __slots__ = ("org_id", "secret_project_id", "key", "value", "binding", "plain")
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     SECRET_PROJECT_ID_FIELD_NUMBER: _ClassVar[int]
     KEY_FIELD_NUMBER: _ClassVar[int]
     VALUE_FIELD_NUMBER: _ClassVar[int]
+    BINDING_FIELD_NUMBER: _ClassVar[int]
+    PLAIN_FIELD_NUMBER: _ClassVar[int]
     org_id: str
     secret_project_id: str
     key: str
     value: str
-    def __init__(self, org_id: _Optional[str] = ..., secret_project_id: _Optional[str] = ..., key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    binding: SecretBinding
+    plain: bool
+    def __init__(self, org_id: _Optional[str] = ..., secret_project_id: _Optional[str] = ..., key: _Optional[str] = ..., value: _Optional[str] = ..., binding: _Optional[_Union[SecretBinding, _Mapping]] = ..., plain: _Optional[bool] = ...) -> None: ...
 
 class SetProjectSecretResponse(_message.Message):
     __slots__ = ()

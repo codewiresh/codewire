@@ -105,6 +105,8 @@ from codewire.v1.secret_pb2 import (
     RenameSecretResponse,
     RenameUserSecretResponse,
     ResolvedWorkloadSecretMetadata,
+    SecretBasicPresentation,
+    SecretBinding,
     SecretMetadata,
     SecretProject,
     SetProjectSecretResponse,
@@ -302,6 +304,7 @@ class ControlPlaneFixture:
     last_create_preset_project_spec: ProjectSpec | None = None
     last_update_preset_project_spec: ProjectSpec | None = None
     last_preview_request: PreviewWorkloadSecretResolutionRequest | None = None
+    secret_sets: list = []
 
     def __getattr__(self, name):
         def unimplemented(*args, **kwargs):
@@ -558,6 +561,7 @@ class ControlPlaneFixture:
 
     def set_secret(self, request, ctx):
         self._require_auth(ctx)
+        ControlPlaneFixture.secret_sets.append(request)
         return SetSecretResponse()
 
     def delete_secret(self, request, ctx):
@@ -570,10 +574,22 @@ class ControlPlaneFixture:
 
     def list_user_secrets(self, request, ctx):
         self._require_auth(ctx)
-        return ListUserSecretsResponse(secrets=[SecretMetadata(key="TOKEN")])
+        return ListUserSecretsResponse(
+            secrets=[
+                SecretMetadata(
+                    key="TOKEN",
+                    binding=SecretBinding(
+                        hosts=["git.example.com"],
+                        basic=SecretBasicPresentation(username="x-access-token"),
+                        binding_generation=2,
+                    ),
+                )
+            ]
+        )
 
     def set_user_secret(self, request, ctx):
         self._require_auth(ctx)
+        ControlPlaneFixture.secret_sets.append(request)
         return SetUserSecretResponse()
 
     def delete_user_secret(self, request, ctx):
@@ -602,6 +618,7 @@ class ControlPlaneFixture:
 
     def set_project_secret(self, request, ctx):
         self._require_auth(ctx)
+        ControlPlaneFixture.secret_sets.append(request)
         return SetProjectSecretResponse()
 
     def delete_project_secret(self, request, ctx):
@@ -979,14 +996,57 @@ class SDKTestCase(unittest.TestCase):
         self.assertEqual(len(secrets), 1)
         self.assertEqual(secrets[0]["key"], "DB_URL")
 
+        self.assertNotIn("binding", secrets[0])
+
+        ControlPlaneFixture.secret_sets.clear()
         self.cw.secrets.set("DB_URL", "postgres://...")
+        self.cw.secrets.set(
+            "API_TOKEN",
+            "",
+            binding={
+                "hosts": ["api.example.com"],
+                "header": {"headers": ["X-Api-Key"], "scheme": "none"},
+                "prefix": "sk_",
+            },
+        )
+        plain, bound = ControlPlaneFixture.secret_sets
+        self.assertFalse(plain.HasField("binding"))
+        self.assertFalse(plain.plain)
+        self.assertEqual(bound.value, "")
+        self.assertEqual(list(bound.binding.hosts), ["api.example.com"])
+        self.assertEqual(bound.binding.WhichOneof("presentation"), "header")
+        self.assertEqual(list(bound.binding.header.headers), ["X-Api-Key"])
+        self.assertEqual(bound.binding.header.scheme, "none")
+        self.assertEqual(bound.binding.prefix, "sk_")
+        with self.assertRaises(ValueError):
+            self.cw.secrets.set(
+                "API_TOKEN", "value", binding={"hosts": ["api.example.com"]}, plain=True
+            )
+        self.assertEqual(len(ControlPlaneFixture.secret_sets), 2, "nothing was sent")
         self.cw.secrets.delete("DB_URL")
 
     def test_user_secrets(self):
         secrets = self.cw.secrets.list_user()
         self.assertEqual(len(secrets), 1)
+        self.assertEqual(
+            secrets[0]["binding"],
+            {
+                "hosts": ["git.example.com"],
+                "basic": {"username": "x-access-token"},
+                "prefix": "",
+                "preset": "",
+                "binding_generation": 2,
+            },
+        )
 
-        self.cw.secrets.set_user("TOKEN", "abc")
+        ControlPlaneFixture.secret_sets.clear()
+        self.cw.secrets.set_user("TOKEN", "abc", plain=True)
+        self.cw.secrets.set_user("GIT_TOKEN", "abc", binding=secrets[0]["binding"])
+        plain, bound = ControlPlaneFixture.secret_sets
+        self.assertTrue(plain.plain)
+        self.assertFalse(plain.HasField("binding"))
+        self.assertEqual(bound.binding.basic.username, "x-access-token")
+        self.assertEqual(list(bound.binding.hosts), ["git.example.com"])
         self.cw.secrets.delete_user("TOKEN")
 
     def test_secret_preview_is_metadata_only(self):
@@ -1023,6 +1083,18 @@ class SDKTestCase(unittest.TestCase):
         self.assertEqual(len(projects), 1)
 
         self.cw.secret_projects.delete("proj_1")
+
+        ControlPlaneFixture.secret_sets.clear()
+        self.cw.secret_projects.set_secret(
+            "proj_1",
+            "PAY_KEY",
+            "synthetic",
+            binding={"hosts": ["api.pay.example.com"], "basic_user": {}, "preset": "payments"},
+        )
+        (request,) = ControlPlaneFixture.secret_sets
+        self.assertEqual(request.secret_project_id, "proj_1")
+        self.assertEqual(request.binding.WhichOneof("presentation"), "basic_user")
+        self.assertEqual(request.binding.preset, "payments")
 
     def test_error_handling(self):
         bad_cw = Codewire(

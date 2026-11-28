@@ -15,12 +15,16 @@ use codewire_workload_secrets::{
 };
 
 use super::ApiState;
+use crate::worker::secrets::{BindingWrite, BoundSecretRename, SecretWriteError};
 
 #[derive(Debug, Clone)]
 pub struct SecretMetadata {
     pub key: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Absent for a plain secret (#4003).
+    pub binding: Option<codewire_access::StoredBinding>,
+    pub binding_generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,60 @@ pub(super) fn validate_secret_value(value: &str) -> AppResult<()> {
         )
         .into())
     })
+}
+
+/// The code of a refused write that needed the secret's value again
+/// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Re-entering the value").
+pub(crate) const SECRET_VALUE_REQUIRED: &str = "secret_value_required";
+/// The code of a binding refused because host-bound secrets are off.
+pub(crate) const SECRET_BINDING_UNAVAILABLE: &str = "secret_binding_unavailable";
+/// The code of a refused rename of a bound secret.
+pub(crate) const SECRET_BOUND_RENAME: &str = "secret_bound_rename";
+
+/// The value a write stores: none for an empty value, which the store accepts
+/// only for a change to a bound secret that needs none; any other value is
+/// checked as every value is.
+pub(super) fn write_value(value: &str) -> AppResult<Option<&str>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate_secret_value(value)?;
+    Ok(Some(value))
+}
+
+/// The person's own mistake in a refused write, which changed nothing; `None`
+/// for a store failure.
+pub(super) fn refused_write(error: &SecretWriteError) -> Option<AppError> {
+    match error {
+        SecretWriteError::ValueRequired(_) => Some(AppError::Coded {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: SECRET_VALUE_REQUIRED,
+            detail: error.to_string().into(),
+        }),
+        SecretWriteError::EmptyValue => validate_secret_value("").err(),
+        SecretWriteError::Unavailable => Some(AppError::Coded {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: SECRET_BINDING_UNAVAILABLE,
+            detail: error.to_string().into(),
+        }),
+        SecretWriteError::Binding(binding) => Some(AppError::Coded {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: binding.code(),
+            detail: binding.to_string().into(),
+        }),
+        SecretWriteError::Store(_) => None,
+    }
+}
+
+/// A refused write is known to have changed nothing; a store failure may
+/// have changed something.
+pub(super) fn write_provider_error(
+    error: SecretWriteError,
+) -> OrganizationTenantSecretMutationError {
+    match refused_write(&error) {
+        Some(refused) => OrganizationTenantSecretMutationError::known(refused),
+        None => ambiguous_secret_provider_error(anyhow::Error::new(error), "failed to set secret"),
+    }
 }
 
 pub(crate) async fn preview_workload_secret_resolution_core(
@@ -241,12 +299,22 @@ pub(super) fn to_metadata(
             key: s.key,
             created_at: s.created_at,
             updated_at: s.updated_at,
+            binding: s.binding,
+            binding_generation: s.binding_generation,
         })
         .collect()
 }
 
-/// Maps a `RenameSecretAtPath` error to the Go status (404 / 409 / 500).
+/// Maps a `RenameSecretAtPath` error to the Go status (404 / 409 / 500), and
+/// a bound secret's refusal to its own code.
 pub(super) fn rename_error(e: anyhow::Error) -> AppError {
+    if e.downcast_ref::<BoundSecretRename>().is_some() {
+        return AppError::Coded {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: SECRET_BOUND_RENAME,
+            detail: e.to_string().into(),
+        };
+    }
     let msg = e.to_string();
     if msg.contains("not found") {
         secret_not_found()
@@ -288,7 +356,15 @@ pub(super) fn ambiguous_secret_provider_error(
 
 pub(super) fn rename_provider_error(error: anyhow::Error) -> OrganizationTenantSecretMutationError {
     let mapped = rename_error(error);
-    if matches!(&mapped, AppError::NotFound(_) | AppError::Conflict(_)) {
+    if matches!(
+        &mapped,
+        AppError::NotFound(_)
+            | AppError::Conflict(_)
+            | AppError::Coded {
+                code: SECRET_BOUND_RENAME,
+                ..
+            }
+    ) {
         OrganizationTenantSecretMutationError::known(mapped)
     } else {
         OrganizationTenantSecretMutationError::ambiguous(mapped)
@@ -320,11 +396,12 @@ pub(crate) async fn set_secret_core(
     org_id: &str,
     key: &str,
     value: &str,
+    binding: BindingWrite,
 ) -> AppResult<()> {
     let role = org_role(state, user, org_id).await?;
     require_manage_role(&role)?;
     validate_secret_key(key)?;
-    validate_secret_value(value)?;
+    let value = write_value(value)?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {
         state
@@ -336,9 +413,9 @@ pub(crate) async fn set_secret_core(
             })?;
         state
             .secrets
-            .set_secret_at_path(&org_secret_path(org_id), key, value)
+            .write_secret_at_path(&org_secret_path(org_id), key, value, binding)
             .await
-            .map_err(|error| ambiguous_secret_provider_error(error, "failed to set secret"))?;
+            .map_err(write_provider_error)?;
         Ok(())
     })
     .await?;
@@ -445,9 +522,10 @@ pub(crate) async fn set_user_secret_core(
     user: &AuthUser,
     key: &str,
     value: &str,
+    binding: BindingWrite,
 ) -> AppResult<()> {
     validate_secret_key(key)?;
-    validate_secret_value(value)?;
+    let value = write_value(value)?;
     state
         .secrets
         .create_folder_at_path("/users", &user.user_id)
@@ -458,11 +536,13 @@ pub(crate) async fn set_user_secret_core(
         })?;
     state
         .secrets
-        .set_secret_at_path(&user_secret_path(&user.user_id), key, value)
+        .write_secret_at_path(&user_secret_path(&user.user_id), key, value, binding)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "user-secrets: set failed");
-            AppError::InternalMsg("failed to set secret".into())
+            refused_write(&e).unwrap_or_else(|| {
+                tracing::error!(error = %e, "user-secrets: set failed");
+                AppError::InternalMsg("failed to set secret".into())
+            })
         })?;
 
     log_audit(
@@ -534,6 +614,9 @@ pub(crate) async fn rename_user_secret_core(
     .await;
     Ok(())
 }
+
+#[cfg(test)]
+mod database_tests;
 
 #[cfg(test)]
 mod tests {

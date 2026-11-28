@@ -1,11 +1,13 @@
 import {
   fromProtoResolvedWorkloadSecretMetadata,
   fromProtoSecretMetadata,
+  toProtoSecretBindingChange,
 } from "./convert.js";
 import type { SecretClient } from "./transport.js";
 import { mapConnectError } from "./types.js";
 import type {
   ResolvedWorkloadSecretMetadata,
+  SecretBindingChange,
   SecretMetadata,
   WorkloadSecretPreviewInput,
 } from "./types.js";
@@ -44,13 +46,14 @@ export class Secrets {
     }
   }
 
-  /** Set an organization secret. */
-  async set(key: string, value: string): Promise<void> {
+  /** Set an organization secret, and bind it to hosts or make it plain. */
+  async set(key: string, value: string, change: SecretBindingChange = {}): Promise<void> {
     try {
       await this.client.setSecret({
         orgId: resolveOrgId(this.orgId),
         key,
         value,
+        ...toProtoSecretBindingChange(change),
       });
     } catch (error) {
       throw mapConnectError(error);
@@ -95,10 +98,10 @@ export class Secrets {
     }
   }
 
-  /** Set a user-scoped secret. */
-  async setUser(key: string, value: string): Promise<void> {
+  /** Set a user-scoped secret, and bind it to hosts or make it plain. */
+  async setUser(key: string, value: string, change: SecretBindingChange = {}): Promise<void> {
     try {
-      await this.client.setUserSecret({ key, value });
+      await this.client.setUserSecret({ key, value, ...toProtoSecretBindingChange(change) });
     } catch (error) {
       throw mapConnectError(error);
     }

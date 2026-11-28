@@ -25,8 +25,8 @@ pub use binding::{
     BindingError, BoundHeader, BoundHost, DEFAULT_BASIC_USERNAME, DEFAULT_BOUND_HEADER,
     DEFAULT_BOUND_SCHEME, HostBinding, MAX_BOUND_HEADERS, MAX_BOUND_HOSTS,
     MAX_BOUND_HOSTS_PER_ENVIRONMENT, MAX_BOUND_VALUE_BYTES, MAX_PLACEHOLDER_PREFIX_LENGTH,
-    PlaceholderPrefix, Presentation, ReservedHosts, Scheme, change_moves_generation,
-    change_needs_value, is_provider_host,
+    PlaceholderPrefix, Presentation, ReservedHosts, Scheme, StoredBinding, StoredPresentation,
+    change_moves_generation, change_needs_value, is_provider_host,
 };
 pub use catalog::{
     ANTIGRAVITY_LOGIN_OPERATION, ANTIGRAVITY_LOGIN_ROUTE, CLAUDE_LOGIN_OPERATION,

@@ -12,11 +12,12 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/secret.proto.
  */
 export const file_codewire_v1_secret: GenFile = /*@__PURE__*/
-  fileDesc("Chhjb2Rld2lyZS92MS9zZWNyZXQucHJvdG8SC2NvZGV3aXJlLnYxIqUBCg5TZWNyZXRNZXRhZGF0YRILCgNrZXkYASABKAkSMwoKY3JlYXRlZF9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIAIgBARIzCgp1cGRhdGVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgBiAEBQg0KC19jcmVhdGVkX2F0Qg0KC191cGRhdGVkX2F0IksKEkxpc3RTZWNyZXRzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEQoJcGFnZV9zaXplGAIgASgFEhIKCnBhZ2VfdG9rZW4YAyABKAkiXAoTTGlzdFNlY3JldHNSZXNwb25zZRIsCgdzZWNyZXRzGAEgAygLMhsuY29kZXdpcmUudjEuU2VjcmV0TWV0YWRhdGESFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJIkMKEFNldFNlY3JldFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgsKA2tleRgCIAEoCRISCgV2YWx1ZRgDIAEoCUIDgAEBIhMKEVNldFNlY3JldFJlc3BvbnNlIjIKE0RlbGV0ZVNlY3JldFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgsKA2tleRgCIAEoCSIWChREZWxldGVTZWNyZXRSZXNwb25zZSJDChNSZW5hbWVTZWNyZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRILCgNrZXkYAiABKAkSDwoHbmV3X2tleRgDIAEoCSIWChRSZW5hbWVTZWNyZXRSZXNwb25zZSI/ChZMaXN0VXNlclNlY3JldHNSZXF1ZXN0EhEKCXBhZ2Vfc2l6ZRgBIAEoBRISCgpwYWdlX3Rva2VuGAIgASgJImAKF0xpc3RVc2VyU2VjcmV0c1Jlc3BvbnNlEiwKB3NlY3JldHMYASADKAsyGy5jb2Rld2lyZS52MS5TZWNyZXRNZXRhZGF0YRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiNwoUU2V0VXNlclNlY3JldFJlcXVlc3QSCwoDa2V5GAEgASgJEhIKBXZhbHVlGAIgASgJQgOAAQEiFwoVU2V0VXNlclNlY3JldFJlc3BvbnNlIiYKF0RlbGV0ZVVzZXJTZWNyZXRSZXF1ZXN0EgsKA2tleRgBIAEoCSIaChhEZWxldGVVc2VyU2VjcmV0UmVzcG9uc2UiNwoXUmVuYW1lVXNlclNlY3JldFJlcXVlc3QSCwoDa2V5GAEgASgJEg8KB25ld19rZXkYAiABKAkiGgoYUmVuYW1lVXNlclNlY3JldFJlc3BvbnNlIn8KDVNlY3JldFByb2plY3QSCgoCaWQYASABKAkSDgoGb3JnX2lkGAIgASgJEgwKBG5hbWUYAyABKAkSFAoMc2VjcmV0X2NvdW50GAQgASgDEi4KCmNyZWF0ZWRfYXQYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIlIKGUxpc3RTZWNyZXRQcm9qZWN0c1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhEKCXBhZ2Vfc2l6ZRgCIAEoBRISCgpwYWdlX3Rva2VuGAMgASgJImoKGkxpc3RTZWNyZXRQcm9qZWN0c1Jlc3BvbnNlEjMKD3NlY3JldF9wcm9qZWN0cxgBIAMoCzIaLmNvZGV3aXJlLnYxLlNlY3JldFByb2plY3QSFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJIjoKGkNyZWF0ZVNlY3JldFByb2plY3RSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIMCgRuYW1lGAIgASgJIlEKG0NyZWF0ZVNlY3JldFByb2plY3RSZXNwb25zZRIyCg5zZWNyZXRfcHJvamVjdBgBIAEoCzIaLmNvZGV3aXJlLnYxLlNlY3JldFByb2plY3QiRwoaRGVsZXRlU2VjcmV0UHJvamVjdFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhkKEXNlY3JldF9wcm9qZWN0X2lkGAIgASgJIh0KG0RlbGV0ZVNlY3JldFByb2plY3RSZXNwb25zZSJtChlMaXN0UHJvamVjdFNlY3JldHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIZChFzZWNyZXRfcHJvamVjdF9pZBgCIAEoCRIRCglwYWdlX3NpemUYAyABKAUSEgoKcGFnZV90b2tlbhgEIAEoCSJjChpMaXN0UHJvamVjdFNlY3JldHNSZXNwb25zZRIsCgdzZWNyZXRzGAEgAygLMhsuY29kZXdpcmUudjEuU2VjcmV0TWV0YWRhdGESFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJImUKF1NldFByb2plY3RTZWNyZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIZChFzZWNyZXRfcHJvamVjdF9pZBgCIAEoCRILCgNrZXkYAyABKAkSEgoFdmFsdWUYBCABKAlCA4ABASIaChhTZXRQcm9qZWN0U2VjcmV0UmVzcG9uc2UiVAoaRGVsZXRlUHJvamVjdFNlY3JldFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhkKEXNlY3JldF9wcm9qZWN0X2lkGAIgASgJEgsKA2tleRgDIAEoCSIdChtEZWxldGVQcm9qZWN0U2VjcmV0UmVzcG9uc2UiZQoaUmVuYW1lUHJvamVjdFNlY3JldFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhkKEXNlY3JldF9wcm9qZWN0X2lkGAIgASgJEgsKA2tleRgDIAEoCRIPCgduZXdfa2V5GAQgASgJIh0KG1JlbmFtZVByb2plY3RTZWNyZXRSZXNwb25zZSKaAQomUHJldmlld1dvcmtsb2FkU2VjcmV0UmVzb2x1dGlvblJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhQKDG9yZ2FuaXphdGlvbhgCIAEoCBIZChFzZWNyZXRfcHJvamVjdF9pZBgDIAEoCRIMCgR1c2VyGAQgASgIEiEKGWV4cGxpY2l0X2Vudmlyb25tZW50X2tleXMYBSADKAkinwEKHlJlc29sdmVkV29ya2xvYWRTZWNyZXRNZXRhZGF0YRILCgNrZXkYASABKAkSMQoGc291cmNlGAIgASgOMiEuY29kZXdpcmUudjEuV29ya2xvYWRTZWNyZXRTb3VyY2USPQoSb3ZlcnJpZGRlbl9zb3VyY2VzGAMgAygOMiEuY29kZXdpcmUudjEuV29ya2xvYWRTZWNyZXRTb3VyY2UiZwonUHJldmlld1dvcmtsb2FkU2VjcmV0UmVzb2x1dGlvblJlc3BvbnNlEjwKB3NlY3JldHMYASADKAsyKy5jb2Rld2lyZS52MS5SZXNvbHZlZFdvcmtsb2FkU2VjcmV0TWV0YWRhdGEq3QEKFFdvcmtsb2FkU2VjcmV0U291cmNlEiYKIldPUktMT0FEX1NFQ1JFVF9TT1VSQ0VfVU5TUEVDSUZJRUQQABInCiNXT1JLTE9BRF9TRUNSRVRfU09VUkNFX09SR0FOSVpBVElPThABEiIKHldPUktMT0FEX1NFQ1JFVF9TT1VSQ0VfUFJPSkVDVBACEh8KG1dPUktMT0FEX1NFQ1JFVF9TT1VSQ0VfVVNFUhADEi8KK1dPUktMT0FEX1NFQ1JFVF9TT1VSQ0VfRVhQTElDSVRfRU5WSVJPTk1FTlQQBDLODAoNU2VjcmV0U2VydmljZRJVCgtMaXN0U2VjcmV0cxIfLmNvZGV3aXJlLnYxLkxpc3RTZWNyZXRzUmVxdWVzdBogLmNvZGV3aXJlLnYxLkxpc3RTZWNyZXRzUmVzcG9uc2UiA5ACARJKCglTZXRTZWNyZXQSHS5jb2Rld2lyZS52MS5TZXRTZWNyZXRSZXF1ZXN0Gh4uY29kZXdpcmUudjEuU2V0U2VjcmV0UmVzcG9uc2USUwoMRGVsZXRlU2VjcmV0EiAuY29kZXdpcmUudjEuRGVsZXRlU2VjcmV0UmVxdWVzdBohLmNvZGV3aXJlLnYxLkRlbGV0ZVNlY3JldFJlc3BvbnNlElMKDFJlbmFtZVNlY3JldBIgLmNvZGV3aXJlLnYxLlJlbmFtZVNlY3JldFJlcXVlc3QaIS5jb2Rld2lyZS52MS5SZW5hbWVTZWNyZXRSZXNwb25zZRJhCg9MaXN0VXNlclNlY3JldHMSIy5jb2Rld2lyZS52MS5MaXN0VXNlclNlY3JldHNSZXF1ZXN0GiQuY29kZXdpcmUudjEuTGlzdFVzZXJTZWNyZXRzUmVzcG9uc2UiA5ACARJWCg1TZXRVc2VyU2VjcmV0EiEuY29kZXdpcmUudjEuU2V0VXNlclNlY3JldFJlcXVlc3QaIi5jb2Rld2lyZS52MS5TZXRVc2VyU2VjcmV0UmVzcG9uc2USXwoQRGVsZXRlVXNlclNlY3JldBIkLmNvZGV3aXJlLnYxLkRlbGV0ZVVzZXJTZWNyZXRSZXF1ZXN0GiUuY29kZXdpcmUudjEuRGVsZXRlVXNlclNlY3JldFJlc3BvbnNlEl8KEFJlbmFtZVVzZXJTZWNyZXQSJC5jb2Rld2lyZS52MS5SZW5hbWVVc2VyU2VjcmV0UmVxdWVzdBolLmNvZGV3aXJlLnYxLlJlbmFtZVVzZXJTZWNyZXRSZXNwb25zZRJqChJMaXN0U2VjcmV0UHJvamVjdHMSJi5jb2Rld2lyZS52MS5MaXN0U2VjcmV0UHJvamVjdHNSZXF1ZXN0GicuY29kZXdpcmUudjEuTGlzdFNlY3JldFByb2plY3RzUmVzcG9uc2UiA5ACARJoChNDcmVhdGVTZWNyZXRQcm9qZWN0EicuY29kZXdpcmUudjEuQ3JlYXRlU2VjcmV0UHJvamVjdFJlcXVlc3QaKC5jb2Rld2lyZS52MS5DcmVhdGVTZWNyZXRQcm9qZWN0UmVzcG9uc2USaAoTRGVsZXRlU2VjcmV0UHJvamVjdBInLmNvZGV3aXJlLnYxLkRlbGV0ZVNlY3JldFByb2plY3RSZXF1ZXN0GiguY29kZXdpcmUudjEuRGVsZXRlU2VjcmV0UHJvamVjdFJlc3BvbnNlEmoKEkxpc3RQcm9qZWN0U2VjcmV0cxImLmNvZGV3aXJlLnYxLkxpc3RQcm9qZWN0U2VjcmV0c1JlcXVlc3QaJy5jb2Rld2lyZS52MS5MaXN0UHJvamVjdFNlY3JldHNSZXNwb25zZSIDkAIBEl8KEFNldFByb2plY3RTZWNyZXQSJC5jb2Rld2lyZS52MS5TZXRQcm9qZWN0U2VjcmV0UmVxdWVzdBolLmNvZGV3aXJlLnYxLlNldFByb2plY3RTZWNyZXRSZXNwb25zZRJoChNEZWxldGVQcm9qZWN0U2VjcmV0EicuY29kZXdpcmUudjEuRGVsZXRlUHJvamVjdFNlY3JldFJlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxldGVQcm9qZWN0U2VjcmV0UmVzcG9uc2USaAoTUmVuYW1lUHJvamVjdFNlY3JldBInLmNvZGV3aXJlLnYxLlJlbmFtZVByb2plY3RTZWNyZXRSZXF1ZXN0GiguY29kZXdpcmUudjEuUmVuYW1lUHJvamVjdFNlY3JldFJlc3BvbnNlEpEBCh9QcmV2aWV3V29ya2xvYWRTZWNyZXRSZXNvbHV0aW9uEjMuY29kZXdpcmUudjEuUHJldmlld1dvcmtsb2FkU2VjcmV0UmVzb2x1dGlvblJlcXVlc3QaNC5jb2Rld2lyZS52MS5QcmV2aWV3V29ya2xvYWRTZWNyZXRSZXNvbHV0aW9uUmVzcG9uc2UiA5ACAUKuAQoPY29tLmNvZGV3aXJlLnYxQgtTZWNyZXRQcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Chhjb2Rld2lyZS92MS9zZWNyZXQucHJvdG8SC2NvZGV3aXJlLnYxIuMBCg5TZWNyZXRNZXRhZGF0YRILCgNrZXkYASABKAkSMwoKY3JlYXRlZF9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIAIgBARIzCgp1cGRhdGVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcEgBiAEBEjAKB2JpbmRpbmcYBCABKAsyGi5jb2Rld2lyZS52MS5TZWNyZXRCaW5kaW5nSAKIAQFCDQoLX2NyZWF0ZWRfYXRCDQoLX3VwZGF0ZWRfYXRCCgoIX2JpbmRpbmcimgIKDVNlY3JldEJpbmRpbmcSDQoFaG9zdHMYASADKAkSNwoGaGVhZGVyGAIgASgLMiUuY29kZXdpcmUudjEuU2VjcmV0SGVhZGVyUHJlc2VudGF0aW9uSAASNQoFYmFzaWMYAyABKAsyJC5jb2Rld2lyZS52MS5TZWNyZXRCYXNpY1ByZXNlbnRhdGlvbkgAEj4KCmJhc2ljX3VzZXIYBCABKAsyKC5jb2Rld2lyZS52MS5TZWNyZXRCYXNpY1VzZXJQcmVzZW50YXRpb25IABIOCgZwcmVmaXgYBSABKAkSDgoGcHJlc2V0GAYgASgJEhoKEmJpbmRpbmdfZ2VuZXJhdGlvbhgHIAEoBEIOCgxwcmVzZW50YXRpb24iSwoYU2VjcmV0SGVhZGVyUHJlc2VudGF0aW9uEg8KB2hlYWRlcnMYASADKAkSEwoGc2NoZW1lGAIgASgJSACIAQFCCQoHX3NjaGVtZSIrChdTZWNyZXRCYXNpY1ByZXNlbnRhdGlvbhIQCgh1c2VybmFtZRgBIAEoCSIdChtTZWNyZXRCYXNpY1VzZXJQcmVzZW50YXRpb24iSwoSTGlzdFNlY3JldHNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIRCglwYWdlX3NpemUYAiABKAUSEgoKcGFnZV90b2tlbhgDIAEoCSJcChNMaXN0U2VjcmV0c1Jlc3BvbnNlEiwKB3NlY3JldHMYASADKAsyGy5jb2Rld2lyZS52MS5TZWNyZXRNZXRhZGF0YRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkikAEKEFNldFNlY3JldFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgsKA2tleRgCIAEoCRISCgV2YWx1ZRgDIAEoCUIDgAEBEjAKB2JpbmRpbmcYBCABKAsyGi5jb2Rld2lyZS52MS5TZWNyZXRCaW5kaW5nSACIAQESDQoFcGxhaW4YBSABKAhCCgoIX2JpbmRpbmciEwoRU2V0U2VjcmV0UmVzcG9uc2UiMgoTRGVsZXRlU2VjcmV0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSCwoDa2V5GAIgASgJIhYKFERlbGV0ZVNlY3JldFJlc3BvbnNlIkMKE1JlbmFtZVNlY3JldFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgsKA2tleRgCIAEoCRIPCgduZXdfa2V5GAMgASgJIhYKFFJlbmFtZVNlY3JldFJlc3BvbnNlIj8KFkxpc3RVc2VyU2VjcmV0c1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiYAoXTGlzdFVzZXJTZWNyZXRzUmVzcG9uc2USLAoHc2VjcmV0cxgBIAMoCzIbLmNvZGV3aXJlLnYxLlNlY3JldE1ldGFkYXRhEhcKD25leHRfcGFnZV90b2tlbhgCIAEoCSKEAQoUU2V0VXNlclNlY3JldFJlcXVlc3QSCwoDa2V5GAEgASgJEhIKBXZhbHVlGAIgASgJQgOAAQESMAoHYmluZGluZxgDIAEoCzIaLmNvZGV3aXJlLnYxLlNlY3JldEJpbmRpbmdIAIgBARINCgVwbGFpbhgEIAEoCEIKCghfYmluZGluZyIXChVTZXRVc2VyU2VjcmV0UmVzcG9uc2UiJgoXRGVsZXRlVXNlclNlY3JldFJlcXVlc3QSCwoDa2V5GAEgASgJIhoKGERlbGV0ZVVzZXJTZWNyZXRSZXNwb25zZSI3ChdSZW5hbWVVc2VyU2VjcmV0UmVxdWVzdBILCgNrZXkYASABKAkSDwoHbmV3X2tleRgCIAEoCSIaChhSZW5hbWVVc2VyU2VjcmV0UmVzcG9uc2UifwoNU2VjcmV0UHJvamVjdBIKCgJpZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSDAoEbmFtZRgDIAEoCRIUCgxzZWNyZXRfY291bnQYBCABKAMSLgoKY3JlYXRlZF9hdBgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiUgoZTGlzdFNlY3JldFByb2plY3RzUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSEQoJcGFnZV9zaXplGAIgASgFEhIKCnBhZ2VfdG9rZW4YAyABKAkiagoaTGlzdFNlY3JldFByb2plY3RzUmVzcG9uc2USMwoPc2VjcmV0X3Byb2plY3RzGAEgAygLMhouY29kZXdpcmUudjEuU2VjcmV0UHJvamVjdBIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiOgoaQ3JlYXRlU2VjcmV0UHJvamVjdFJlcXVlc3QSDgoGb3JnX2lkGAEgASgJEgwKBG5hbWUYAiABKAkiUQobQ3JlYXRlU2VjcmV0UHJvamVjdFJlc3BvbnNlEjIKDnNlY3JldF9wcm9qZWN0GAEgASgLMhouY29kZXdpcmUudjEuU2VjcmV0UHJvamVjdCJHChpEZWxldGVTZWNyZXRQcm9qZWN0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSGQoRc2VjcmV0X3Byb2plY3RfaWQYAiABKAkiHQobRGVsZXRlU2VjcmV0UHJvamVjdFJlc3BvbnNlIm0KGUxpc3RQcm9qZWN0U2VjcmV0c1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhkKEXNlY3JldF9wcm9qZWN0X2lkGAIgASgJEhEKCXBhZ2Vfc2l6ZRgDIAEoBRISCgpwYWdlX3Rva2VuGAQgASgJImMKGkxpc3RQcm9qZWN0U2VjcmV0c1Jlc3BvbnNlEiwKB3NlY3JldHMYASADKAsyGy5jb2Rld2lyZS52MS5TZWNyZXRNZXRhZGF0YRIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkisgEKF1NldFByb2plY3RTZWNyZXRSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIZChFzZWNyZXRfcHJvamVjdF9pZBgCIAEoCRILCgNrZXkYAyABKAkSEgoFdmFsdWUYBCABKAlCA4ABARIwCgdiaW5kaW5nGAUgASgLMhouY29kZXdpcmUudjEuU2VjcmV0QmluZGluZ0gAiAEBEg0KBXBsYWluGAYgASgIQgoKCF9iaW5kaW5nIhoKGFNldFByb2plY3RTZWNyZXRSZXNwb25zZSJUChpEZWxldGVQcm9qZWN0U2VjcmV0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSGQoRc2VjcmV0X3Byb2plY3RfaWQYAiABKAkSCwoDa2V5GAMgASgJIh0KG0RlbGV0ZVByb2plY3RTZWNyZXRSZXNwb25zZSJlChpSZW5hbWVQcm9qZWN0U2VjcmV0UmVxdWVzdBIOCgZvcmdfaWQYASABKAkSGQoRc2VjcmV0X3Byb2plY3RfaWQYAiABKAkSCwoDa2V5GAMgASgJEg8KB25ld19rZXkYBCABKAkiHQobUmVuYW1lUHJvamVjdFNlY3JldFJlc3BvbnNlIpoBCiZQcmV2aWV3V29ya2xvYWRTZWNyZXRSZXNvbHV0aW9uUmVxdWVzdBIOCgZvcmdfaWQYASABKAkSFAoMb3JnYW5pemF0aW9uGAIgASgIEhkKEXNlY3JldF9wcm9qZWN0X2lkGAMgASgJEgwKBHVzZXIYBCABKAgSIQoZZXhwbGljaXRfZW52aXJvbm1lbnRfa2V5cxgFIAMoCSKfAQoeUmVzb2x2ZWRXb3JrbG9hZFNlY3JldE1ldGFkYXRhEgsKA2tleRgBIAEoCRIxCgZzb3VyY2UYAiABKA4yIS5jb2Rld2lyZS52MS5Xb3JrbG9hZFNlY3JldFNvdXJjZRI9ChJvdmVycmlkZGVuX3NvdXJjZXMYAyADKA4yIS5jb2Rld2lyZS52MS5Xb3JrbG9hZFNlY3JldFNvdXJjZSJnCidQcmV2aWV3V29ya2xvYWRTZWNyZXRSZXNvbHV0aW9uUmVzcG9uc2USPAoHc2VjcmV0cxgBIAMoCzIrLmNvZGV3aXJlLnYxLlJlc29sdmVkV29ya2xvYWRTZWNyZXRNZXRhZGF0YSrdAQoUV29ya2xvYWRTZWNyZXRTb3VyY2USJgoiV09SS0xPQURfU0VDUkVUX1NPVVJDRV9VTlNQRUNJRklFRBAAEicKI1dPUktMT0FEX1NFQ1JFVF9TT1VSQ0VfT1JHQU5JWkFUSU9OEAESIgoeV09SS0xPQURfU0VDUkVUX1NPVVJDRV9QUk9KRUNUEAISHwobV09SS0xPQURfU0VDUkVUX1NPVVJDRV9VU0VSEAMSLworV09SS0xPQURfU0VDUkVUX1NPVVJDRV9FWFBMSUNJVF9FTlZJUk9OTUVOVBAEMs4MCg1TZWNyZXRTZXJ2aWNlElUKC0xpc3RTZWNyZXRzEh8uY29kZXdpcmUudjEuTGlzdFNlY3JldHNSZXF1ZXN0GiAuY29kZXdpcmUudjEuTGlzdFNlY3JldHNSZXNwb25zZSIDkAIBEkoKCVNldFNlY3JldBIdLmNvZGV3aXJlLnYxLlNldFNlY3JldFJlcXVlc3QaHi5jb2Rld2lyZS52MS5TZXRTZWNyZXRSZXNwb25zZRJTCgxEZWxldGVTZWNyZXQSIC5jb2Rld2lyZS52MS5EZWxldGVTZWNyZXRSZXF1ZXN0GiEuY29kZXdpcmUudjEuRGVsZXRlU2VjcmV0UmVzcG9uc2USUwoMUmVuYW1lU2VjcmV0EiAuY29kZXdpcmUudjEuUmVuYW1lU2VjcmV0UmVxdWVzdBohLmNvZGV3aXJlLnYxLlJlbmFtZVNlY3JldFJlc3BvbnNlEmEKD0xpc3RVc2VyU2VjcmV0cxIjLmNvZGV3aXJlLnYxLkxpc3RVc2VyU2VjcmV0c1JlcXVlc3QaJC5jb2Rld2lyZS52MS5MaXN0VXNlclNlY3JldHNSZXNwb25zZSIDkAIBElYKDVNldFVzZXJTZWNyZXQSIS5jb2Rld2lyZS52MS5TZXRVc2VyU2VjcmV0UmVxdWVzdBoiLmNvZGV3aXJlLnYxLlNldFVzZXJTZWNyZXRSZXNwb25zZRJfChBEZWxldGVVc2VyU2VjcmV0EiQuY29kZXdpcmUudjEuRGVsZXRlVXNlclNlY3JldFJlcXVlc3QaJS5jb2Rld2lyZS52MS5EZWxldGVVc2VyU2VjcmV0UmVzcG9uc2USXwoQUmVuYW1lVXNlclNlY3JldBIkLmNvZGV3aXJlLnYxLlJlbmFtZVVzZXJTZWNyZXRSZXF1ZXN0GiUuY29kZXdpcmUudjEuUmVuYW1lVXNlclNlY3JldFJlc3BvbnNlEmoKEkxpc3RTZWNyZXRQcm9qZWN0cxImLmNvZGV3aXJlLnYxLkxpc3RTZWNyZXRQcm9qZWN0c1JlcXVlc3QaJy5jb2Rld2lyZS52MS5MaXN0U2VjcmV0UHJvamVjdHNSZXNwb25zZSIDkAIBEmgKE0NyZWF0ZVNlY3JldFByb2plY3QSJy5jb2Rld2lyZS52MS5DcmVhdGVTZWNyZXRQcm9qZWN0UmVxdWVzdBooLmNvZGV3aXJlLnYxLkNyZWF0ZVNlY3JldFByb2plY3RSZXNwb25zZRJoChNEZWxldGVTZWNyZXRQcm9qZWN0EicuY29kZXdpcmUudjEuRGVsZXRlU2VjcmV0UHJvamVjdFJlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxldGVTZWNyZXRQcm9qZWN0UmVzcG9uc2USagoSTGlzdFByb2plY3RTZWNyZXRzEiYuY29kZXdpcmUudjEuTGlzdFByb2plY3RTZWNyZXRzUmVxdWVzdBonLmNvZGV3aXJlLnYxLkxpc3RQcm9qZWN0U2VjcmV0c1Jlc3BvbnNlIgOQAgESXwoQU2V0UHJvamVjdFNlY3JldBIkLmNvZGV3aXJlLnYxLlNldFByb2plY3RTZWNyZXRSZXF1ZXN0GiUuY29kZXdpcmUudjEuU2V0UHJvamVjdFNlY3JldFJlc3BvbnNlEmgKE0RlbGV0ZVByb2plY3RTZWNyZXQSJy5jb2Rld2lyZS52MS5EZWxldGVQcm9qZWN0U2VjcmV0UmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGV0ZVByb2plY3RTZWNyZXRSZXNwb25zZRJoChNSZW5hbWVQcm9qZWN0U2VjcmV0EicuY29kZXdpcmUudjEuUmVuYW1lUHJvamVjdFNlY3JldFJlcXVlc3QaKC5jb2Rld2lyZS52MS5SZW5hbWVQcm9qZWN0U2VjcmV0UmVzcG9uc2USkQEKH1ByZXZpZXdXb3JrbG9hZFNlY3JldFJlc29sdXRpb24SMy5jb2Rld2lyZS52MS5QcmV2aWV3V29ya2xvYWRTZWNyZXRSZXNvbHV0aW9uUmVxdWVzdBo0LmNvZGV3aXJlLnYxLlByZXZpZXdXb3JrbG9hZFNlY3JldFJlc29sdXRpb25SZXNwb25zZSIDkAIBQq4BCg9jb20uY29kZXdpcmUudjFCC1NlY3JldFByb3RvUAFaQWdpdGh1Yi5jb20vY29kZXdpcmVzaC9jb2Rld2lyZS9saWJzL2dlbi1nby9jb2Rld2lyZS92MTtjb2Rld2lyZXYxogIDQ1hYqgILQ29kZXdpcmUuVjHKAgtDb2Rld2lyZVxWMeICF0NvZGV3aXJlXFYxXEdQQk1ldGFkYXRh6gIMQ29kZXdpcmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
- * SecretMetadata exposes only a key and backend-provided timestamps. Secret
- * values are never readable through the client-facing API.
+ * SecretMetadata exposes only a key, backend-provided timestamps and, for a
+ * secret bound to hosts, its binding. Secret values are never readable
+ * through the client-facing API.
  *
  * @generated from message codewire.v1.SecretMetadata
  */
@@ -35,6 +36,13 @@ export type SecretMetadata = Message<"codewire.v1.SecretMetadata"> & {
    * @generated from field: optional google.protobuf.Timestamp updated_at = 3;
    */
   updatedAt?: Timestamp | undefined;
+
+  /**
+   * Absent for a plain secret.
+   *
+   * @generated from field: optional codewire.v1.SecretBinding binding = 4;
+   */
+  binding?: SecretBinding | undefined;
 };
 
 /**
@@ -43,6 +51,138 @@ export type SecretMetadata = Message<"codewire.v1.SecretMetadata"> & {
  */
 export const SecretMetadataSchema: GenMessage<SecretMetadata> = /*@__PURE__*/
   messageDesc(file_codewire_v1_secret, 0);
+
+/**
+ * The hosts a secret is sent to and how it is presented there (#4003;
+ * docs/dev/SECRETS-AND-CREDENTIALS.md, "Host-bound application secrets"). The
+ * environment holds a placeholder, and the front door sends the value only
+ * on a request to one of these hosts.
+ *
+ * @generated from message codewire.v1.SecretBinding
+ */
+export type SecretBinding = Message<"codewire.v1.SecretBinding"> & {
+  /**
+   * 1 to 16 exact public DNS names, port 443 only.
+   *
+   * @generated from field: repeated string hosts = 1;
+   */
+  hosts: string[];
+
+  /**
+   * @generated from oneof codewire.v1.SecretBinding.presentation
+   */
+  presentation: {
+    /**
+     * @generated from field: codewire.v1.SecretHeaderPresentation header = 2;
+     */
+    value: SecretHeaderPresentation;
+    case: "header";
+  } | {
+    /**
+     * @generated from field: codewire.v1.SecretBasicPresentation basic = 3;
+     */
+    value: SecretBasicPresentation;
+    case: "basic";
+  } | {
+    /**
+     * @generated from field: codewire.v1.SecretBasicUserPresentation basic_user = 4;
+     */
+    value: SecretBasicUserPresentation;
+    case: "basicUser";
+  } | { case: undefined; value?: undefined };
+
+  /**
+   * Put before the placeholder; empty for none.
+   *
+   * @generated from field: string prefix = 5;
+   */
+  prefix: string;
+
+  /**
+   * The preset that filled this binding, for display; empty for none.
+   *
+   * @generated from field: string preset = 6;
+   */
+  preset: string;
+
+  /**
+   * Output only: moves with every change but to the hosts or the value.
+   *
+   * @generated from field: uint64 binding_generation = 7;
+   */
+  bindingGeneration: bigint;
+};
+
+/**
+ * Describes the message codewire.v1.SecretBinding.
+ * Use `create(SecretBindingSchema)` to create a new message.
+ */
+export const SecretBindingSchema: GenMessage<SecretBinding> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_secret, 1);
+
+/**
+ * `<scheme> <value>` in one or two headers.
+ *
+ * @generated from message codewire.v1.SecretHeaderPresentation
+ */
+export type SecretHeaderPresentation = Message<"codewire.v1.SecretHeaderPresentation"> & {
+  /**
+   * Empty means Authorization.
+   *
+   * @generated from field: repeated string headers = 1;
+   */
+  headers: string[];
+
+  /**
+   * Absent means Bearer; "none" sends the value alone.
+   *
+   * @generated from field: optional string scheme = 2;
+   */
+  scheme?: string | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.SecretHeaderPresentation.
+ * Use `create(SecretHeaderPresentationSchema)` to create a new message.
+ */
+export const SecretHeaderPresentationSchema: GenMessage<SecretHeaderPresentation> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_secret, 2);
+
+/**
+ * HTTP Basic with the value as the password.
+ *
+ * @generated from message codewire.v1.SecretBasicPresentation
+ */
+export type SecretBasicPresentation = Message<"codewire.v1.SecretBasicPresentation"> & {
+  /**
+   * Empty means x-access-token.
+   *
+   * @generated from field: string username = 1;
+   */
+  username: string;
+};
+
+/**
+ * Describes the message codewire.v1.SecretBasicPresentation.
+ * Use `create(SecretBasicPresentationSchema)` to create a new message.
+ */
+export const SecretBasicPresentationSchema: GenMessage<SecretBasicPresentation> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_secret, 3);
+
+/**
+ * HTTP Basic with the value as the user name and an empty password.
+ *
+ * @generated from message codewire.v1.SecretBasicUserPresentation
+ */
+export type SecretBasicUserPresentation = Message<"codewire.v1.SecretBasicUserPresentation"> & {
+};
+
+/**
+ * Describes the message codewire.v1.SecretBasicUserPresentation.
+ * Use `create(SecretBasicUserPresentationSchema)` to create a new message.
+ */
+export const SecretBasicUserPresentationSchema: GenMessage<SecretBasicUserPresentation> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_secret, 4);
 
 /**
  * @generated from message codewire.v1.ListSecretsRequest
@@ -69,7 +209,7 @@ export type ListSecretsRequest = Message<"codewire.v1.ListSecretsRequest"> & {
  * Use `create(ListSecretsRequestSchema)` to create a new message.
  */
 export const ListSecretsRequestSchema: GenMessage<ListSecretsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 1);
+  messageDesc(file_codewire_v1_secret, 5);
 
 /**
  * @generated from message codewire.v1.ListSecretsResponse
@@ -91,7 +231,7 @@ export type ListSecretsResponse = Message<"codewire.v1.ListSecretsResponse"> & {
  * Use `create(ListSecretsResponseSchema)` to create a new message.
  */
 export const ListSecretsResponseSchema: GenMessage<ListSecretsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 2);
+  messageDesc(file_codewire_v1_secret, 6);
 
 /**
  * @generated from message codewire.v1.SetSecretRequest
@@ -108,9 +248,27 @@ export type SetSecretRequest = Message<"codewire.v1.SetSecretRequest"> & {
   key: string;
 
   /**
+   * Empty only for a change to a bound secret that needs no value:
+   * removing some of its hosts, or changing its prefix.
+   *
    * @generated from field: string value = 3;
    */
   value: string;
+
+  /**
+   * Binds the secret, or changes its binding. Absent with plain false keeps
+   * the binding it has, so a new value never unbinds a secret.
+   *
+   * @generated from field: optional codewire.v1.SecretBinding binding = 4;
+   */
+  binding?: SecretBinding | undefined;
+
+  /**
+   * Removes every host: the secret becomes plain. Needs the value.
+   *
+   * @generated from field: bool plain = 5;
+   */
+  plain: boolean;
 };
 
 /**
@@ -118,7 +276,7 @@ export type SetSecretRequest = Message<"codewire.v1.SetSecretRequest"> & {
  * Use `create(SetSecretRequestSchema)` to create a new message.
  */
 export const SetSecretRequestSchema: GenMessage<SetSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 3);
+  messageDesc(file_codewire_v1_secret, 7);
 
 /**
  * @generated from message codewire.v1.SetSecretResponse
@@ -131,7 +289,7 @@ export type SetSecretResponse = Message<"codewire.v1.SetSecretResponse"> & {
  * Use `create(SetSecretResponseSchema)` to create a new message.
  */
 export const SetSecretResponseSchema: GenMessage<SetSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 4);
+  messageDesc(file_codewire_v1_secret, 8);
 
 /**
  * @generated from message codewire.v1.DeleteSecretRequest
@@ -153,7 +311,7 @@ export type DeleteSecretRequest = Message<"codewire.v1.DeleteSecretRequest"> & {
  * Use `create(DeleteSecretRequestSchema)` to create a new message.
  */
 export const DeleteSecretRequestSchema: GenMessage<DeleteSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 5);
+  messageDesc(file_codewire_v1_secret, 9);
 
 /**
  * @generated from message codewire.v1.DeleteSecretResponse
@@ -166,7 +324,7 @@ export type DeleteSecretResponse = Message<"codewire.v1.DeleteSecretResponse"> &
  * Use `create(DeleteSecretResponseSchema)` to create a new message.
  */
 export const DeleteSecretResponseSchema: GenMessage<DeleteSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 6);
+  messageDesc(file_codewire_v1_secret, 10);
 
 /**
  * @generated from message codewire.v1.RenameSecretRequest
@@ -193,7 +351,7 @@ export type RenameSecretRequest = Message<"codewire.v1.RenameSecretRequest"> & {
  * Use `create(RenameSecretRequestSchema)` to create a new message.
  */
 export const RenameSecretRequestSchema: GenMessage<RenameSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 7);
+  messageDesc(file_codewire_v1_secret, 11);
 
 /**
  * @generated from message codewire.v1.RenameSecretResponse
@@ -206,7 +364,7 @@ export type RenameSecretResponse = Message<"codewire.v1.RenameSecretResponse"> &
  * Use `create(RenameSecretResponseSchema)` to create a new message.
  */
 export const RenameSecretResponseSchema: GenMessage<RenameSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 8);
+  messageDesc(file_codewire_v1_secret, 12);
 
 /**
  * @generated from message codewire.v1.ListUserSecretsRequest
@@ -228,7 +386,7 @@ export type ListUserSecretsRequest = Message<"codewire.v1.ListUserSecretsRequest
  * Use `create(ListUserSecretsRequestSchema)` to create a new message.
  */
 export const ListUserSecretsRequestSchema: GenMessage<ListUserSecretsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 9);
+  messageDesc(file_codewire_v1_secret, 13);
 
 /**
  * @generated from message codewire.v1.ListUserSecretsResponse
@@ -250,7 +408,7 @@ export type ListUserSecretsResponse = Message<"codewire.v1.ListUserSecretsRespon
  * Use `create(ListUserSecretsResponseSchema)` to create a new message.
  */
 export const ListUserSecretsResponseSchema: GenMessage<ListUserSecretsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 10);
+  messageDesc(file_codewire_v1_secret, 14);
 
 /**
  * @generated from message codewire.v1.SetUserSecretRequest
@@ -262,9 +420,27 @@ export type SetUserSecretRequest = Message<"codewire.v1.SetUserSecretRequest"> &
   key: string;
 
   /**
+   * Empty only for a change to a bound secret that needs no value:
+   * removing some of its hosts, or changing its prefix.
+   *
    * @generated from field: string value = 2;
    */
   value: string;
+
+  /**
+   * Binds the secret, or changes its binding. Absent with plain false keeps
+   * the binding it has, so a new value never unbinds a secret.
+   *
+   * @generated from field: optional codewire.v1.SecretBinding binding = 3;
+   */
+  binding?: SecretBinding | undefined;
+
+  /**
+   * Removes every host: the secret becomes plain. Needs the value.
+   *
+   * @generated from field: bool plain = 4;
+   */
+  plain: boolean;
 };
 
 /**
@@ -272,7 +448,7 @@ export type SetUserSecretRequest = Message<"codewire.v1.SetUserSecretRequest"> &
  * Use `create(SetUserSecretRequestSchema)` to create a new message.
  */
 export const SetUserSecretRequestSchema: GenMessage<SetUserSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 11);
+  messageDesc(file_codewire_v1_secret, 15);
 
 /**
  * @generated from message codewire.v1.SetUserSecretResponse
@@ -285,7 +461,7 @@ export type SetUserSecretResponse = Message<"codewire.v1.SetUserSecretResponse">
  * Use `create(SetUserSecretResponseSchema)` to create a new message.
  */
 export const SetUserSecretResponseSchema: GenMessage<SetUserSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 12);
+  messageDesc(file_codewire_v1_secret, 16);
 
 /**
  * @generated from message codewire.v1.DeleteUserSecretRequest
@@ -302,7 +478,7 @@ export type DeleteUserSecretRequest = Message<"codewire.v1.DeleteUserSecretReque
  * Use `create(DeleteUserSecretRequestSchema)` to create a new message.
  */
 export const DeleteUserSecretRequestSchema: GenMessage<DeleteUserSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 13);
+  messageDesc(file_codewire_v1_secret, 17);
 
 /**
  * @generated from message codewire.v1.DeleteUserSecretResponse
@@ -315,7 +491,7 @@ export type DeleteUserSecretResponse = Message<"codewire.v1.DeleteUserSecretResp
  * Use `create(DeleteUserSecretResponseSchema)` to create a new message.
  */
 export const DeleteUserSecretResponseSchema: GenMessage<DeleteUserSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 14);
+  messageDesc(file_codewire_v1_secret, 18);
 
 /**
  * @generated from message codewire.v1.RenameUserSecretRequest
@@ -337,7 +513,7 @@ export type RenameUserSecretRequest = Message<"codewire.v1.RenameUserSecretReque
  * Use `create(RenameUserSecretRequestSchema)` to create a new message.
  */
 export const RenameUserSecretRequestSchema: GenMessage<RenameUserSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 15);
+  messageDesc(file_codewire_v1_secret, 19);
 
 /**
  * @generated from message codewire.v1.RenameUserSecretResponse
@@ -350,7 +526,7 @@ export type RenameUserSecretResponse = Message<"codewire.v1.RenameUserSecretResp
  * Use `create(RenameUserSecretResponseSchema)` to create a new message.
  */
 export const RenameUserSecretResponseSchema: GenMessage<RenameUserSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 16);
+  messageDesc(file_codewire_v1_secret, 20);
 
 /**
  * @generated from message codewire.v1.SecretProject
@@ -387,7 +563,7 @@ export type SecretProject = Message<"codewire.v1.SecretProject"> & {
  * Use `create(SecretProjectSchema)` to create a new message.
  */
 export const SecretProjectSchema: GenMessage<SecretProject> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 17);
+  messageDesc(file_codewire_v1_secret, 21);
 
 /**
  * @generated from message codewire.v1.ListSecretProjectsRequest
@@ -414,7 +590,7 @@ export type ListSecretProjectsRequest = Message<"codewire.v1.ListSecretProjectsR
  * Use `create(ListSecretProjectsRequestSchema)` to create a new message.
  */
 export const ListSecretProjectsRequestSchema: GenMessage<ListSecretProjectsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 18);
+  messageDesc(file_codewire_v1_secret, 22);
 
 /**
  * @generated from message codewire.v1.ListSecretProjectsResponse
@@ -436,7 +612,7 @@ export type ListSecretProjectsResponse = Message<"codewire.v1.ListSecretProjects
  * Use `create(ListSecretProjectsResponseSchema)` to create a new message.
  */
 export const ListSecretProjectsResponseSchema: GenMessage<ListSecretProjectsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 19);
+  messageDesc(file_codewire_v1_secret, 23);
 
 /**
  * @generated from message codewire.v1.CreateSecretProjectRequest
@@ -458,7 +634,7 @@ export type CreateSecretProjectRequest = Message<"codewire.v1.CreateSecretProjec
  * Use `create(CreateSecretProjectRequestSchema)` to create a new message.
  */
 export const CreateSecretProjectRequestSchema: GenMessage<CreateSecretProjectRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 20);
+  messageDesc(file_codewire_v1_secret, 24);
 
 /**
  * @generated from message codewire.v1.CreateSecretProjectResponse
@@ -475,7 +651,7 @@ export type CreateSecretProjectResponse = Message<"codewire.v1.CreateSecretProje
  * Use `create(CreateSecretProjectResponseSchema)` to create a new message.
  */
 export const CreateSecretProjectResponseSchema: GenMessage<CreateSecretProjectResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 21);
+  messageDesc(file_codewire_v1_secret, 25);
 
 /**
  * @generated from message codewire.v1.DeleteSecretProjectRequest
@@ -497,7 +673,7 @@ export type DeleteSecretProjectRequest = Message<"codewire.v1.DeleteSecretProjec
  * Use `create(DeleteSecretProjectRequestSchema)` to create a new message.
  */
 export const DeleteSecretProjectRequestSchema: GenMessage<DeleteSecretProjectRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 22);
+  messageDesc(file_codewire_v1_secret, 26);
 
 /**
  * @generated from message codewire.v1.DeleteSecretProjectResponse
@@ -510,7 +686,7 @@ export type DeleteSecretProjectResponse = Message<"codewire.v1.DeleteSecretProje
  * Use `create(DeleteSecretProjectResponseSchema)` to create a new message.
  */
 export const DeleteSecretProjectResponseSchema: GenMessage<DeleteSecretProjectResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 23);
+  messageDesc(file_codewire_v1_secret, 27);
 
 /**
  * @generated from message codewire.v1.ListProjectSecretsRequest
@@ -542,7 +718,7 @@ export type ListProjectSecretsRequest = Message<"codewire.v1.ListProjectSecretsR
  * Use `create(ListProjectSecretsRequestSchema)` to create a new message.
  */
 export const ListProjectSecretsRequestSchema: GenMessage<ListProjectSecretsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 24);
+  messageDesc(file_codewire_v1_secret, 28);
 
 /**
  * @generated from message codewire.v1.ListProjectSecretsResponse
@@ -564,7 +740,7 @@ export type ListProjectSecretsResponse = Message<"codewire.v1.ListProjectSecrets
  * Use `create(ListProjectSecretsResponseSchema)` to create a new message.
  */
 export const ListProjectSecretsResponseSchema: GenMessage<ListProjectSecretsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 25);
+  messageDesc(file_codewire_v1_secret, 29);
 
 /**
  * @generated from message codewire.v1.SetProjectSecretRequest
@@ -586,9 +762,27 @@ export type SetProjectSecretRequest = Message<"codewire.v1.SetProjectSecretReque
   key: string;
 
   /**
+   * Empty only for a change to a bound secret that needs no value:
+   * removing some of its hosts, or changing its prefix.
+   *
    * @generated from field: string value = 4;
    */
   value: string;
+
+  /**
+   * Binds the secret, or changes its binding. Absent with plain false keeps
+   * the binding it has, so a new value never unbinds a secret.
+   *
+   * @generated from field: optional codewire.v1.SecretBinding binding = 5;
+   */
+  binding?: SecretBinding | undefined;
+
+  /**
+   * Removes every host: the secret becomes plain. Needs the value.
+   *
+   * @generated from field: bool plain = 6;
+   */
+  plain: boolean;
 };
 
 /**
@@ -596,7 +790,7 @@ export type SetProjectSecretRequest = Message<"codewire.v1.SetProjectSecretReque
  * Use `create(SetProjectSecretRequestSchema)` to create a new message.
  */
 export const SetProjectSecretRequestSchema: GenMessage<SetProjectSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 26);
+  messageDesc(file_codewire_v1_secret, 30);
 
 /**
  * @generated from message codewire.v1.SetProjectSecretResponse
@@ -609,7 +803,7 @@ export type SetProjectSecretResponse = Message<"codewire.v1.SetProjectSecretResp
  * Use `create(SetProjectSecretResponseSchema)` to create a new message.
  */
 export const SetProjectSecretResponseSchema: GenMessage<SetProjectSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 27);
+  messageDesc(file_codewire_v1_secret, 31);
 
 /**
  * @generated from message codewire.v1.DeleteProjectSecretRequest
@@ -636,7 +830,7 @@ export type DeleteProjectSecretRequest = Message<"codewire.v1.DeleteProjectSecre
  * Use `create(DeleteProjectSecretRequestSchema)` to create a new message.
  */
 export const DeleteProjectSecretRequestSchema: GenMessage<DeleteProjectSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 28);
+  messageDesc(file_codewire_v1_secret, 32);
 
 /**
  * @generated from message codewire.v1.DeleteProjectSecretResponse
@@ -649,7 +843,7 @@ export type DeleteProjectSecretResponse = Message<"codewire.v1.DeleteProjectSecr
  * Use `create(DeleteProjectSecretResponseSchema)` to create a new message.
  */
 export const DeleteProjectSecretResponseSchema: GenMessage<DeleteProjectSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 29);
+  messageDesc(file_codewire_v1_secret, 33);
 
 /**
  * @generated from message codewire.v1.RenameProjectSecretRequest
@@ -681,7 +875,7 @@ export type RenameProjectSecretRequest = Message<"codewire.v1.RenameProjectSecre
  * Use `create(RenameProjectSecretRequestSchema)` to create a new message.
  */
 export const RenameProjectSecretRequestSchema: GenMessage<RenameProjectSecretRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 30);
+  messageDesc(file_codewire_v1_secret, 34);
 
 /**
  * @generated from message codewire.v1.RenameProjectSecretResponse
@@ -694,7 +888,7 @@ export type RenameProjectSecretResponse = Message<"codewire.v1.RenameProjectSecr
  * Use `create(RenameProjectSecretResponseSchema)` to create a new message.
  */
 export const RenameProjectSecretResponseSchema: GenMessage<RenameProjectSecretResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 31);
+  messageDesc(file_codewire_v1_secret, 35);
 
 /**
  * @generated from message codewire.v1.PreviewWorkloadSecretResolutionRequest
@@ -731,7 +925,7 @@ export type PreviewWorkloadSecretResolutionRequest = Message<"codewire.v1.Previe
  * Use `create(PreviewWorkloadSecretResolutionRequestSchema)` to create a new message.
  */
 export const PreviewWorkloadSecretResolutionRequestSchema: GenMessage<PreviewWorkloadSecretResolutionRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 32);
+  messageDesc(file_codewire_v1_secret, 36);
 
 /**
  * @generated from message codewire.v1.ResolvedWorkloadSecretMetadata
@@ -758,7 +952,7 @@ export type ResolvedWorkloadSecretMetadata = Message<"codewire.v1.ResolvedWorklo
  * Use `create(ResolvedWorkloadSecretMetadataSchema)` to create a new message.
  */
 export const ResolvedWorkloadSecretMetadataSchema: GenMessage<ResolvedWorkloadSecretMetadata> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 33);
+  messageDesc(file_codewire_v1_secret, 37);
 
 /**
  * @generated from message codewire.v1.PreviewWorkloadSecretResolutionResponse
@@ -775,7 +969,7 @@ export type PreviewWorkloadSecretResolutionResponse = Message<"codewire.v1.Previ
  * Use `create(PreviewWorkloadSecretResolutionResponseSchema)` to create a new message.
  */
 export const PreviewWorkloadSecretResolutionResponseSchema: GenMessage<PreviewWorkloadSecretResolutionResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_secret, 34);
+  messageDesc(file_codewire_v1_secret, 38);
 
 /**
  * @generated from enum codewire.v1.WorkloadSecretSource

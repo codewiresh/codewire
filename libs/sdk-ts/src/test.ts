@@ -650,8 +650,23 @@ async function runTests() {
       requireTestKey(context);
       return { secrets: [{ key: "DB_URL" }] };
     },
-    setSecret: (_request, context) => {
+    setSecret: (request, context) => {
       requireTestKey(context);
+      const presentation = request.binding?.presentation;
+      if (request.key === "API_TOKEN") {
+        assert(
+          request.value === "" &&
+            !request.plain &&
+            request.binding?.hosts.join() === "api.example.com" &&
+            request.binding.prefix === "sk_" &&
+            presentation?.case === "header" &&
+            presentation.value.headers.join() === "X-Api-Key" &&
+            presentation.value.scheme === "none",
+          "an organization set carries its binding",
+        );
+      } else {
+        assert(request.binding === undefined && !request.plain, "a plain set keeps the binding");
+      }
       return {};
     },
     deleteSecret: (_request, context) => {
@@ -664,10 +679,29 @@ async function runTests() {
     },
     listUserSecrets: (_request, context) => {
       requireTestKey(context);
-      return { secrets: [{ key: "USER_TOKEN" }] };
+      return {
+        secrets: [{
+          key: "USER_TOKEN",
+          binding: {
+            hosts: ["git.example.com"],
+            presentation: { case: "basic", value: { username: "x-access-token" } },
+            bindingGeneration: 2n,
+          },
+        }],
+      };
     },
-    setUserSecret: (_request, context) => {
+    setUserSecret: (request, context) => {
       requireTestKey(context);
+      const presentation = request.binding?.presentation;
+      assert(
+        request.key === "GIT_TOKEN"
+          ? request.binding?.hosts.join() === "git.example.com" &&
+              presentation?.case === "basic" &&
+              presentation.value.username === "" &&
+              !request.plain
+          : request.binding === undefined && request.plain,
+        "a personal set binds or makes plain as asked",
+      );
       return {};
     },
     deleteUserSecret: (_request, context) => {
@@ -712,8 +746,14 @@ async function runTests() {
       requireTestKey(context);
       return { secrets: [{ key: "PROJECT_KEY" }] };
     },
-    setProjectSecret: (_request, context) => {
+    setProjectSecret: (request, context) => {
       requireTestKey(context);
+      assert(
+        request.binding?.hosts.join() === "pay.example.com,api.pay.example.com" &&
+          request.binding.presentation.case === "basicUser" &&
+          request.binding.preset === "payments",
+        "a project set carries its binding",
+      );
       return {};
     },
     deleteProjectSecret: (_request, context) => {
@@ -1131,6 +1171,27 @@ async function runTests() {
     createdAt: timestamp,
   }));
   assert(convertedSecretMetadata.created_at === "2026-01-01T00:00:00Z", "secret metadata timestamps keep REST values");
+  assert(convertedSecretMetadata.binding === undefined, "a plain secret's metadata has no binding");
+  const convertedBoundMetadata = fromProtoSecretMetadata(create(SecretMetadataSchema, {
+    key: "API_TOKEN",
+    binding: {
+      hosts: ["api.example.com"],
+      presentation: { case: "header", value: { headers: ["Authorization"], scheme: "Bearer" } },
+      prefix: "sk_",
+      bindingGeneration: 3n,
+    },
+  }));
+  const boundPresentation = convertedBoundMetadata.binding?.presentation;
+  assert(
+    convertedBoundMetadata.binding?.hosts.join() === "api.example.com" &&
+      boundPresentation?.kind === "header" &&
+      boundPresentation.headers?.join() === "Authorization" &&
+      boundPresentation.scheme === "Bearer" &&
+      convertedBoundMetadata.binding.prefix === "sk_" &&
+      convertedBoundMetadata.binding.preset === undefined &&
+      convertedBoundMetadata.binding.binding_generation === 3,
+    "secret metadata keeps every binding field",
+  );
   assert(convertedSecretProject.secret_count === 2, "secret project counts convert int64 to numbers");
   assert(pollIntervalMs(create(DurationSchema, { seconds: 0n, nanos: 250_000_000 })) === 250, "poll intervals use the service response");
   assert(pollIntervalMs(undefined) === 2000, "missing poll intervals keep the two-second fallback");
@@ -1528,6 +1589,19 @@ async function runTests() {
     assert(secrets[0].key === "DB_URL", "secret key matches");
 
     await cw.secrets.set("DB_URL", "postgres://...");
+    await cw.secrets.set("API_TOKEN", "", {
+      binding: {
+        hosts: ["api.example.com"],
+        presentation: { kind: "header", headers: ["X-Api-Key"], scheme: "none" },
+        prefix: "sk_",
+      },
+    });
+    try {
+      await cw.secrets.set("API_TOKEN", "value", { binding: { hosts: ["api.example.com"] }, plain: true });
+      assert(false, "a set that binds and makes plain should have thrown");
+    } catch (e) {
+      assert((e as Error).message.includes("not both"), "binding and plain together are refused before sending");
+    }
     await cw.secrets.rename("DB_URL", "DATABASE_URL");
     await cw.secrets.delete("DB_URL");
 
@@ -1576,7 +1650,15 @@ async function runTests() {
     assert(Array.isArray(spSecrets), "project secrets is array");
     assert(spSecrets[0].key === "PROJECT_KEY", "project secret key matches");
 
-    await cw.secretProjects.setSecret("sp_1", { key: "PROJECT_KEY", value: "val" });
+    await cw.secretProjects.setSecret("sp_1", {
+      key: "PROJECT_KEY",
+      value: "val",
+      binding: {
+        hosts: ["pay.example.com", "api.pay.example.com"],
+        presentation: { kind: "basic_user" },
+        preset: "payments",
+      },
+    });
 
     await cw.secretProjects.renameSecret(
       "sp_1",
@@ -1591,8 +1673,18 @@ async function runTests() {
     const userSecrets = await cw.secrets.listUser();
     assert(Array.isArray(userSecrets), "user secrets list returned");
     assert(userSecrets[0].key === "USER_TOKEN", "user secret key matches");
+    assert(
+      userSecrets[0].binding?.hosts.join() === "git.example.com" &&
+        userSecrets[0].binding.presentation?.kind === "basic" &&
+        userSecrets[0].binding.presentation.username === "x-access-token" &&
+        userSecrets[0].binding.binding_generation === 2,
+      "user secret metadata names its binding",
+    );
 
-    await cw.secrets.setUser("USER_TOKEN", "tok_abc");
+    await cw.secrets.setUser("USER_TOKEN", "tok_abc", { plain: true });
+    await cw.secrets.setUser("GIT_TOKEN", "tok_git", {
+      binding: { hosts: ["git.example.com"], presentation: { kind: "basic" } },
+    });
 
     await cw.secrets.renameUser("USER_TOKEN", "USER_ACCESS_TOKEN");
 
@@ -1750,7 +1842,7 @@ async function runTests() {
     server.close();
   }
 
-  const expectedAssertions = 211;
+  const expectedAssertions = 220;
   if (passed !== expectedAssertions) {
     failed++;
     console.error(

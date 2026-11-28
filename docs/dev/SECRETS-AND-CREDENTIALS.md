@@ -2863,7 +2863,10 @@ a stable code and a sentence that names what the person gave:
 `bound_host_reserved` (one of the deployment's own names),
 `secret_binding_invalid` (any other host, header, scheme, prefix, preset or
 value rule), and `secret_bound_rename`. An empty value for a plain secret
-is refused as it always has been.
+is refused as it always has been. Until projection and the swap ship, a
+deployment refuses every binding with `secret_binding_unavailable`, unless
+`CODEWIRE_HOST_BOUND_SECRETS_ENABLED` turns it on (docs/CONFIGURATION.md,
+"Host-bound secrets"); plain secrets behave exactly as before.
 
 **The record.** A bound secret's record gains a `binding_id`, made when it
 is first bound and kept until the secret is deleted, and a

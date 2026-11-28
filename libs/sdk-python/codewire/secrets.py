@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from google.protobuf.json_format import ParseDict
+
 from codewire._context import ConnectContext
 from codewire._convert import proto_to_dict
 from codewire.v1.secret_connect import SecretServiceClientSync
@@ -17,6 +19,7 @@ from codewire.v1.secret_pb2 import (
     RenameProjectSecretRequest,
     RenameSecretRequest,
     RenameUserSecretRequest,
+    SecretBinding,
     SetProjectSecretRequest,
     SetSecretRequest,
     SetUserSecretRequest,
@@ -35,11 +38,17 @@ class Secrets:
             self._context, self._client.list_secrets, request, "secrets"
         )
 
-    def set(self, key: str, value: str) -> None:
+    def set(
+        self, key: str, value: str, *, binding: dict | None = None, plain: bool = False
+    ) -> None:
+        """Set an organization secret, and bind it to hosts or make it plain."""
         self._context.unary(
             self._client.set_secret,
             SetSecretRequest(
-                org_id=self._context.resolve_org_id(), key=key, value=value
+                org_id=self._context.resolve_org_id(),
+                key=key,
+                value=value,
+                **_binding_change(binding, plain),
             ),
         )
 
@@ -65,8 +74,14 @@ class Secrets:
             "secrets",
         )
 
-    def set_user(self, key: str, value: str) -> None:
-        self._context.unary(self._client.set_user_secret, SetUserSecretRequest(key=key, value=value))
+    def set_user(
+        self, key: str, value: str, *, binding: dict | None = None, plain: bool = False
+    ) -> None:
+        """Set a personal secret, and bind it to hosts or make it plain."""
+        self._context.unary(
+            self._client.set_user_secret,
+            SetUserSecretRequest(key=key, value=value, **_binding_change(binding, plain)),
+        )
 
     def delete_user(self, key: str) -> None:
         self._context.unary(self._client.delete_user_secret, DeleteUserSecretRequest(key=key))
@@ -135,7 +150,16 @@ class SecretProjects:
             self._context, self._client.list_project_secrets, request, "secrets"
         )
 
-    def set_secret(self, project_id: str, key: str, value: str) -> None:
+    def set_secret(
+        self,
+        project_id: str,
+        key: str,
+        value: str,
+        *,
+        binding: dict | None = None,
+        plain: bool = False,
+    ) -> None:
+        """Set a project secret, and bind it to hosts or make it plain."""
         self._context.unary(
             self._client.set_project_secret,
             SetProjectSecretRequest(
@@ -143,6 +167,7 @@ class SecretProjects:
                 secret_project_id=project_id,
                 key=key,
                 value=value,
+                **_binding_change(binding, plain),
             ),
         )
 
@@ -166,6 +191,24 @@ class SecretProjects:
                 new_key=new_key,
             ),
         )
+
+
+def _binding_change(binding: dict | None, plain: bool) -> dict:
+    """The binding fields of a set request.
+
+    ``binding`` binds or rebinds the secret, in the shape a listed secret's
+    ``binding`` has: ``hosts``, one of ``header`` (``headers`` and
+    ``scheme``), ``basic`` (``username``) or ``basic_user``, and optionally
+    ``prefix`` and ``preset``; the service fills every default. ``plain``
+    removes every host, and neither keeps the binding the secret has. A set
+    may leave the value empty only to remove some hosts or change the prefix
+    of a bound secret; every other change needs the value again.
+    """
+    if binding is not None and plain:
+        raise ValueError("a secret is bound to hosts or made plain, not both")
+    if binding is None:
+        return {"plain": plain}
+    return {"binding": ParseDict(binding, SecretBinding())}
 
 
 def _list_all(context: ConnectContext, call, request, field_name: str) -> list[dict]:

@@ -14,9 +14,10 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
-use codewire_workload_secrets::validate_workload_secret_value;
-
 use super::secrets::{StoredSecret, StoredSecretMetadata, is_valid_secret_key};
+
+mod binding;
+pub use binding::{BindingWrite, BoundSecretRename, SecretWriteError};
 use codewire_protected_store::openbao_workload_identity::KubernetesOpenBaoWorkloadIdentity;
 use codewire_protected_store::secret_envelope::{
     DEK_BYTES, DekContext, EncryptedTenantSecret, GeneratedDek, KekProvider, KekProviderKind,
@@ -76,6 +77,8 @@ struct SecretMetadataRow {
     scope_id: String,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    binding: Option<sqlx::types::Json<codewire_access::StoredBinding>>,
+    binding_generation: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -84,6 +87,7 @@ struct RenameRow {
     nonce: Vec<u8>,
     format: i16,
     created_at: DateTime<Utc>,
+    bound: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -377,7 +381,7 @@ impl PostgresSecretStore {
     ) -> anyhow::Result<Vec<StoredSecretMetadata>> {
         let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
         let rows: Vec<SecretMetadataRow> = sqlx::query_as(
-            "SELECT key, scope, scope_id, created_at, updated_at \
+            "SELECT key, scope, scope_id, created_at, updated_at, binding, binding_generation \
              FROM tenant_secrets WHERE path = $1 ORDER BY key",
         )
         .bind(secret_path)
@@ -396,7 +400,7 @@ impl PostgresSecretStore {
         let maximum_rows = i64::try_from(maximum_rows)
             .map_err(|_| store_error("secret-metadata-limit-invalid"))?;
         let rows: Vec<SecretMetadataRow> = sqlx::query_as(
-            "SELECT key, scope, scope_id, created_at, updated_at \
+            "SELECT key, scope, scope_id, created_at, updated_at, binding, binding_generation \
              FROM tenant_secrets WHERE path = $1 ORDER BY key LIMIT $2",
         )
         .bind(secret_path)
@@ -419,81 +423,38 @@ impl PostgresSecretStore {
                 if !is_valid_secret_key(&row.key) {
                     return Err(store_error("invalid-persisted-secret-key"));
                 }
+                let binding_generation = u64::try_from(row.binding_generation)
+                    .map_err(|_| store_error("invalid-persisted-secret-binding"))?;
                 Ok(StoredSecretMetadata {
                     key: row.key,
                     created_at: row.created_at.to_rfc3339_opts(SecondsFormat::Secs, true),
                     updated_at: row.updated_at.to_rfc3339_opts(SecondsFormat::Secs, true),
+                    binding: row.binding.map(|sqlx::types::Json(binding)| binding),
+                    binding_generation,
                 })
             })
             .collect()
     }
 
+    /// Set `key`'s value, keeping any binding it has.
     pub async fn set_secret_at_path(
         &self,
         secret_path: &str,
         key: &str,
         value: &str,
     ) -> anyhow::Result<()> {
-        let context = DekContext::from_secret_path(secret_path).map_err(envelope_error)?;
-        if !is_valid_secret_key(key) {
-            return Err(store_error("invalid-secret-key"));
-        }
-        validate_workload_secret_value(value.as_bytes())
-            .map_err(|_| store_error("invalid-secret-value"))?;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| store_error("transaction-start-failed"))?;
-        Self::lock_scope(&mut tx, &context).await?;
-
-        let existing = Self::fetch_dek_locked(&mut tx, &context).await?;
-        let (dek_id, dek, generated) = if let Some(row) = existing {
-            let dek = self.unwrap_dek(&context, &row).await?;
-            (row.dek_id, dek, false)
-        } else {
-            let generated = self
-                .provider
-                .generate(&context)
-                .await
-                .map_err(envelope_error)?;
-            let dek_id = Self::insert_generated_dek(&mut tx, &context, &generated).await?;
-            (dek_id, generated.plaintext, true)
-        };
-        let coordinates = SecretCoordinates {
-            context: &context,
-            path: secret_path,
+        self.write_secret_at_path(
+            secret_path,
             key,
-        };
-        let encrypted =
-            encrypt_secret(&dek, &coordinates, value.as_bytes()).map_err(envelope_error)?;
-        sqlx::query(
-            "INSERT INTO tenant_secrets \
-             (path, key, dek_id, scope, scope_id, ciphertext, nonce, format, storage_contract_version) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1) \
-             ON CONFLICT (path, key) DO UPDATE SET \
-               dek_id = EXCLUDED.dek_id, scope = EXCLUDED.scope, scope_id = EXCLUDED.scope_id, \
-               ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, \
-               format = EXCLUDED.format, updated_at = now()",
+            Some(value),
+            binding::BindingWrite::Keep,
+            &codewire_access::ReservedHosts::default(),
         )
-        .bind(secret_path)
-        .bind(key)
-        .bind(&dek_id)
-        .bind(context.scope.as_str())
-        .bind(&context.scope_id)
-        .bind(encrypted.ciphertext)
-        .bind(encrypted.nonce)
-        .bind(encrypted.format)
-        .execute(&mut *tx)
         .await
-        .map_err(|_| store_error("secret-upsert-failed"))?;
-        tx.commit()
-            .await
-            .map_err(|_| store_error("transaction-commit-failed"))?;
-        if generated {
-            self.cache.lock().await.insert(dek_id, dek);
-        }
-        Ok(())
+        .map_err(|error| match error {
+            binding::SecretWriteError::Store(error) => error,
+            refused => anyhow::anyhow!(refused),
+        })
     }
 
     /// Whether a secret was there to delete; deleting one that isn't is not
@@ -596,6 +557,8 @@ impl PostgresSecretStore {
         Ok(())
     }
 
+    /// Move a secret to a new key. A bound secret is refused with
+    /// [`BoundSecretRename`].
     pub async fn rename_secret_at_path(
         &self,
         secret_path: &str,
@@ -619,8 +582,8 @@ impl PostgresSecretStore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("secret not found"))?;
         let old: RenameRow = sqlx::query_as(
-            "SELECT ciphertext, nonce, format, created_at FROM tenant_secrets \
-             WHERE path = $1 AND key = $2 AND dek_id = $3 FOR UPDATE",
+            "SELECT ciphertext, nonce, format, created_at, binding IS NOT NULL AS bound \
+             FROM tenant_secrets WHERE path = $1 AND key = $2 AND dek_id = $3 FOR UPDATE",
         )
         .bind(secret_path)
         .bind(old_key)
@@ -629,6 +592,9 @@ impl PostgresSecretStore {
         .await
         .map_err(|_| store_error("secret-query-failed"))?
         .ok_or_else(|| anyhow::anyhow!("secret not found"))?;
+        if old.bound {
+            return Err(BoundSecretRename.into());
+        }
         let target_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM tenant_secrets WHERE path = $1 AND key = $2)",
         )

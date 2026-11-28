@@ -12,8 +12,9 @@ use super::ApiState;
 use super::environments::format_time;
 use super::secrets::{
     ListSecretsResponse, ambiguous_secret_provider_error, forbidden, log_audit, org_role,
-    rename_provider_error, to_metadata, validate_secret_key, validate_secret_value,
+    rename_provider_error, to_metadata, validate_secret_key, write_provider_error, write_value,
 };
+use crate::worker::secrets::BindingWrite;
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -261,6 +262,7 @@ pub(crate) async fn set_project_secret_core(
     project_id: &str,
     key: &str,
     value: &str,
+    binding: BindingWrite,
 ) -> AppResult<()> {
     require_manage(
         state,
@@ -270,7 +272,7 @@ pub(crate) async fn set_project_secret_core(
     )
     .await?;
     validate_secret_key(key)?;
-    validate_secret_value(value)?;
+    let value = write_value(value)?;
     let project = get_project(state, project_id, org_id).await?;
 
     run_organization_tenant_secret_mutation(&state.pool, org_id, async {
@@ -290,9 +292,14 @@ pub(crate) async fn set_project_secret_core(
             })?;
         state
             .secrets
-            .set_secret_at_path(&secret_project_path(org_id, &project.id), key, value)
+            .write_secret_at_path(
+                &secret_project_path(org_id, &project.id),
+                key,
+                value,
+                binding,
+            )
             .await
-            .map_err(|error| ambiguous_secret_provider_error(error, "failed to set secret"))?;
+            .map_err(write_provider_error)?;
         Ok(())
     })
     .await?;

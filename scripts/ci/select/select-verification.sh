@@ -2056,7 +2056,10 @@ if [ "$event_selected" = false ]; then
       crates/codewire-protected-store/src/lib.rs|\
       crates/codewire-protected-store/Cargo.toml|\
       crates/codewire-orchestration/src/worker/postgres_secrets.rs|\
+      crates/codewire-orchestration/src/worker/postgres_secrets/*|\
       crates/codewire-orchestration/src/worker/tenant_secret_teardown.rs|\
+      crates/codewire-orchestration/src/api/secrets.rs|\
+      crates/codewire-orchestration/src/api/secret_projects.rs|\
       crates/codewire-orchestration/src/access_profiles.rs|\
       crates/codewire-orchestration/src/connect/access_profiles.rs|\
       crates/codewire-orchestration/tests/access_profiles.rs|\

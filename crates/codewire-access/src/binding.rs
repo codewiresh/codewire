@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -36,6 +37,7 @@ const MAX_HOST_LENGTH: usize = 253;
 const MAX_LABEL_LENGTH: usize = 63;
 const MAX_TOKEN_LENGTH: usize = 64;
 const PLACEHOLDER_MARKER: &str = "cwp1_";
+const MAX_PRESET_LENGTH: usize = 32;
 
 /// Suffixes no public name ends in.
 const INTERNAL_SUFFIXES: [&str; 6] = [
@@ -123,6 +125,19 @@ pub enum BindingError {
     BasicUserColon,
     #[error("the deployment's own name {0} isn't a host name")]
     InvalidDeploymentName(String),
+    #[error("a preset's name is lowercase letters, digits and -, up to {MAX_PRESET_LENGTH}")]
+    InvalidPreset,
+}
+
+impl BindingError {
+    /// The stable code a refusal carries on the wire.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ProviderHost(_) => "bound_host_provider",
+            Self::DeploymentHost(_) => "bound_host_reserved",
+            _ => "secret_binding_invalid",
+        }
+    }
 }
 
 /// The names no binding may name: every host a built-in credential names, and
@@ -473,6 +488,99 @@ impl HostBinding {
             return Err(BindingError::BasicUserColon);
         }
         Ok(())
+    }
+}
+
+/// The form a binding is stored and carried in: what a person chose, before
+/// validation. [`StoredBinding::parse`] turns it into a [`HostBinding`], so a
+/// stored binding is checked again every time it is read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredBinding {
+    pub hosts: Vec<String>,
+    pub presentation: StoredPresentation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// The preset that filled it, shown to people; never validated or used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StoredPresentation {
+    Header {
+        headers: Vec<String>,
+        /// `None` is no scheme: the header holds the value alone.
+        scheme: Option<String>,
+    },
+    Basic {
+        username: String,
+    },
+    BasicUser,
+}
+
+impl StoredBinding {
+    pub fn parse(&self, reserved: &ReservedHosts) -> Result<HostBinding, BindingError> {
+        let hosts = self
+            .hosts
+            .iter()
+            .map(|host| BoundHost::parse(host, reserved))
+            .collect::<Result<_, _>>()?;
+        let presentation = match &self.presentation {
+            StoredPresentation::Header { headers, scheme } => Presentation::header(
+                headers
+                    .iter()
+                    .map(|header| BoundHeader::parse(header))
+                    .collect::<Result<_, _>>()?,
+                match scheme {
+                    None => Scheme::None,
+                    Some(word) => Scheme::parse(word)?,
+                },
+            )?,
+            StoredPresentation::Basic { username } => Presentation::basic(Some(username))?,
+            StoredPresentation::BasicUser => Presentation::BasicUser,
+        };
+        let prefix = self
+            .prefix
+            .as_deref()
+            .map(PlaceholderPrefix::parse)
+            .transpose()?;
+        if let Some(preset) = &self.preset {
+            let valid = !preset.is_empty()
+                && preset.len() <= MAX_PRESET_LENGTH
+                && preset
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if !valid {
+                return Err(BindingError::InvalidPreset);
+            }
+        }
+        HostBinding::new(hosts, presentation, prefix)
+    }
+}
+
+impl From<&HostBinding> for StoredBinding {
+    fn from(binding: &HostBinding) -> Self {
+        let presentation = match &binding.presentation {
+            Presentation::Header { headers, scheme } => StoredPresentation::Header {
+                headers: headers.iter().map(|header| header.0.clone()).collect(),
+                scheme: match scheme {
+                    Scheme::None => None,
+                    Scheme::Word(word) => Some(word.clone()),
+                },
+            },
+            Presentation::Basic { username } => StoredPresentation::Basic {
+                username: username.clone(),
+            },
+            Presentation::BasicUser => StoredPresentation::BasicUser,
+        };
+        Self {
+            hosts: binding.hosts.iter().map(|host| host.0.clone()).collect(),
+            presentation,
+            prefix: binding.prefix.as_ref().map(|prefix| prefix.0.clone()),
+            preset: None,
+        }
     }
 }
 

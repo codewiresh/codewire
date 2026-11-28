@@ -1,6 +1,7 @@
 import {
   fromProtoSecretMetadata,
   fromProtoSecretProject,
+  toProtoSecretBindingChange,
 } from "./convert.js";
 import type { SecretClient } from "./transport.js";
 import { mapConnectError } from "./types.js";
@@ -93,7 +94,7 @@ export class SecretProjects {
     }
   }
 
-  /** Set a secret in a project. */
+  /** Set a secret in a project, and bind it to hosts or make it plain. */
   async setSecret(
     projectId: string,
     body: SetProjectSecretRequest,
@@ -104,6 +105,7 @@ export class SecretProjects {
         secretProjectId: projectId,
         key: body.key,
         value: body.value,
+        ...toProtoSecretBindingChange(body),
       });
     } catch (error) {
       throw mapConnectError(error);

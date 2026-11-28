@@ -611,6 +611,26 @@ response that has none.
 | `CREDENTIAL_AUDIT_ORCHESTRATION_URL`, `CREDENTIAL_AUDIT_ORCHESTRATION_ROOTS`, `CREDENTIAL_AUDIT_TOKEN_FILE` | For the Sandbox audit log | Read by the credential service. Orchestration's internal listener as an `https` origin, the absolute path of its TLS roots, and the absolute path of the service's projected token for the `codewire.internal.credential-service.v1` audience. With all three set, the service reports each hosted Sandbox's credential uses to orchestration's `SandboxAuditService` every 5 seconds (#6189; SPEC.md "Sandbox audit log"). All unset reports none. Some set and some not, or a malformed value, stops the credential service at startup. | `https://codewire-orchestration.prod.svc.cluster.local:8088` |
 | `CREDENTIAL_SHUTDOWN_DRAIN_SECONDS` | No | Read by the credential service. How long a stopping process lets mutations it already admitted finish, such as a device enrollment waiting for its approval, before cancelling what is left (#6535). It admits nothing new meanwhile. An enrollment cancelled before publication ends with `CREDENTIAL_ENROLLMENT_NOT_PUBLISHED`, so nothing is half-written. Set it below the Pod's `terminationGracePeriodSeconds`, with about 30 s to spare, or the kubelet kills the process first. Unset means 270, which fits the base Deployment's 300 s; 930 covers a whole 15-minute enrollment. A value that is not a whole number from 1 to 930 stops the credential service at startup. | `930` |
 
+## Host-bound secrets
+
+A secret bound to hosts is sent only to them, never to a host the deployment
+serves itself (#4003; [dev/SECRETS-AND-CREDENTIALS.md](dev/SECRETS-AND-CREDENTIALS.md)).
+It is off unless switched on: until the projection and the swap that honour a
+binding ship, binding a secret is refused (`secret_binding_unavailable`), and
+every secret is plain. Orchestration reserves the host of `FRONTEND_URL`, and
+`PREVIEW_BASE_DOMAIN` with every name under it, by itself; a value that names
+no DNS host, such as a loopback address, reserves nothing. The setting below
+names the rest.
+
+Switch it on only once every orchestration replica runs a release that
+records a secret's value version: an older replica's write doesn't move it,
+so a bound secret's new value could go unseen.
+
+| Variable | Required | Meaning | Example |
+|---|---|---|---|
+| `CODEWIRE_HOST_BOUND_SECRETS_ENABLED` | No | `true` lets a secret be bound to hosts; `false` or unset refuses every binding. Any other value stops orchestration at startup, and so does `true` while `CODEWIRE_BOUND_HOST_RESERVED_NAMES` is unset. | `false` |
+| `CODEWIRE_BOUND_HOST_RESERVED_NAMES` | With the switch on | Comma-separated names the deployment serves that no secret may be bound to: each an exact host name, or `*.` and a domain for that domain and every name under it. List the Sandbox gateway's names, the identity issuer, the registries, the forge and any other name the deployment's configuration gives its own services. Setting a binding to one is refused. Unset or empty reserves only the names above. An entry that is neither form stops orchestration at startup. | `openbao.sandbox.example.com,*.registry.example.com` |
+
 ## Sandbox identity
 
 Orchestration can publish each organization's sandbox identity issuer:

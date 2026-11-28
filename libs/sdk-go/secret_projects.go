@@ -91,13 +91,24 @@ func (s *SecretProjectService) ListSecrets(ctx context.Context, projectID string
 	}
 }
 
-// SetSecret creates or updates a secret within a secret project.
+// SetSecret creates or updates a secret within a secret project, keeping its
+// binding.
 func (s *SecretProjectService) SetSecret(ctx context.Context, projectID, key, value string) error {
+	return s.SetSecretWithBinding(ctx, projectID, key, value, SecretBindingChange{})
+}
+
+// SetSecretWithBinding creates or updates a secret within a secret project,
+// and binds it to hosts or makes it plain.
+func (s *SecretProjectService) SetSecretWithBinding(ctx context.Context, projectID, key, value string, change SecretBindingChange) error {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return err
 	}
-	_, err = s.client.secrets.SetProjectSecret(ctx, connect.NewRequest(&codewirev1.SetProjectSecretRequest{OrgId: orgID, SecretProjectId: projectID, Key: key, Value: value}))
+	binding, plain, err := toProtoSecretBindingChange(change)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.secrets.SetProjectSecret(ctx, connect.NewRequest(&codewirev1.SetProjectSecretRequest{OrgId: orgID, SecretProjectId: projectID, Key: key, Value: value, Binding: binding, Plain: plain}))
 	return connectSDKError(err)
 }
 

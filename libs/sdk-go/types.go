@@ -441,9 +441,57 @@ type CreateAPIKeyResponse struct {
 
 // SecretMetadata describes a secret without its value.
 type SecretMetadata struct {
-	CreatedAt *string `json:"created_at,omitempty"`
-	Key       string  `json:"key"`
-	UpdatedAt *string `json:"updated_at,omitempty"`
+	// Binding is nil for a plain secret.
+	Binding   *SecretBinding `json:"binding,omitempty"`
+	CreatedAt *string        `json:"created_at,omitempty"`
+	Key       string         `json:"key"`
+	UpdatedAt *string        `json:"updated_at,omitempty"`
+}
+
+// SecretBinding names the hosts a secret is sent to and how it is presented
+// there. The environment holds a placeholder, and Codewire sends the value
+// only on a request to one of these hosts. At most one of Header, Basic and
+// BasicUser is set; none means Header with its defaults.
+type SecretBinding struct {
+	// Hosts are 1 to 16 exact public DNS names, port 443 only.
+	Hosts     []string                     `json:"hosts"`
+	Header    *SecretHeaderPresentation    `json:"header,omitempty"`
+	Basic     *SecretBasicPresentation     `json:"basic,omitempty"`
+	BasicUser *SecretBasicUserPresentation `json:"basic_user,omitempty"`
+	// Prefix is put before the placeholder, for a client that checks a key's shape.
+	Prefix string `json:"prefix,omitempty"`
+	// Preset names the preset that filled the binding, for display.
+	Preset string `json:"preset,omitempty"`
+	// BindingGeneration is read only: it moves with every change but to the
+	// hosts or the value.
+	BindingGeneration uint64 `json:"binding_generation,omitempty"`
+}
+
+// SecretHeaderPresentation sends "<scheme> <value>" in one or two headers.
+type SecretHeaderPresentation struct {
+	// Headers are Authorization when empty.
+	Headers []string `json:"headers,omitempty"`
+	// Scheme is Bearer when nil; "none" sends the value alone.
+	Scheme *string `json:"scheme,omitempty"`
+}
+
+// SecretBasicPresentation sends HTTP Basic with the value as the password.
+type SecretBasicPresentation struct {
+	// Username is x-access-token when empty.
+	Username string `json:"username,omitempty"`
+}
+
+// SecretBasicUserPresentation sends HTTP Basic with the value as the user
+// name and an empty password.
+type SecretBasicUserPresentation struct{}
+
+// SecretBindingChange is what a set does to a secret's binding: Binding binds
+// or rebinds it, Plain removes every host, and neither keeps the binding it
+// has. A set may leave the value empty only to remove some hosts or change
+// the prefix of a bound secret; every other change needs the value again.
+type SecretBindingChange struct {
+	Binding *SecretBinding `json:"binding,omitempty"`
+	Plain   bool           `json:"plain,omitempty"`
 }
 
 // WorkloadSecretSource names one source in workload-secret precedence order.

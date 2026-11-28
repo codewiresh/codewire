@@ -1653,6 +1653,18 @@ database_lane_orchestration_workers() {
       'worker::postgres_secrets::tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "secret binding store matrix" secret-binding-store \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'worker::postgres_secrets::binding::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
+  counted_suite "secret binding API matrix" secret-binding-api \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'api::secrets::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "leader handover when a replica drains" leader-drain-handover \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

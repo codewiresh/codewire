@@ -1556,7 +1556,7 @@ for primitive_input in src/secret_envelope.rs src/lib.rs Cargo.toml; do
     'database policy rust rust_pkg_codewire_credential_broker rust_pkg_codewire_orchestration rust_pkg_codewire_platform_credentials rust_pkg_codewire_protected_store service_integration service_orchestration service_temporal' \
     "crates/codewire-protected-store/$primitive_input"
 done
-for store_consumer in postgres_secrets.rs tenant_secret_teardown.rs; do
+for store_consumer in postgres_secrets.rs postgres_secrets/binding.rs tenant_secret_teardown.rs; do
   run_paths_case platform_store_consumer pull_request refs/pull/713/head false \
     'database policy rust rust_pkg_codewire_orchestration service_integration service_orchestration service_temporal' \
     "crates/codewire-orchestration/src/worker/$store_consumer"

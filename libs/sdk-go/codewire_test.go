@@ -1262,8 +1262,21 @@ func TestSecrets(t *testing.T) {
 			return connect.NewResponse(&codewirev1.ListSecretsResponse{Secrets: []*codewirev1.SecretMetadata{{Key: "DB_URL"}}}), nil
 		},
 		setSecret: func(_ context.Context, req *connect.Request[codewirev1.SetSecretRequest]) (*connect.Response[codewirev1.SetSecretResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" || req.Msg.GetKey() != "DB_URL" {
+			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetOrgId() != "org_test" {
 				t.Errorf("unexpected set request: %#v", req.Msg)
+			}
+			switch req.Msg.GetKey() {
+			case "DB_URL":
+				if req.Msg.GetBinding() != nil || req.Msg.GetPlain() {
+					t.Errorf("a plain set changed the binding: %#v", req.Msg)
+				}
+			case "API_TOKEN":
+				header := req.Msg.GetBinding().GetHeader()
+				if req.Msg.GetValue() != "" || req.Msg.GetPlain() || strings.Join(req.Msg.GetBinding().GetHosts(), ",") != "api.example.com" || req.Msg.GetBinding().GetPrefix() != "sk_" || strings.Join(header.GetHeaders(), ",") != "X-Api-Key" || header.Scheme == nil || header.GetScheme() != "none" {
+					t.Errorf("unexpected bound set request: %#v", req.Msg)
+				}
+			default:
+				t.Errorf("unexpected set key: %q", req.Msg.GetKey())
 			}
 			return connect.NewResponse(&codewirev1.SetSecretResponse{}), nil
 		},
@@ -1277,11 +1290,30 @@ func TestSecrets(t *testing.T) {
 			if req.Header().Get("Authorization") != "Bearer test-key" {
 				t.Error("missing auth header")
 			}
-			return connect.NewResponse(&codewirev1.ListUserSecretsResponse{Secrets: []*codewirev1.SecretMetadata{{Key: "TOKEN"}}}), nil
+			return connect.NewResponse(&codewirev1.ListUserSecretsResponse{Secrets: []*codewirev1.SecretMetadata{{
+				Key: "TOKEN",
+				Binding: &codewirev1.SecretBinding{
+					Hosts:             []string{"git.example.com"},
+					Presentation:      &codewirev1.SecretBinding_Basic{Basic: &codewirev1.SecretBasicPresentation{Username: "x-access-token"}},
+					BindingGeneration: 2,
+				},
+			}}}), nil
 		},
 		setUserSecret: func(_ context.Context, req *connect.Request[codewirev1.SetUserSecretRequest]) (*connect.Response[codewirev1.SetUserSecretResponse], error) {
-			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetKey() != "TOKEN" {
+			if req.Header().Get("Authorization") != "Bearer test-key" {
 				t.Errorf("unexpected set user request: %#v", req.Msg)
+			}
+			switch req.Msg.GetKey() {
+			case "TOKEN":
+				if req.Msg.GetBinding() != nil || !req.Msg.GetPlain() {
+					t.Errorf("a set that makes the secret plain sent: %#v", req.Msg)
+				}
+			case "GIT_TOKEN":
+				if req.Msg.GetBinding().GetBasic() == nil || req.Msg.GetBinding().GetBasic().GetUsername() != "" || req.Msg.GetPlain() {
+					t.Errorf("unexpected bound set user request: %#v", req.Msg)
+				}
+			default:
+				t.Errorf("unexpected set user key: %q", req.Msg.GetKey())
 			}
 			return connect.NewResponse(&codewirev1.SetUserSecretResponse{}), nil
 		},
@@ -1316,6 +1348,26 @@ func TestSecrets(t *testing.T) {
 	if err := client.Secrets.Set(ctx, "DB_URL", "postgres://..."); err != nil {
 		t.Fatalf("set: %v", err)
 	}
+	none := "none"
+	if err := client.Secrets.SetWithBinding(ctx, "API_TOKEN", "", codewire.SecretBindingChange{Binding: &codewire.SecretBinding{
+		Hosts:  []string{"api.example.com"},
+		Header: &codewire.SecretHeaderPresentation{Headers: []string{"X-Api-Key"}, Scheme: &none},
+		Prefix: "sk_",
+	}}); err != nil {
+		t.Fatalf("set bound: %v", err)
+	}
+	for name, change := range map[string]codewire.SecretBindingChange{
+		"bound and plain": {Binding: &codewire.SecretBinding{Hosts: []string{"api.example.com"}}, Plain: true},
+		"two presentations": {Binding: &codewire.SecretBinding{
+			Hosts:     []string{"api.example.com"},
+			Header:    &codewire.SecretHeaderPresentation{},
+			BasicUser: &codewire.SecretBasicUserPresentation{},
+		}},
+	} {
+		if err := client.Secrets.SetWithBinding(ctx, "REFUSED", "value", change); err == nil {
+			t.Errorf("%s: a set the service would refuse was sent", name)
+		}
+	}
 
 	if err := client.Secrets.Delete(ctx, "DB_URL"); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -1326,11 +1378,25 @@ func TestSecrets(t *testing.T) {
 		t.Fatalf("list user: %v", err)
 	}
 	if len(userSecrets) != 1 {
-		t.Errorf("expected 1 user secret, got %d", len(userSecrets))
+		t.Fatalf("expected 1 user secret, got %d", len(userSecrets))
+	}
+	wantBinding := &codewire.SecretBinding{
+		Hosts:             []string{"git.example.com"},
+		Basic:             &codewire.SecretBasicPresentation{Username: "x-access-token"},
+		BindingGeneration: 2,
+	}
+	if !reflect.DeepEqual(userSecrets[0].Binding, wantBinding) {
+		t.Errorf("user secret binding = %#v, want %#v", userSecrets[0].Binding, wantBinding)
 	}
 
-	if err := client.Secrets.SetUser(ctx, "TOKEN", "abc"); err != nil {
-		t.Fatalf("set user: %v", err)
+	if err := client.Secrets.SetUserWithBinding(ctx, "TOKEN", "abc", codewire.SecretBindingChange{Plain: true}); err != nil {
+		t.Fatalf("set user plain: %v", err)
+	}
+	if err := client.Secrets.SetUserWithBinding(ctx, "GIT_TOKEN", "abc", codewire.SecretBindingChange{Binding: &codewire.SecretBinding{
+		Hosts: []string{"git.example.com"},
+		Basic: &codewire.SecretBasicPresentation{},
+	}}); err != nil {
+		t.Fatalf("set user bound: %v", err)
 	}
 
 	if err := client.Secrets.DeleteUser(ctx, "TOKEN"); err != nil {
@@ -1393,6 +1459,9 @@ func TestSecretProjects(t *testing.T) {
 			if req.Header().Get("Authorization") != "Bearer test-key" || req.Msg.GetSecretProjectId() != "proj_1" || req.Msg.GetKey() != "API_KEY" {
 				t.Errorf("unexpected set project secret request: %#v", req.Msg)
 			}
+			if bound := req.Msg.GetBinding(); bound != nil && (bound.GetBasicUser() == nil || bound.GetPreset() != "payments" || strings.Join(bound.GetHosts(), ",") != "api.pay.example.com") {
+				t.Errorf("unexpected bound project secret request: %#v", req.Msg)
+			}
 			return connect.NewResponse(&codewirev1.SetProjectSecretResponse{}), nil
 		},
 		deleteProjectSecret: func(_ context.Context, req *connect.Request[codewirev1.DeleteProjectSecretRequest]) (*connect.Response[codewirev1.DeleteProjectSecretResponse], error) {
@@ -1429,6 +1498,13 @@ func TestSecretProjects(t *testing.T) {
 		t.Errorf("expected 1 secret, got %d", len(secrets))
 	}
 
+	if err := client.SecretProjects.SetSecretWithBinding(ctx, "proj_1", "API_KEY", "sk_123", codewire.SecretBindingChange{Binding: &codewire.SecretBinding{
+		Hosts:     []string{"api.pay.example.com"},
+		BasicUser: &codewire.SecretBasicUserPresentation{},
+		Preset:    "payments",
+	}}); err != nil {
+		t.Fatalf("set bound project secret: %v", err)
+	}
 	if err := client.SecretProjects.SetSecret(ctx, "proj_1", "API_KEY", "sk_123"); err != nil {
 		t.Fatalf("set secret: %v", err)
 	}

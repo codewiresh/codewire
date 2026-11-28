@@ -39,13 +39,23 @@ func (s *SecretService) List(ctx context.Context) ([]SecretMetadata, error) {
 	}
 }
 
-// Set creates or updates an organization-scoped secret.
+// Set creates or updates an organization-scoped secret, keeping its binding.
 func (s *SecretService) Set(ctx context.Context, key, value string) error {
+	return s.SetWithBinding(ctx, key, value, SecretBindingChange{})
+}
+
+// SetWithBinding creates or updates an organization-scoped secret, and binds
+// it to hosts or makes it plain.
+func (s *SecretService) SetWithBinding(ctx context.Context, key, value string, change SecretBindingChange) error {
 	orgID, err := s.client.resolveOrgID()
 	if err != nil {
 		return err
 	}
-	_, err = s.client.secrets.SetSecret(ctx, connect.NewRequest(&codewirev1.SetSecretRequest{OrgId: orgID, Key: key, Value: value}))
+	binding, plain, err := toProtoSecretBindingChange(change)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.secrets.SetSecret(ctx, connect.NewRequest(&codewirev1.SetSecretRequest{OrgId: orgID, Key: key, Value: value, Binding: binding, Plain: plain}))
 	return connectSDKError(err)
 }
 
@@ -81,9 +91,19 @@ func (s *SecretService) ListUser(ctx context.Context) ([]SecretMetadata, error) 
 	}
 }
 
-// SetUser creates or updates a user-scoped secret.
+// SetUser creates or updates a user-scoped secret, keeping its binding.
 func (s *SecretService) SetUser(ctx context.Context, key, value string) error {
-	_, err := s.client.secrets.SetUserSecret(ctx, connect.NewRequest(&codewirev1.SetUserSecretRequest{Key: key, Value: value}))
+	return s.SetUserWithBinding(ctx, key, value, SecretBindingChange{})
+}
+
+// SetUserWithBinding creates or updates a user-scoped secret, and binds it to
+// hosts or makes it plain.
+func (s *SecretService) SetUserWithBinding(ctx context.Context, key, value string, change SecretBindingChange) error {
+	binding, plain, err := toProtoSecretBindingChange(change)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.secrets.SetUserSecret(ctx, connect.NewRequest(&codewirev1.SetUserSecretRequest{Key: key, Value: value, Binding: binding, Plain: plain}))
 	return connectSDKError(err)
 }
 

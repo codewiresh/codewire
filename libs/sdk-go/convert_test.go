@@ -566,6 +566,29 @@ func TestFromProtoSecretMetadataGolden(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("converted secret metadata mismatch (-want +got):\nwant: %#v\n got: %#v", want, got)
 	}
+	bound, err := fromProtoSecretMetadata(&codewirev1.SecretMetadata{
+		Key: "API_TOKEN",
+		Binding: &codewirev1.SecretBinding{
+			Hosts:             []string{"api.example.com", "uploads.example.com"},
+			Presentation:      &codewirev1.SecretBinding_Header{Header: &codewirev1.SecretHeaderPresentation{Headers: []string{"X-Api-Key"}, Scheme: testStringPointer("none")}},
+			Prefix:            "sk_",
+			Preset:            "fancy",
+			BindingGeneration: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("convert bound secret metadata: %v", err)
+	}
+	wantBound := SecretMetadata{Key: "API_TOKEN", Binding: &SecretBinding{
+		Hosts:             []string{"api.example.com", "uploads.example.com"},
+		Header:            &SecretHeaderPresentation{Headers: []string{"X-Api-Key"}, Scheme: testStringPointer("none")},
+		Prefix:            "sk_",
+		Preset:            "fancy",
+		BindingGeneration: 3,
+	}}
+	if !reflect.DeepEqual(bound, wantBound) {
+		t.Errorf("converted bound secret metadata mismatch:\nwant: %#v\n got: %#v", wantBound, bound)
+	}
 }
 
 func TestFromProtoSecretProjectGolden(t *testing.T) {

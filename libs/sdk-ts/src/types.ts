@@ -370,7 +370,50 @@ export interface CreatePortRequest {
   port: number;
 }
 
+/**
+ * How a bound secret is presented on its hosts. `header` sends
+ * `<scheme> <value>` (`Authorization` and `Bearer` when omitted; scheme
+ * `none` sends the value alone), `basic` sends HTTP Basic with the value as
+ * the password (`x-access-token` as the user when omitted), and `basic_user`
+ * sends it as the user name with an empty password.
+ */
+export type SecretPresentation =
+  | { kind: "header"; headers?: string[]; scheme?: string }
+  | { kind: "basic"; username?: string }
+  | { kind: "basic_user" };
+
+/**
+ * The hosts a secret is sent to and how it is presented there. The
+ * environment holds a placeholder, and Codewire sends the value only on a
+ * request to one of these hosts.
+ */
+export interface SecretBinding {
+  /** 1 to 16 exact public DNS names, port 443 only. */
+  hosts: string[];
+  /** `header` when omitted. */
+  presentation?: SecretPresentation;
+  /** Put before the placeholder, for a client that checks a key's shape. */
+  prefix?: string;
+  /** The preset that filled the binding, for display. */
+  preset?: string;
+  /** Read only: moves with every change but to the hosts or the value. */
+  binding_generation?: number;
+}
+
+/**
+ * What a set does to a secret's binding. `binding` binds or rebinds it and
+ * `plain` removes every host; neither keeps the binding it has. A set may
+ * leave the value empty only to remove some hosts or change the prefix of a
+ * bound secret; every other change needs the value again.
+ */
+export interface SecretBindingChange {
+  binding?: SecretBinding;
+  plain?: boolean;
+}
+
 export interface SecretMetadata {
+  /** Absent for a plain secret. */
+  binding?: SecretBinding;
   created_at?: string;
   key: string;
   updated_at?: string;
@@ -407,18 +450,18 @@ export interface CreateSecretProjectRequest {
   name: string;
 }
 
-export interface SetSecretRequest {
+export interface SetSecretRequest extends SecretBindingChange {
   key: string;
   org_id: string;
   value: string;
 }
 
-export interface SetUserSecretRequest {
+export interface SetUserSecretRequest extends SecretBindingChange {
   key: string;
   value: string;
 }
 
-export interface SetProjectSecretRequest {
+export interface SetProjectSecretRequest extends SecretBindingChange {
   key: string;
   value: string;
 }
