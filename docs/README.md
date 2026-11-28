@@ -24,6 +24,10 @@ directory each.
 - [GLOSSARY.md](GLOSSARY.md): canonical terms.
 - [CONFIGURATION.md](CONFIGURATION.md): the registries and hosts a
   deployment configures, and which values are required.
+- [SELF-HOSTING.md](SELF-HOSTING.md): self-hosting the Codewire control plane
+  with Docker Compose on one Linux machine.
+- [SELF-HOSTING-EKS.md](SELF-HOSTING-EKS.md): self-hosting Codewire on Amazon
+  EKS with CloudFormation and Helm, written before the code (#6706).
 - [dev/SANDBOX-DAEMON.md](dev/SANDBOX-DAEMON.md): the in-environment daemon,
   its SSH server, tailnet peer and credential bridge.
 - [dev/DERP-STUN.md](dev/DERP-STUN.md): how `cw` reaches an environment

@@ -27,6 +27,7 @@ runs the same commands and holds the result to the same standard.
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [email.md](email.md) | Every email Codewire sends (#4553): one plain layout and a text part, from `Codewire <hello@codewire.sh>`, and which have been seen arriving |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |
+| [self-hosted-aws-eks.md](self-hosted-aws-eks.md) | Self-hosting Codewire on Amazon EKS (#6706): CloudFormation stack deploy, Helm bootstrap with Envoy Gateway and TLS, first admin, enrolled host lifecycle, failure/recovery, IMDS isolation, and clean teardown. Written first; every step is not yet observed |
 | [interruptions.md](interruptions.md) | Every way a running cloud Sandbox is restarted, stopped, cut off or disconnected (#6084): what the user sees for each, the journey that proves it, and the issue for each gap |
 | [node-reboot.md](node-reboot.md) | Production keeps serving through one node's drain or reboot, and a sandbox on that node says why it restarted (#3542, #4461, #3772) |
 | [billing-and-credits.md](billing-and-credits.md) | USD billing plans and compute credit (#3381, #6659): Pro, Max and Pay as you go plans, monthly compute allowances, cards, top-ups, receipts, costs and refusals |
