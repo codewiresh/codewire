@@ -15,6 +15,13 @@ use crate::{
     ANTIGRAVITY_HOSTS, CLAUDE_TOKEN_HOST, FRONT_DOOR_HOSTS, GEMINI_API_HOST, GITHUB_HOSTS,
 };
 
+/// Whether a secret may be bound to hosts at all. Off: nothing projects a
+/// bound secret's placeholder or swaps its value yet, and a bound secret is
+/// never projected raw, so binding one would only break it. While off, `cw
+/// secrets set` refuses every binding flag and the stores refuse a bind;
+/// plain secrets behave exactly as before. The change that ships projection
+/// and the front door's swap (#4003) turns it on.
+pub const HOST_BOUND_SECRETS: bool = false;
 /// The most hosts one binding names.
 pub const MAX_BOUND_HOSTS: usize = 16;
 /// The most bound-secret hosts one environment's selection binds, so that with
@@ -582,6 +589,17 @@ impl From<&HostBinding> for StoredBinding {
             preset: None,
         }
     }
+}
+
+/// What a write of a secret does to its binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindingWrite {
+    /// Leave it as it is: a new value never unbinds a secret.
+    Keep,
+    /// Bind the secret, or change its binding.
+    Bind(StoredBinding),
+    /// Remove every host.
+    Plain,
 }
 
 /// Whether changing a secret's binding from `before` to `after` needs its

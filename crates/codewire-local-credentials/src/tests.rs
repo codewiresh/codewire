@@ -3898,7 +3898,7 @@ fn the_credential_kinds_the_local_authority_stores_are_pinned_to_its_protocol() 
         admitted, expected,
         "bump the authority protocol with this set"
     );
-    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 36);
+    assert_eq!(crate::transport::AUTHORITY_PROTOCOL_VERSION, 37);
 }
 
 /// The store keeps one default profile as the cloud does (#4717): the first
@@ -4041,4 +4041,5 @@ mod delete_gate;
 mod rate_limit;
 mod refresh_commit;
 mod refresh_crash;
+mod secret_bindings;
 mod withheld_grants;

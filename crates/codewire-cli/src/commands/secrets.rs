@@ -19,11 +19,21 @@ use codewire_workload_secrets::{
 use std::io::{BufRead as _, Read as _};
 use zeroize::Zeroizing;
 
+mod args;
+pub(crate) use args::*;
+mod binding;
+pub(crate) use binding::SecretBindingArgs;
 mod missing;
+mod outcome;
+mod platform;
+mod set;
 pub(crate) use missing::{
     KeyChange, SecretScope, ambiguous_project, cloud_deleted, cloud_project_created, cloud_renamed,
     no_such_project,
 };
+pub(crate) use platform::{handle_platform_secrets_command, load_secret_project_by_name};
+#[cfg(test)]
+mod gate_tests;
 #[cfg(test)]
 mod project_name_tests;
 
@@ -57,8 +67,38 @@ pub(crate) struct SecretPreviewIntent {
 
 pub(crate) async fn handle_secrets_command(
     globals: &Globals,
-    mut args: SecretsArgs,
+    args: SecretsArgs,
 ) -> anyhow::Result<()> {
+    handle_secrets_command_with(globals, args, codewire_access::HOST_BOUND_SECRETS).await
+}
+
+/// `host_bound` is [`codewire_access::HOST_BOUND_SECRETS`]: while it is
+/// off, every binding flag and `presets` are refused before anything is
+/// asked or sent.
+pub(crate) async fn handle_secrets_command_with(
+    globals: &Globals,
+    mut args: SecretsArgs,
+    host_bound: bool,
+) -> anyhow::Result<()> {
+    match &mut args.command {
+        SecretsCommand::Presets(presets) => {
+            if !host_bound {
+                return Err(binding::host_bound_unavailable());
+            }
+            anyhow::ensure!(
+                args.project.is_none() && !args.user && !args.organization,
+                "presets are the same for every scope; scope flags do not apply"
+            );
+            return print_presets(presets.output);
+        }
+        SecretsCommand::Set(set) => {
+            if set.binding.any() && !host_bound {
+                return Err(binding::host_bound_unavailable());
+            }
+            set.host_bound = host_bound;
+        }
+        _ => {}
+    }
     let local = globals.placement == Some(EnvironmentPlacement::Local);
     let platform = globals.placement == Some(EnvironmentPlacement::Platform);
     let addition = matches!(
@@ -79,8 +119,12 @@ pub(crate) async fn handle_secrets_command(
             _ => false,
         };
         if missing {
+            let output = match &args.command {
+                SecretsCommand::Set(set) => set.output,
+                _ => OutputFormat::Text,
+            };
             super::guided::require_available(
-                OutputFormat::Text,
+                output,
                 "supply KEY and one of --project NAME, --user, --organization; project creation needs NAME",
             )?;
         }
@@ -293,6 +337,9 @@ fn resolve_secret_operation(args: SecretsArgs) -> anyhow::Result<SecretOperation
             );
             return Ok(SecretOperation::Projects(command));
         }
+        SecretsCommand::Presets(_) => {
+            anyhow::bail!("presets are the same for every store and scope")
+        }
         SecretsCommand::List(args) => ScopedSecretCommand::List(args),
         SecretsCommand::Set(args) => ScopedSecretCommand::Set(args),
         SecretsCommand::Delete(args) => ScopedSecretCommand::Delete(args),
@@ -315,17 +362,19 @@ fn resolve_secret_operation(args: SecretsArgs) -> anyhow::Result<SecretOperation
 }
 
 fn secret_operation_json(operation: &SecretOperation) -> bool {
-    match operation {
-        SecretOperation::Preview(args) => args.output == OutputFormat::Json,
-        SecretOperation::Projects(SecretProjectCommand::List(args))
-        | SecretOperation::User(ScopedSecretCommand::List(args))
-        | SecretOperation::Organization(ScopedSecretCommand::List(args))
-        | SecretOperation::Project {
-            command: ScopedSecretCommand::List(args),
-            ..
-        } => args.output == OutputFormat::Json,
-        _ => false,
-    }
+    let output = match operation {
+        SecretOperation::Preview(args) => args.output,
+        SecretOperation::Projects(SecretProjectCommand::List(args)) => args.output,
+        SecretOperation::User(command)
+        | SecretOperation::Organization(command)
+        | SecretOperation::Project { command, .. } => match command {
+            ScopedSecretCommand::List(args) => args.output,
+            ScopedSecretCommand::Set(args) => args.output,
+            _ => OutputFormat::Text,
+        },
+        _ => OutputFormat::Text,
+    };
+    output == OutputFormat::Json
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -477,31 +526,10 @@ async fn local_user_command(
                 .list_user_workload_secrets()
                 .await
                 .context("list local user secrets")?;
-            print_local_secret_metadata(&secrets, "No local user secrets found.", args.output)
+            print_local_secret_metadata(&secrets, "No local user secrets found.", &args)
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(
-                args.key.as_deref().context("secret key is required")?,
-                "secret key",
-            )?
-            .to_owned();
-            if args.guided
-                && client
-                    .list_user_workload_secrets()
-                    .await?
-                    .iter()
-                    .any(|existing| existing.key == key)
-                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
-            {
-                return Ok(());
-            }
-            let value = prompt_workload_secret_value()?;
-            client
-                .set_user_workload_secret(key.clone(), value)
-                .await
-                .context("set local user secret")?;
-            eprintln!("Local user secret {key} set.");
-            Ok(())
+            set::set_key(&mut set::LocalKeys::user(client), &args).await
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
@@ -590,6 +618,7 @@ async fn local_project_key_command(
         && args.new_project
     {
         let key = args.key.as_deref().context("secret key is required")?;
+        refuse_binding_in_new_project(args, StoragePlacement::Local, project_name)?;
         let value = prompt_workload_secret_value()?;
         let project = client
             .create_secret_project(project_name.to_owned())
@@ -609,32 +638,15 @@ async fn local_project_key_command(
             print_local_secret_metadata(
                 &secrets,
                 &format!("No local secrets in project {:?}.", project.name),
-                args.output,
+                &args,
             )
         }
         ScopedSecretCommand::Set(args) => {
-            let key = trimmed_required(
-                args.key.as_deref().context("secret key is required")?,
-                "secret key",
-            )?
-            .to_owned();
-            if args.guided
-                && client
-                    .list_project_workload_secrets(project.id)
-                    .await?
-                    .iter()
-                    .any(|existing| existing.key == key)
-                && !super::guided::confirm(&format!("Replace the existing value for {key}?"))?
-            {
-                return Ok(());
-            }
-            let value = prompt_workload_secret_value()?;
-            client
-                .set_project_workload_secret(project.id, key.clone(), value)
-                .await
-                .context("set local project secret")?;
-            eprintln!("Local secret {key} set in project {:?}.", project.name);
-            Ok(())
+            set::set_key(
+                &mut set::LocalKeys::project(client, project.id, &project.name),
+                &args,
+            )
+            .await
         }
         ScopedSecretCommand::Delete(args) => {
             let key = trimmed_required(&args.key, "secret key")?.to_owned();
@@ -744,17 +756,83 @@ fn resolve_local_project<'a>(
 fn print_local_secret_metadata(
     secrets: &[WorkloadSecretMetadata],
     empty: &str,
-    output: OutputFormat,
+    args: &SecretKeyListArgs,
 ) -> anyhow::Result<()> {
-    let secrets = secrets
-        .iter()
-        .map(|secret| SecretMetadata {
-            key: secret.key.clone(),
-            created_at: format_unix_millis(secret.created_at_unix_ms),
-            updated_at: format_unix_millis(secret.updated_at_unix_ms),
-        })
-        .collect::<Vec<_>>();
-    print_secret_metadata_list(&secrets, empty, output)
+    let secrets = secrets.iter().map(local_metadata).collect::<Vec<_>>();
+    print_key_list(&secrets, empty, args)
+}
+
+/// A local key's row, as the cloud's rows are shown.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_metadata(secret: &WorkloadSecretMetadata) -> SecretMetadata {
+    SecretMetadata {
+        key: secret.key.clone(),
+        created_at: format_unix_millis(secret.created_at_unix_ms),
+        updated_at: format_unix_millis(secret.updated_at_unix_ms),
+        binding: secret.binding.as_ref().map(|binding| {
+            crate::secret_client::SecretBindingView::new(binding, secret.binding_generation)
+        }),
+    }
+}
+
+/// A key list in either store: its rows as JSON, or KEY, DELIVERY and
+/// UPDATED (#4003), and a sentence when it is empty.
+pub(crate) fn print_key_list(
+    secrets: &[SecretMetadata],
+    empty: &str,
+    args: &SecretKeyListArgs,
+) -> anyhow::Result<()> {
+    match args.output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(secrets)?),
+        OutputFormat::Text if secrets.is_empty() => println!("{empty}"),
+        OutputFormat::Text => {
+            let caps = crate::output::Capabilities::from_process(crate::output::OutputMode::Text);
+            print!(
+                "{}",
+                outcome::key_list(
+                    secrets,
+                    args.verbose,
+                    chrono::Utc::now(),
+                    caps.stdout_style()
+                )
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `cw secrets presets`: the table `--preset` reads.
+fn print_presets(output: OutputFormat) -> anyhow::Result<()> {
+    let presets = &codewire_access::BINDING_PRESETS;
+    match output {
+        OutputFormat::Json => {
+            let rows: Vec<outcome::PresetRow> = presets.iter().map(Into::into).collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+        }
+        OutputFormat::Text => print!("{}", outcome::preset_list(presets)),
+    }
+    Ok(())
+}
+
+/// A secret project made in the guided set takes no binding flags: the
+/// project is made first, and a binding needs the key's value.
+fn refuse_binding_in_new_project(
+    args: &ScopedSecretKeyArgs,
+    placement: StoragePlacement,
+    project: &str,
+) -> anyhow::Result<()> {
+    if args.binding.any() {
+        let word = if placement == StoragePlacement::Local {
+            "local"
+        } else {
+            "cloud"
+        };
+        return Err(crate::error_report::with_next_step(
+            anyhow::anyhow!("a new secret project takes its first key without hosts"),
+            format!("cw secrets --{word} projects create {project}"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1164,10 +1242,13 @@ mod tests {
             key: "DATABASE_URL".to_owned(),
             created_at: "2026-09-03T00:00:00Z".to_owned(),
             updated_at: "2026-09-03T00:00:01Z".to_owned(),
+            binding: None,
         };
         let json = serde_json::to_value(metadata).unwrap();
         assert_eq!(json["key"], "DATABASE_URL");
-        assert_eq!(json.as_object().unwrap().len(), 3);
+        // A plain key's binding is null (#4003).
+        assert_eq!(json["binding"], serde_json::Value::Null);
+        assert_eq!(json.as_object().unwrap().len(), 4);
         assert!(json.get("value").is_none());
     }
 

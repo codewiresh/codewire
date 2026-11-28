@@ -1,6 +1,6 @@
 //! What the authority answers, as an RPC status, for each of its errors.
 
-use codewire_access::AccessError;
+use codewire_access::{AccessError, BindingError};
 use tonic::Status;
 use tonic::metadata::MetadataValue;
 
@@ -134,6 +134,21 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::InvalidWorkloadSecret => {
             Status::invalid_argument("invalid local workload-secret request")
         }
+        LocalCredentialError::HostBoundSecretsUnavailable => StoreRefusal::HostBoundSecretsUnavailable
+            .attach(Status::failed_precondition(error.to_string())),
+        LocalCredentialError::SecretValueRequired(_) => {
+            StoreRefusal::SecretValueRequired.attach(Status::invalid_argument(error.to_string()))
+        }
+        LocalCredentialError::BoundSecretRename => {
+            StoreRefusal::SecretBoundRename.attach(Status::failed_precondition(error.to_string()))
+        }
+        // A local store has no deployment, so it reserves no name of its own
+        // and never refuses `bound_host_reserved`.
+        LocalCredentialError::SecretBinding(binding) => match binding {
+            BindingError::ProviderHost(_) => StoreRefusal::BoundHostProvider,
+            _ => StoreRefusal::SecretBindingInvalid,
+        }
+        .attach(Status::invalid_argument(binding.to_string())),
         LocalCredentialError::InvalidDatabasePath | LocalCredentialError::InvalidTime => {
             Status::internal("local credential authority state is invalid")
         }

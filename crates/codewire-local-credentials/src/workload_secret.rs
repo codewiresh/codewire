@@ -5,13 +5,21 @@
 //! entries; public records and resolution previews never contain values or
 //! protected-store references.
 
+mod binding;
 #[cfg(test)]
 mod held_store_tests;
 mod projection;
+mod schema;
+pub use binding::BindingWrite;
+use binding::WrittenBinding;
 pub use projection::LocalLaunchSecretSelection;
+pub(crate) use schema::{
+    WORKLOAD_SECRETS_SCHEMA, has_secret_binding_columns, upgrade_secret_bindings_schema,
+};
 
 use std::collections::BTreeSet;
 
+use codewire_access::StoredBinding;
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
 };
@@ -36,6 +44,10 @@ pub struct WorkloadSecretMetadata {
     /// A retired protected-store generation still needs exact deletion. The
     /// active value is already committed and remains usable while this is true.
     pub protected_store_cleanup_pending: bool,
+    /// The hosts it is sent to and how; `None` for a plain secret (#4003).
+    pub binding: Option<StoredBinding>,
+    /// Moves with every change to the binding but to its hosts.
+    pub binding_generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,9 +99,12 @@ impl SecretScope<'_> {
 struct InternalWorkloadSecret {
     id: Uuid,
     metadata: WorkloadSecretMetadata,
+    /// The value's version: it moves with every new value.
     material_generation: u64,
     protected_entry_id: ProtectedEntryId,
     material_state: MaterialState,
+    /// Made at the first bind and kept until the secret is deleted.
+    binding_id: Option<Uuid>,
 }
 
 struct WorkloadSecretJournal {
@@ -168,14 +183,13 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         })
     }
 
+    /// Set a new value, keeping the secret's binding.
     pub fn set_user_workload_secret(
         &self,
         key: &str,
         value: ProtectedValue,
     ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
-        validate_secret_key(key)?;
-        validate_secret_value(value.expose_secret())?;
-        self.with_secret_material(|material| set_secret(material, SecretScope::User, key, value))
+        self.write_user_workload_secret(key, Some(value), BindingWrite::Keep, false)
     }
 
     pub fn delete_user_workload_secret(&self, key: &str) -> Result<(), LocalCredentialError> {
@@ -209,18 +223,14 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         })
     }
 
+    /// Set a new value, keeping the secret's binding.
     pub fn set_project_workload_secret(
         &self,
         project_id: Uuid,
         key: &str,
         value: ProtectedValue,
     ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
-        validate_secret_key(key)?;
-        validate_secret_value(value.expose_secret())?;
-        self.with_secret_material(|material| {
-            require_project(material.connection(), &project_id)?;
-            set_secret(material, SecretScope::Project(&project_id), key, value)
-        })
+        self.write_project_workload_secret(project_id, key, Some(value), BindingWrite::Keep, false)
     }
 
     pub fn delete_project_workload_secret(
@@ -360,11 +370,14 @@ fn reconcile_secret_ids<S: ProtectedStore>(
     Ok(())
 }
 
+/// Store a new value for `key`, with the binding columns `binding`, and
+/// retire the previous value's protected-store entry.
 fn set_secret<S: ProtectedStore>(
     material: &MaterialStore<'_, S>,
     scope: SecretScope<'_>,
     key: &str,
     value: ProtectedValue,
+    binding: &WrittenBinding,
 ) -> Result<WorkloadSecretMetadata, LocalCredentialError> {
     let connection = material.connection();
     validate_secret_key(key)?;
@@ -380,8 +393,9 @@ fn set_secret<S: ProtectedStore>(
                 .execute(
                     "INSERT INTO workload_secrets(
                        id, scope_kind, scope_id, project_id, key, material_generation,
-                       protected_entry_id, material_state, created_at_unix_ms, updated_at_unix_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'pending_write', ?7, ?7)",
+                       protected_entry_id, material_state, created_at_unix_ms, updated_at_unix_ms,
+                       binding, binding_id, binding_generation
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'pending_write', ?7, ?7, ?8, ?9, ?10)",
                     params![
                         id.to_string(),
                         scope.kind(),
@@ -390,6 +404,9 @@ fn set_secret<S: ProtectedStore>(
                         key,
                         entry.expose_reference(),
                         to_i64(now)?,
+                        binding.json()?,
+                        binding.id(),
+                        to_i64(binding.generation)?,
                     ],
                 )
                 .map_err(map_insert_error)?;
@@ -439,9 +456,10 @@ fn set_secret<S: ProtectedStore>(
             let changed = transaction
                 .execute(
                     "UPDATE workload_secrets
-                     SET material_generation = ?2, protected_entry_id = ?3, updated_at_unix_ms = ?4
+                     SET material_generation = ?2, protected_entry_id = ?3, updated_at_unix_ms = ?4,
+                         binding = ?7, binding_id = ?8, binding_generation = ?9
                      WHERE id = ?1 AND material_generation = ?5 AND protected_entry_id = ?6
-                       AND material_state = 'ready'",
+                       AND material_state = 'ready' AND binding_generation = ?10",
                     params![
                         current.id.to_string(),
                         to_i64(next_generation)?,
@@ -449,6 +467,10 @@ fn set_secret<S: ProtectedStore>(
                         to_i64(unix_millis()?)?,
                         to_i64(current.material_generation)?,
                         current.protected_entry_id.expose_reference(),
+                        binding.json()?,
+                        binding.id(),
+                        to_i64(binding.generation)?,
+                        to_i64(current.metadata.binding_generation)?,
                     ],
                 )
                 .map_err(database_error)?;
@@ -536,10 +558,15 @@ fn rename_secret(
     let current = load_secret_by_key(connection, scope, key)?
         .filter(|current| current.material_state == MaterialState::Ready)
         .ok_or(LocalCredentialError::WorkloadSecretNotFound)?;
+    if current.metadata.binding.is_some() {
+        return Err(LocalCredentialError::BoundSecretRename);
+    }
+    // A bind that commits between the check and the update leaves the row
+    // unchanged, and the rename reads as not found.
     let changed = connection
         .execute(
             "UPDATE workload_secrets SET key = ?2, updated_at_unix_ms = ?3
-             WHERE id = ?1 AND material_state = 'ready'",
+             WHERE id = ?1 AND material_state = 'ready' AND binding IS NULL",
             params![current.id.to_string(), new_key, to_i64(unix_millis()?)?],
         )
         .map_err(map_insert_error)?;
@@ -758,27 +785,36 @@ fn load_secret_by_id(
     let row = connection
         .query_row(
             "SELECT key, material_generation, protected_entry_id, material_state,
-                    created_at_unix_ms, updated_at_unix_ms
+                    created_at_unix_ms, updated_at_unix_ms, binding, binding_id, binding_generation
              FROM workload_secrets WHERE id = ?1",
             [id.to_string()],
             |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
+                Ok(SecretRow {
+                    key: row.get(0)?,
+                    material_generation: row.get(1)?,
+                    protected_entry_id: row.get(2)?,
+                    material_state: row.get(3)?,
+                    created_at_unix_ms: row.get(4)?,
+                    updated_at_unix_ms: row.get(5)?,
+                    binding: row.get(6)?,
+                    binding_id: row.get(7)?,
+                    binding_generation: row.get(8)?,
+                })
             },
         )
         .optional()
         .map_err(database_error)?
         .ok_or(LocalCredentialError::WorkloadSecretNotFound)?;
-    validate_secret_key(&row.0)?;
-    let generation = from_i64(row.1)?;
-    let entry = ProtectedEntryId::parse(row.2)?;
-    let material_state = MaterialState::parse(&row.3)?;
+    validate_secret_key(&row.key)?;
+    let generation = from_i64(row.material_generation)?;
+    let entry = ProtectedEntryId::parse(row.protected_entry_id)?;
+    let material_state = MaterialState::parse(&row.material_state)?;
+    let binding = row
+        .binding
+        .map(|json| serde_json::from_str::<StoredBinding>(&json))
+        .transpose()
+        .map_err(|_| LocalCredentialError::CorruptMetadata)?;
+    let binding_id = row.binding_id.as_deref().map(parse_uuid).transpose()?;
     if entry != secret_entry_id(id, generation)? {
         return Err(LocalCredentialError::CorruptMetadata);
     }
@@ -795,15 +831,31 @@ fn load_secret_by_id(
     Ok(InternalWorkloadSecret {
         id,
         metadata: WorkloadSecretMetadata {
-            key: row.0,
-            created_at_unix_ms: from_i64(row.4)?,
-            updated_at_unix_ms: from_i64(row.5)?,
+            key: row.key,
+            created_at_unix_ms: from_i64(row.created_at_unix_ms)?,
+            updated_at_unix_ms: from_i64(row.updated_at_unix_ms)?,
             protected_store_cleanup_pending,
+            binding,
+            binding_generation: from_i64(row.binding_generation)?,
         },
         material_generation: generation,
         protected_entry_id: entry,
         material_state,
+        binding_id,
     })
+}
+
+/// One `workload_secrets` row as stored, before it is checked.
+struct SecretRow {
+    key: String,
+    material_generation: i64,
+    protected_entry_id: String,
+    material_state: String,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    binding: Option<String>,
+    binding_id: Option<String>,
+    binding_generation: i64,
 }
 
 fn insert_journal(

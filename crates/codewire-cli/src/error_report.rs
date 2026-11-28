@@ -182,7 +182,16 @@ pub(crate) fn render(error: &anyhow::Error, style: Style) -> String {
     text
 }
 
+/// The sentence with its first letter capitalised, unless its first word
+/// names a host or a file (`api.example.com is …`), which keeps its case.
 fn capitalised(text: &str) -> String {
+    if text
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| word.contains('.'))
+    {
+        return text.to_owned();
+    }
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -287,6 +296,21 @@ mod tests {
         assert_eq!(
             render(&anyhow::anyhow!("connection refused"), PLAIN),
             "✗ Connection refused\n"
+        );
+    }
+
+    #[test]
+    fn a_sentence_that_starts_with_a_host_keeps_its_case() {
+        assert_eq!(
+            render(
+                &anyhow::anyhow!("api.anthropic.com is a provider host Codewire connects for you"),
+                PLAIN
+            ),
+            "✗ api.anthropic.com is a provider host Codewire connects for you\n"
+        );
+        assert_eq!(
+            render(&anyhow::anyhow!("no preset named strpe"), PLAIN),
+            "✗ No preset named strpe\n"
         );
     }
 

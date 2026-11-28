@@ -34,6 +34,7 @@ pub use audit::EnvironmentLeaseAudit;
 pub use grants::EnvironmentGrants;
 use metadata::{persistence_from_proto, status_from_proto};
 
+use crate::BindingWrite;
 use crate::control::v1::local_credential_authority_service_client::LocalCredentialAuthorityServiceClient;
 use crate::control::v1::{self, CredentialAuthenticationKind};
 use crate::repository::{MAX_GIT_BUNDLE_BYTES, valid_git_selector};
@@ -558,20 +559,14 @@ impl LocalCredentialClient {
         )
     }
 
+    /// Set a new value, keeping the secret's binding.
     pub async fn set_user_workload_secret(
         &mut self,
         key: String,
         value: ProtectedValue,
     ) -> Result<WorkloadSecretMetadata, Status> {
-        workload_secret_from_proto(
-            self.inner
-                .set_user_workload_secret(v1::SetUserWorkloadSecretRequest {
-                    key,
-                    value: value.expose_secret().to_vec(),
-                })
-                .await?
-                .into_inner(),
-        )
+        self.write_user_workload_secret(key, Some(value), &BindingWrite::Keep)
+            .await
     }
 
     pub async fn delete_user_workload_secret(&mut self, key: String) -> Result<(), Status> {
@@ -608,22 +603,15 @@ impl LocalCredentialClient {
         )
     }
 
+    /// Set a new value, keeping the secret's binding.
     pub async fn set_project_workload_secret(
         &mut self,
         project_id: Uuid,
         key: String,
         value: ProtectedValue,
     ) -> Result<WorkloadSecretMetadata, Status> {
-        workload_secret_from_proto(
-            self.inner
-                .set_project_workload_secret(v1::SetProjectWorkloadSecretRequest {
-                    project_id: project_id.to_string(),
-                    key,
-                    value: value.expose_secret().to_vec(),
-                })
-                .await?
-                .into_inner(),
-        )
+        self.write_project_workload_secret(project_id, key, Some(value), &BindingWrite::Keep)
+            .await
     }
 
     pub async fn delete_project_workload_secret(
@@ -1603,6 +1591,7 @@ mod tests {
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
             protected_store_cleanup_pending: true,
+            ..Default::default()
         })
         .expect("valid workload-secret metadata");
         assert!(decoded.protected_store_cleanup_pending);
@@ -1612,6 +1601,7 @@ mod tests {
                 created_at_unix_ms: 1,
                 updated_at_unix_ms: 1,
                 protected_store_cleanup_pending: false,
+                ..Default::default()
             })
             .unwrap_err()
             .code(),

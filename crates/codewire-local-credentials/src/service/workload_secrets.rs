@@ -1,14 +1,86 @@
-//! Workload secret metadata to and from the wire.
+//! Workload secret metadata to and from the wire, and a secret's write with
+//! its binding.
 
 use std::collections::BTreeSet;
+use std::mem;
+use std::sync::Arc;
 
-use tonic::Status;
+use codewire_access::{HOST_BOUND_SECRETS, StoredBinding};
+use codewire_protected_store::{ProtectedStore, ProtectedValue};
+use tonic::{Response, Status};
+use uuid::Uuid;
 
+use super::run_blocking;
 use crate::control::v1;
 use crate::{
-    LocalSecretProject, ResolvedWorkloadSecretMetadata, WorkloadSecretMetadata,
-    WorkloadSecretSelection, WorkloadSecretSource,
+    BindingWrite, LocalCredentialAuthority, LocalSecretProject, ResolvedWorkloadSecretMetadata,
+    WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
 };
+
+/// A write's value and binding, taken out of its request so the request's
+/// own buffer is zeroized when it drops. An empty value is none: only a
+/// change to a bound secret that needs no value is accepted without one.
+fn write_parts(
+    value: &mut Vec<u8>,
+    binding: Option<String>,
+    plain: bool,
+) -> Result<(Option<ProtectedValue>, BindingWrite), Status> {
+    let binding = match (binding, plain) {
+        (Some(_), true) => {
+            return Err(Status::invalid_argument(
+                "a write binds a secret to hosts or makes it plain, not both",
+            ));
+        }
+        (Some(json), false) => BindingWrite::Bind(
+            serde_json::from_str::<StoredBinding>(&json)
+                .map_err(|_| Status::invalid_argument("invalid secret binding"))?,
+        ),
+        (None, true) => BindingWrite::Plain,
+        (None, false) => BindingWrite::Keep,
+    };
+    let value = if value.is_empty() {
+        None
+    } else {
+        Some(
+            ProtectedValue::new(mem::take(value))
+                .map_err(|_| Status::invalid_argument("invalid workload-secret value"))?,
+        )
+    };
+    Ok((value, binding))
+}
+
+pub(super) async fn set_user<S: ProtectedStore + 'static>(
+    authority: Arc<LocalCredentialAuthority<S>>,
+    mut request: v1::SetUserWorkloadSecretRequest,
+) -> Result<Response<v1::WorkloadSecretMetadata>, Status> {
+    let key = mem::take(&mut request.key);
+    let (value, binding) = write_parts(&mut request.value, request.binding.take(), request.plain)?;
+    let secret = run_blocking(move || {
+        authority.write_user_workload_secret(&key, value, binding, HOST_BOUND_SECRETS)
+    })
+    .await?;
+    Ok(Response::new(workload_secret_to_proto(secret)?))
+}
+
+pub(super) async fn set_project<S: ProtectedStore + 'static>(
+    authority: Arc<LocalCredentialAuthority<S>>,
+    project_id: Uuid,
+    request: &mut v1::SetProjectWorkloadSecretRequest,
+) -> Result<Response<v1::WorkloadSecretMetadata>, Status> {
+    let key = mem::take(&mut request.key);
+    let (value, binding) = write_parts(&mut request.value, request.binding.take(), request.plain)?;
+    let secret = run_blocking(move || {
+        authority.write_project_workload_secret(
+            project_id,
+            &key,
+            value,
+            binding,
+            HOST_BOUND_SECRETS,
+        )
+    })
+    .await?;
+    Ok(Response::new(workload_secret_to_proto(secret)?))
+}
 
 pub(super) fn secret_project_to_proto(project: LocalSecretProject) -> v1::LocalSecretProject {
     v1::LocalSecretProject {
@@ -22,13 +94,21 @@ pub(super) fn secret_project_to_proto(project: LocalSecretProject) -> v1::LocalS
 
 pub(super) fn workload_secret_to_proto(
     secret: WorkloadSecretMetadata,
-) -> v1::WorkloadSecretMetadata {
-    v1::WorkloadSecretMetadata {
+) -> Result<v1::WorkloadSecretMetadata, Status> {
+    let binding = secret
+        .binding
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| Status::internal("local workload-secret binding is invalid"))?;
+    Ok(v1::WorkloadSecretMetadata {
         key: secret.key,
         created_at_unix_ms: secret.created_at_unix_ms,
         updated_at_unix_ms: secret.updated_at_unix_ms,
         protected_store_cleanup_pending: secret.protected_store_cleanup_pending,
-    }
+        binding,
+        binding_generation: secret.binding_generation,
+    })
 }
 
 fn workload_secret_source_to_proto(source: WorkloadSecretSource) -> v1::WorkloadSecretSource {

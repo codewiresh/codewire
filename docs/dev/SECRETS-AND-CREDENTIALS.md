@@ -3059,6 +3059,50 @@ configures is bound like any secret, and named by its variable in the MCP
 configuration (`${FANCY_TOKEN}`); Codewire doesn't write MCP configuration
 in this slice.
 
+**The CLI.** Until host-bound delivery ships (projection and the swap
+above), `codewire_access::HOST_BOUND_SECRETS` is off: every binding flag
+below, and `cw secrets presets`, is refused before anything is asked or
+sent, with `✗ Sending a secret only to its hosts isn't available yet`, and
+the flags stay out of `--help`. Both stores refuse a bind the same way, so
+plain secrets behave exactly as before. `cw secrets … set KEY` takes
+`--host HOST` (repeatable, adds a host), `--remove-host HOST` (repeatable),
+`--header NAME` (at most two), `--scheme WORD` (`none` for the value
+alone), `--prefix TEXT` (`''` clears it), `--basic [--username NAME]`,
+`--basic-user`, `--preset NAME` and `--plain`, for `--local` and `--cloud`
+and every scope. `--remove-host` and `--prefix` send the whole new binding
+with no value and read no stdin; every other change needs the value, from
+a hidden prompt that says why (`Paste the value of FANCY_TOKEN again
+(adding a host sends it somewhere new)`), or from stdin, and with neither
+fails at once (`✗ Adding a host to FANCY_TOKEN needs its value again`, `→
+pass the value on stdin: … < FILE`). Binding a project secret prints:
+
+```text
+✓ Secret FANCY_TOKEN set in project myapp · sent only to api.fancy.com
+  Sent as   Authorization: Bearer <value>
+  Inside    a placeholder, ft_cwp1_…; the value never enters an environment
+  ! In a cloud Sandbox, requests to api.fancy.com without this secret are refused.
+→ Environments already running get api.fancy.com when they start again: cw restart ENV
+```
+
+A new value for a bound key prints its first line and `Running
+environments use the new value from their next request.`; removing a host,
+`✓ FANCY_TOKEN is no longer sent to api.old.example · still sent to
+api.fancy.com` and `Running environments stopped sending it there.`;
+`--plain`, `✓ Secret FANCY_TOKEN set in project myapp · plain`, `! Every
+process in an environment can read a plain secret.` and `→ Environments
+already running keep the placeholder until they start again: cw restart
+ENV`. A set with no binding flags of a plain key prints the line it always
+has. The `→` lines name `cw restart ENV`, not the running environments
+themselves, until the CLI can read which ones select the key's source.
+`list` shows KEY, DELIVERY (`plain`, or the first host with `+N`, `·
+Basic`, `· Basic user`, `· HEADER` or `· preset NAME`) and UPDATED; `-v`
+adds HEADER, SCHEME, PREFIX, CREATED and every host. `list --output json`
+gives each row a `binding`, `null` for a plain key, and `set --output json`
+prints that row with `value_changed` and `running_environments` (`null`
+until the CLI can count them). The local store keeps the binding in
+`workload_secrets` (schema 8; a key's value version is its
+`material_generation`), served from authority protocol 37.
+
 **Audit and logs.** Each swap writes one closed line: the environment, the
 key, its scope, the host, the presentation and the outcome, and the user it
 acts for. Never a value, a placeholder, a path or a header value. A

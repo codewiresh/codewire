@@ -221,6 +221,8 @@ mod tests {
         let mut request = v1::SetUserWorkloadSecretRequest {
             key: "API_TOKEN".to_owned(),
             value: b"user-workload-secret".to_vec(),
+            binding: None,
+            plain: false,
         };
         let capacity = request.value.capacity();
 
@@ -238,6 +240,8 @@ mod tests {
             project_id: "0195f818-1fb2-7fc2-9157-a31895670cc8".to_owned(),
             key: "DATABASE_PASSWORD".to_owned(),
             value: b"project-workload-secret".to_vec(),
+            binding: None,
+            plain: false,
         };
         let capacity = request.value.capacity();
 

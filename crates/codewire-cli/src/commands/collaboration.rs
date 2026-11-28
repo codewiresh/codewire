@@ -747,21 +747,6 @@ pub(crate) fn print_secret_project_list(
     Ok(())
 }
 
-pub(crate) fn print_secret_metadata_list(
-    secrets: &[SecretMetadata],
-    empty_message: &str,
-    output: OutputFormat,
-) -> anyhow::Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(secrets)?),
-        OutputFormat::Text => print!(
-            "{}",
-            format_secret_metadata_list_text(secrets, empty_message)
-        ),
-    }
-    Ok(())
-}
-
 pub(crate) fn format_secret_project_list_text(projects: &[SecretProject]) -> String {
     if projects.is_empty() {
         return "No secret projects found.\n".to_string();
@@ -772,24 +757,6 @@ pub(crate) fn format_secret_project_list_text(projects: &[SecretProject]) -> Str
         output.push_str(&format!(
             "{:<24} {:<8} {}\n",
             project.name, project.secret_count, project.created_at
-        ));
-    }
-    output
-}
-
-pub(crate) fn format_secret_metadata_list_text(
-    secrets: &[SecretMetadata],
-    empty_message: &str,
-) -> String {
-    if secrets.is_empty() {
-        return format!("{empty_message}\n");
-    }
-
-    let mut output = format!("{:<32} {:<24} UPDATED\n", "KEY", "CREATED");
-    for secret in secrets {
-        output.push_str(&format!(
-            "{:<32} {:<24} {}\n",
-            secret.key, secret.created_at, secret.updated_at
         ));
     }
     output

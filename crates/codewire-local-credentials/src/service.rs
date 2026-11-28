@@ -1293,7 +1293,10 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         let authority = Arc::clone(&self.authority);
         let secrets = run_blocking(move || authority.list_user_workload_secrets()).await?;
         Ok(Response::new(v1::ListWorkloadSecretsResponse {
-            secrets: secrets.into_iter().map(workload_secret_to_proto).collect(),
+            secrets: secrets
+                .into_iter()
+                .map(workload_secret_to_proto)
+                .collect::<Result<_, _>>()?,
         }))
     }
 
@@ -1301,13 +1304,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         &self,
         request: Request<v1::SetUserWorkloadSecretRequest>,
     ) -> Result<Response<v1::WorkloadSecretMetadata>, Status> {
-        let mut request = request.into_inner();
-        let key = mem::take(&mut request.key);
-        let value = ProtectedValue::new(mem::take(&mut request.value))
-            .map_err(|_| Status::invalid_argument("invalid workload-secret value"))?;
-        let authority = Arc::clone(&self.authority);
-        let secret = run_blocking(move || authority.set_user_workload_secret(&key, value)).await?;
-        Ok(Response::new(workload_secret_to_proto(secret)))
+        workload_secrets::set_user(Arc::clone(&self.authority), request.into_inner()).await
     }
 
     async fn delete_user_workload_secret(
@@ -1330,7 +1327,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             authority.rename_user_workload_secret(&request.key, &request.new_key)
         })
         .await?;
-        Ok(Response::new(workload_secret_to_proto(secret)))
+        Ok(Response::new(workload_secret_to_proto(secret)?))
     }
 
     async fn list_project_workload_secrets(
@@ -1342,7 +1339,10 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         let secrets =
             run_blocking(move || authority.list_project_workload_secrets(project_id)).await?;
         Ok(Response::new(v1::ListWorkloadSecretsResponse {
-            secrets: secrets.into_iter().map(workload_secret_to_proto).collect(),
+            secrets: secrets
+                .into_iter()
+                .map(workload_secret_to_proto)
+                .collect::<Result<_, _>>()?,
         }))
     }
 
@@ -1352,14 +1352,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
     ) -> Result<Response<v1::WorkloadSecretMetadata>, Status> {
         let mut request = request.into_inner();
         let project_id = local_secret_project_id(&request.project_id)?;
-        let key = mem::take(&mut request.key);
-        let value = ProtectedValue::new(mem::take(&mut request.value))
-            .map_err(|_| Status::invalid_argument("invalid workload-secret value"))?;
-        let authority = Arc::clone(&self.authority);
-        let secret =
-            run_blocking(move || authority.set_project_workload_secret(project_id, &key, value))
-                .await?;
-        Ok(Response::new(workload_secret_to_proto(secret)))
+        workload_secrets::set_project(Arc::clone(&self.authority), project_id, &mut request).await
     }
 
     async fn delete_project_workload_secret(
@@ -1385,7 +1378,7 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
             authority.rename_project_workload_secret(project_id, &request.key, &request.new_key)
         })
         .await?;
-        Ok(Response::new(workload_secret_to_proto(secret)))
+        Ok(Response::new(workload_secret_to_proto(secret)?))
     }
 
     async fn resolve_workload_secret_metadata(

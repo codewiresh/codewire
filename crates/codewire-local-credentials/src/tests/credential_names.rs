@@ -28,6 +28,7 @@ const SCHEMA_SIX_CREDENTIALS: &str = "
 
 /// Give a current store schema 6's `credentials` table, rows unchanged.
 pub(super) fn downgrade_to_schema_six(connection: &Connection) {
+    super::secret_bindings::downgrade_to_schema_seven(connection);
     connection
         .pragma_update(None, "foreign_keys", false)
         .expect("foreign keys off for the fixture");
@@ -419,9 +420,9 @@ fn schema_seven_without_the_per_provider_constraint_is_refused() {
     drop(open_builtin(&root, &store));
     let connection = Connection::open(root.join(DATABASE_FILE)).expect("open database");
     downgrade_to_schema_six(&connection);
-    connection
-        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
-        .expect("claim schema 7");
+    // Schema 8's columns, and its version, over schema 6's name constraint.
+    crate::workload_secret::upgrade_secret_bindings_schema(&connection)
+        .expect("claim the current schema");
     drop(connection);
     assert!(matches!(
         LocalCredentialAuthority::open(&root, store, codewire_access::builtin_provider_catalog()),

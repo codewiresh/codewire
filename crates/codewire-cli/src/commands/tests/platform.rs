@@ -509,14 +509,6 @@ fn test_secret_project(name: &str, secret_count: i64) -> SecretProject {
     }
 }
 
-fn test_secret(key: &str) -> SecretMetadata {
-    SecretMetadata {
-        key: key.to_string(),
-        created_at: "2026-07-04T00:00:00Z".to_string(),
-        updated_at: "2026-07-05T00:00:00Z".to_string(),
-    }
-}
-
 #[test]
 fn format_secret_project_list_text_matches_go_columns() {
     let projects = vec![
@@ -539,28 +531,6 @@ fn format_secret_project_list_text_reports_empty() {
     assert_eq!(
         format_secret_project_list_text(&[]),
         "No secret projects found.\n"
-    );
-}
-
-#[test]
-fn format_secret_metadata_list_text_matches_go_columns() {
-    let secrets = vec![test_secret("DATABASE_URL"), test_secret("TOKEN")];
-
-    assert_eq!(
-        format_secret_metadata_list_text(&secrets, "No secrets found."),
-        concat!(
-            "KEY                              CREATED                  UPDATED\n",
-            "DATABASE_URL                     2026-07-04T00:00:00Z     2026-07-05T00:00:00Z\n",
-            "TOKEN                            2026-07-04T00:00:00Z     2026-07-05T00:00:00Z\n",
-        )
-    );
-}
-
-#[test]
-fn format_secret_metadata_list_text_reports_custom_empty_message() {
-    assert_eq!(
-        format_secret_metadata_list_text(&[], "No user secrets found."),
-        "No user secrets found.\n"
     );
 }
 

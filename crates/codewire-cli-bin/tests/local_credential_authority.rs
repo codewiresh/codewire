@@ -114,6 +114,8 @@ fn the_packaged_authority_starts_and_stores_a_secret_in_the_file_store() {
     assert!(listed.status.success());
     let listed = String::from_utf8_lossy(&listed.stdout);
     assert!(listed.contains("CW_SYNTHETIC_TOKEN"), "{listed}");
+    // A plain key, as every key is while host-bound secrets are off (#4003).
+    assert!(listed.contains("\"binding\": null"), "{listed}");
     assert!(!listed.contains("synthetic-authority-start-value"));
     let entries = fs::read_dir(home.path().join(".codewire/credentials-v1/protected-v1"))
         .unwrap()

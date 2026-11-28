@@ -59,6 +59,9 @@ use profile_rows::{
     profile_is_default,
 };
 use refresh_journal::delete_credential_refresh_journal;
+use workload_secret::{
+    WORKLOAD_SECRETS_SCHEMA, has_secret_binding_columns, upgrade_secret_bindings_schema,
+};
 
 pub use boot_secrets::{
     BOOT_SECRET_BYTES, BootSecretPurpose, BrokerBootSecrets, InvalidBootSecrets,
@@ -124,7 +127,7 @@ pub use transport::{
     authority_exit_code, check_socket_path,
 };
 pub use workload_secret::{
-    LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,
+    BindingWrite, LocalLaunchSecretSelection, LocalSecretProject, ResolvedWorkloadSecretMetadata,
     WorkloadSecretMetadata, WorkloadSecretSelection, WorkloadSecretSource,
 };
 
@@ -173,7 +176,10 @@ pub const AUTHORITY_ALLOWED_ENVIRONMENT_VARIABLES: [&str; 2] =
     ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 
 const DATABASE_APPLICATION_ID: i64 = 0x4357_4352; // "CWCR"
-const DATABASE_SCHEMA_VERSION: i64 = 7;
+/// Adds a workload secret's binding (#4003).
+const DATABASE_SCHEMA_VERSION: i64 = 8;
+/// Makes a credential's name unique per provider.
+const CREDENTIAL_NAMES_DATABASE_SCHEMA_VERSION: i64 = 7;
 /// Adds the store's default profile.
 const DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION: i64 = 6;
 /// Makes GitHub one connection per store.
@@ -2283,31 +2289,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalCredentialError
                updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
                UNIQUE(owner_id, name)
              ) STRICT;
-             CREATE TABLE workload_secrets(
-               id TEXT PRIMARY KEY NOT NULL,
-               scope_kind TEXT NOT NULL CHECK(scope_kind IN ('user', 'project')),
-               scope_id TEXT NOT NULL,
-               project_id TEXT NULL,
-               key TEXT NOT NULL,
-               material_generation INTEGER NOT NULL CHECK(material_generation > 0),
-               protected_entry_id TEXT NOT NULL UNIQUE,
-               material_state TEXT NOT NULL CHECK(material_state IN ('pending_write', 'ready', 'pending_delete')),
-               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-               updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= created_at_unix_ms),
-               UNIQUE(scope_kind, scope_id, key),
-               CHECK((scope_kind = 'user' AND project_id IS NULL) OR
-                     (scope_kind = 'project' AND project_id = scope_id)),
-               FOREIGN KEY(project_id) REFERENCES secret_projects(id) ON DELETE RESTRICT
-             ) STRICT;
-             CREATE INDEX workload_secrets_scope
-               ON workload_secrets(scope_kind, scope_id, key);
-             CREATE TABLE workload_secret_journal(
-               secret_id TEXT PRIMARY KEY NOT NULL,
-               operation TEXT NOT NULL CHECK(operation IN ('rollback_write', 'delete_retired')),
-               protected_entry_id TEXT NOT NULL UNIQUE,
-               created_at_unix_ms INTEGER NOT NULL CHECK(created_at_unix_ms >= 0),
-               FOREIGN KEY(secret_id) REFERENCES workload_secrets(id) ON DELETE CASCADE
-             ) STRICT;"
+             {WORKLOAD_SECRETS_SCHEMA}"
         ))
         .map_err(database_error)?;
     connection
@@ -2363,7 +2345,9 @@ fn validate_schema(connection: &Connection) -> Result<(), LocalCredentialError> 
     if !default_profiles {
         return Err(LocalCredentialError::InvalidDatabase);
     }
-    if !credential_names_unique_per_provider(connection)? {
+    if !credential_names_unique_per_provider(connection)?
+        || !has_secret_binding_columns(connection)?
+    {
         return Err(LocalCredentialError::InvalidDatabase);
     }
     Ok(())
@@ -2383,6 +2367,7 @@ fn validate_openable_schema(connection: &Connection) -> Result<(), LocalCredenti
                 | SSH_DATABASE_SCHEMA_VERSION
                 | GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION
                 | DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION
+                | CREDENTIAL_NAMES_DATABASE_SCHEMA_VERSION
                 | DATABASE_SCHEMA_VERSION
         )
     {
@@ -2438,6 +2423,7 @@ fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
             upgrade_github_singleton_schema(connection)?;
             upgrade_default_profile_schema(connection)?;
             upgrade_credential_names_schema(connection)?;
+            upgrade_secret_bindings_schema(connection)?;
             validate_schema(connection)
         }
         SSH_DATABASE_SCHEMA_VERSION => {
@@ -2445,17 +2431,25 @@ fn upgrade_schema(connection: &Connection) -> Result<(), LocalCredentialError> {
             upgrade_github_singleton_schema(connection)?;
             upgrade_default_profile_schema(connection)?;
             upgrade_credential_names_schema(connection)?;
+            upgrade_secret_bindings_schema(connection)?;
             validate_schema(connection)
         }
         GITHUB_SINGLETON_DATABASE_SCHEMA_VERSION => {
             validate_schema_tables(connection)?;
             upgrade_default_profile_schema(connection)?;
             upgrade_credential_names_schema(connection)?;
+            upgrade_secret_bindings_schema(connection)?;
             validate_schema(connection)
         }
         DEFAULT_PROFILE_DATABASE_SCHEMA_VERSION => {
             validate_schema_tables(connection)?;
             upgrade_credential_names_schema(connection)?;
+            upgrade_secret_bindings_schema(connection)?;
+            validate_schema(connection)
+        }
+        CREDENTIAL_NAMES_DATABASE_SCHEMA_VERSION => {
+            validate_schema_tables(connection)?;
+            upgrade_secret_bindings_schema(connection)?;
             validate_schema(connection)
         }
         _ => Err(LocalCredentialError::UnsupportedSchema),

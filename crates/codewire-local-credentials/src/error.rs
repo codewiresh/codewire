@@ -1,6 +1,6 @@
 //! The local credential authority's failures, none of which carries material.
 
-use codewire_access::{AccessError, ProviderId, WithheldReason};
+use codewire_access::{AccessError, BindingError, ProviderId, WithheldReason};
 use codewire_protected_store::ProtectedStoreError;
 use thiserror::Error;
 
@@ -122,6 +122,21 @@ pub enum LocalCredentialError {
     OrganizationSecretsUnsupported,
     #[error("local workload secret material is missing from protected storage")]
     WorkloadSecretMaterialMissing,
+    /// A bind while host-bound secrets are off
+    /// ([`codewire_access::HOST_BOUND_SECRETS`]).
+    #[error("sending a secret only to its hosts isn't available yet")]
+    HostBoundSecretsUnavailable,
+    /// A change that needs the secret's value entered again, and had none
+    /// (docs/dev/SECRETS-AND-CREDENTIALS.md, "Re-entering the value").
+    #[error("{0} needs the secret's value again")]
+    SecretValueRequired(&'static str),
+    /// A rename would change a bound secret's slot, and carries no value.
+    #[error(
+        "a bound secret can't be renamed; set the new key with its value, then delete the old one"
+    )]
+    BoundSecretRename,
+    #[error(transparent)]
+    SecretBinding(#[from] BindingError),
     #[error(transparent)]
     Access(#[from] AccessError),
     #[error(transparent)]

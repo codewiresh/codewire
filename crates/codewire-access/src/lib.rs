@@ -16,17 +16,19 @@ mod id;
 mod managed_refresh;
 mod model;
 mod placeholder;
+mod presets;
 mod projected_placeholders;
 mod projection;
 mod refusal;
 mod secret_slot;
 
 pub use binding::{
-    BindingError, BoundHeader, BoundHost, DEFAULT_BASIC_USERNAME, DEFAULT_BOUND_HEADER,
-    DEFAULT_BOUND_SCHEME, HostBinding, MAX_BOUND_HEADERS, MAX_BOUND_HOSTS,
-    MAX_BOUND_HOSTS_PER_ENVIRONMENT, MAX_BOUND_VALUE_BYTES, MAX_PLACEHOLDER_PREFIX_LENGTH,
-    PlaceholderPrefix, Presentation, ReservedHosts, Scheme, StoredBinding, StoredPresentation,
-    change_moves_generation, change_needs_value, is_provider_host,
+    BindingError, BindingWrite, BoundHeader, BoundHost, DEFAULT_BASIC_USERNAME,
+    DEFAULT_BOUND_HEADER, DEFAULT_BOUND_SCHEME, HOST_BOUND_SECRETS, HostBinding, MAX_BOUND_HEADERS,
+    MAX_BOUND_HOSTS, MAX_BOUND_HOSTS_PER_ENVIRONMENT, MAX_BOUND_VALUE_BYTES,
+    MAX_PLACEHOLDER_PREFIX_LENGTH, PlaceholderPrefix, Presentation, ReservedHosts, Scheme,
+    StoredBinding, StoredPresentation, change_moves_generation, change_needs_value,
+    is_provider_host,
 };
 pub use catalog::{
     ANTIGRAVITY_LOGIN_OPERATION, ANTIGRAVITY_LOGIN_ROUTE, CLAUDE_LOGIN_OPERATION,
@@ -74,6 +76,7 @@ pub use placeholder::{
     CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG, CredentialPlaceholder,
     PLACEHOLDER_KEY_BYTES, PlaceholderKey, known_answer,
 };
+pub use presets::{BINDING_PRESETS, BindingPreset, binding_preset, nearest_binding_preset};
 pub use projected_placeholders::{PROJECTED_PLACEHOLDER_SLOTS, ProjectedPlaceholders};
 pub use projection::{
     CODEX_CONFIG_FILE_NAME, CODEX_MANAGED_CONFIG_HEADER, CODEX_NATIVE_HOME, CODEX_PLATFORM_HOME,

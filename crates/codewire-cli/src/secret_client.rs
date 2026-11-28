@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use codewire_access::BindingWrite;
 use codewire_client::{self as rpc, CodewireClient};
 use codewire_workload_secrets::{
     MAX_WORKLOAD_SECRETS, ResolvedWorkloadSecretMetadata, WorkloadSecretSource,
@@ -11,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::CLI_VERSION;
 use crate::config::ResolvedPlatformConfig;
 use crate::environment_client::display_client_error;
+
+mod binding;
+pub(crate) use binding::{NO_SCHEME, SecretBindingView};
 
 const SECRET_LIST_PAGE_SIZE: i32 = 100;
 const SECRET_LIST_MAX_PAGES: usize = 10;
@@ -23,6 +27,8 @@ pub struct SecretMetadata {
     pub created_at: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub updated_at: String,
+    /// `null` for a plain secret (#4003).
+    pub binding: Option<SecretBindingView>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -87,12 +93,23 @@ impl SecretClient {
         }
     }
 
-    pub async fn set_org_secret(&self, org_id: &str, key: &str, value: &str) -> anyhow::Result<()> {
+    /// Set `key`, or with an empty value only change its binding, and apply
+    /// `binding`.
+    pub async fn write_org_secret(
+        &self,
+        org_id: &str,
+        key: &str,
+        value: &str,
+        binding: &BindingWrite,
+    ) -> anyhow::Result<()> {
+        let (binding, plain) = binding::write_fields(binding);
         self.inner
             .set_secret(rpc::SetSecretRequest {
                 org_id: org_id.to_string(),
                 key: key.to_string(),
                 value: value.to_string(),
+                binding: binding.into(),
+                plain,
                 ..Default::default()
             })
             .await
@@ -151,11 +168,20 @@ impl SecretClient {
         }
     }
 
-    pub async fn set_user_secret(&self, key: &str, value: &str) -> anyhow::Result<()> {
+    /// [`Self::write_org_secret`] for a personal secret.
+    pub async fn write_user_secret(
+        &self,
+        key: &str,
+        value: &str,
+        binding: &BindingWrite,
+    ) -> anyhow::Result<()> {
+        let (binding, plain) = binding::write_fields(binding);
         self.inner
             .set_user_secret(rpc::SetUserSecretRequest {
                 key: key.to_string(),
                 value: value.to_string(),
+                binding: binding.into(),
+                plain,
                 ..Default::default()
             })
             .await
@@ -296,12 +322,28 @@ impl SecretClient {
         key: &str,
         value: &str,
     ) -> anyhow::Result<()> {
+        self.write_project_secret(org_id, project_id, key, value, &BindingWrite::Keep)
+            .await
+    }
+
+    /// [`Self::write_org_secret`] for a project's secret.
+    pub async fn write_project_secret(
+        &self,
+        org_id: &str,
+        project_id: &str,
+        key: &str,
+        value: &str,
+        binding: &BindingWrite,
+    ) -> anyhow::Result<()> {
+        let (binding, plain) = binding::write_fields(binding);
         self.inner
             .set_project_secret(rpc::SetProjectSecretRequest {
                 org_id: org_id.to_string(),
                 secret_project_id: project_id.to_string(),
                 key: key.to_string(),
                 value: value.to_string(),
+                binding: binding.into(),
+                plain,
                 ..Default::default()
             })
             .await
@@ -440,6 +482,10 @@ fn legacy_secret_metadata(value: rpc::SecretMetadata) -> SecretMetadata {
             .into_option()
             .map(timestamp_to_rfc3339)
             .unwrap_or_default(),
+        binding: value
+            .binding
+            .into_option()
+            .map(|binding| binding::view_from_proto(&binding)),
     }
 }
 

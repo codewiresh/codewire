@@ -38,6 +38,16 @@ pub enum StoreRefusal {
     /// finished; nothing is writing it, and the authority's next start
     /// removes it (#5413).
     CredentialAddUnfinished,
+    /// A secret bound while host-bound secrets are off.
+    HostBoundSecretsUnavailable,
+    /// A change to a secret's binding that needs its value, sent without one.
+    SecretValueRequired,
+    /// A binding naming a host a built-in credential names.
+    BoundHostProvider,
+    /// Any other binding, or a value for one, that the rules refuse.
+    SecretBindingInvalid,
+    /// A rename of a bound secret.
+    SecretBoundRename,
 }
 
 /// The status metadata key that lists, comma-joined and sorted, the providers
@@ -60,6 +70,11 @@ impl StoreRefusal {
             Self::CredentialNameReservesProvider => "CREDENTIAL_NAME_RESERVES_PROVIDER",
             Self::CredentialAddInProgress => "LOCAL_CREDENTIAL_ADD_IN_PROGRESS",
             Self::CredentialAddUnfinished => "LOCAL_CREDENTIAL_ADD_UNFINISHED",
+            Self::HostBoundSecretsUnavailable => "LOCAL_HOST_BOUND_SECRETS_UNAVAILABLE",
+            Self::SecretValueRequired => "secret_value_required",
+            Self::BoundHostProvider => "bound_host_provider",
+            Self::SecretBindingInvalid => "secret_binding_invalid",
+            Self::SecretBoundRename => "secret_bound_rename",
         }
     }
 

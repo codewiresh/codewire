@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 36;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 37;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -115,6 +115,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         36,
         "admits and leases an Antigravity sign-in, and revokes an active Google OAuth credential at Google (#6555)",
     ),
+    (
+        37,
+        "a workload secret's set carries its binding, plain, and an empty value for a change that needs none, and its metadata the binding (#4003)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -179,10 +183,15 @@ pub enum AuthorityFeature {
     /// An Antigravity sign-in (`google` OAuth): stored, leased as a
     /// placeholder-only Antigravity login, and revoked at Google (#6555).
     AntigravitySignIn,
+    /// A workload secret's binding: set, kept by a new value, listed, and
+    /// an empty value for a change that needs none (#4003). An older
+    /// authority ignores the binding and stores the value plain, so it is
+    /// never asked.
+    SecretBindings,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -198,6 +207,7 @@ impl AuthorityFeature {
         Self::DeleteGate,
         Self::PlatformCredentialPlaceholders,
         Self::AntigravitySignIn,
+        Self::SecretBindings,
     ];
 
     /// The protocol that introduced it.
@@ -218,6 +228,7 @@ impl AuthorityFeature {
             Self::DeleteGate => 34,
             Self::PlatformCredentialPlaceholders => 35,
             Self::AntigravitySignIn => 36,
+            Self::SecretBindings => 37,
         }
     }
 

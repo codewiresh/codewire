@@ -210,7 +210,11 @@ fn rebuild_credentials_table(connection: &Connection) -> Result<(), LocalCredent
         return Err(LocalCredentialError::InvalidDatabase);
     }
     transaction
-        .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+        .pragma_update(
+            None,
+            "user_version",
+            CREDENTIAL_NAMES_DATABASE_SCHEMA_VERSION,
+        )
         .map_err(database_error)?;
     transaction.commit().map_err(database_error)
 }
