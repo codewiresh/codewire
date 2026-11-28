@@ -791,6 +791,7 @@ async function createFailingSetup(page: Page, slug: string, owned: OwnedUxSandbo
   await card.getByLabel("Disk", { exact: true }).selectOption("10");
   await page.getByLabel("Delete after", { exact: true }).fill("1h");
   await page.locator("[data-reset-workspace-image]").click();
+  await page.getByLabel("Credential profile", { exact: true }).selectOption("");
   await expect(page.getByLabel("Credential profile", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
@@ -1044,6 +1045,7 @@ export async function runDevUxWalkthrough(page: Page, options: {
     // selection or attach the dedicated account's existing secrets/providers.
     await page.locator("[data-reset-workspace-image]").click();
     expect(await page.getByLabel("Workspace image", { exact: true }).inputValue()).not.toBe("");
+    await page.getByLabel("Credential profile", { exact: true }).selectOption("");
     await expect(page.getByLabel("Credential profile", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
