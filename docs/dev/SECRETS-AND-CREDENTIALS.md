@@ -2947,11 +2947,12 @@ so the value never leaves it for a launch:
   source, and through the delegation for a platform source.
 
 A bound row is never decrypted for a projection. The credential broker's
-database login reads its `binding`, `binding_id` and `binding_generation`
-columns, granted beside the nine it reads today, in infra's grants and
-audit before the code that reads them ships. The credential service
-refuses to start when its login can't read those three columns, so a
-missing grant stops a rollout rather than every projection. Tests in both
+database login reads its `binding`, `binding_id`, `binding_generation`
+and `value_version` columns (the last for a bound secret's lease), granted
+beside the nine it reads today, in infra's grants and audit before the
+code that reads them ships. The credential service refuses to start when
+its login can't read those four columns, so a missing grant stops a
+rollout rather than every projection. Tests in both
 stores hold that a bound secret's value never reaches a projection.
 
 The raw value is projected only when the secret is plain now and the

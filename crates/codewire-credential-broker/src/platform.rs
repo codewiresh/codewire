@@ -14,6 +14,7 @@
 //! tracks Start through terminal publication; storage owns the 90-second
 //! abandonment fence. This adapter creates no detached placement work.
 
+mod bound_secrets;
 pub mod bridge;
 mod decision;
 mod grant_checks;
@@ -26,10 +27,12 @@ use login_admission::{
 pub mod keepalive;
 mod lease;
 pub use lease::PlatformCredentialLease;
+mod lease_budget;
 mod placeholders;
 mod refresh_errors;
 mod runtime_errors;
 use crate::RateLimitClose;
+pub(crate) use lease_budget::LeaseBudget;
 use refresh_errors::{refresh_lease_error, refresh_store_error};
 pub use runtime_errors::PlatformRuntimeError;
 use runtime_errors::runtime_error;
@@ -44,9 +47,9 @@ use codewire_access::{
     ApplicationSecretKey, AvailableGrants, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
-    GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
-    Placement, WithheldReason, antigravity_login_permission, claude_login_permission,
-    codex_login_permission,
+    FirstBindSecret, GrantContext, GrantPermission, GrantPlacement, Owner,
+    PROVIDER_REFRESH_TIMEOUT_SECONDS, Placement, WithheldReason, antigravity_login_permission,
+    claude_login_permission, codex_login_permission,
 };
 use codewire_platform_credentials::{
     CredentialRecord, CredentialVersion, EpochMaterialCache, OAuthRefreshState,
@@ -55,7 +58,11 @@ use codewire_platform_credentials::{
 };
 use codewire_protected_store::ProtectedValue;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
+use crate::bound_secret::{
+    BoundSecretLeaseError, BoundSecretRow, BoundSecretSwap, EpochBoundSecret,
+};
 use crate::commit_failure::{taken_bundle, valid_bundle};
 use crate::timing::{self, AuthorityUse, MaterialCacheUse, Phase};
 use crate::{
@@ -340,6 +347,33 @@ pub trait PlatformRuntimeAuthority: Send + Sync {
     > {
         Err(PlatformRuntimeError::Denied)
     }
+
+    /// The host-bound secrets the runtime's Pod recorded at its first bind
+    /// that its selected sources hold, under the projection's authority
+    /// (#4003): the epoch's bound-secret grants. None by default.
+    async fn bound_secrets(&self) -> Result<Vec<FirstBindSecret>, PlatformRuntimeError> {
+        Ok(Vec::new())
+    }
+
+    /// `secret`'s row now, by its set's path and key, checked against its
+    /// record for `host`; nothing is decrypted.
+    async fn bound_secret_row(
+        &self,
+        _secret: &FirstBindSecret,
+        _host: &str,
+    ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
+        Err(BoundSecretLeaseError::Denied)
+    }
+
+    /// [`Self::bound_secret_row`]'s checks again, then the row's value and
+    /// its version, decrypted for this lease alone.
+    async fn bound_secret_value(
+        &self,
+        _secret: &FirstBindSecret,
+        _host: &str,
+    ) -> Result<(u64, Zeroizing<Vec<u8>>), BoundSecretLeaseError> {
+        Err(BoundSecretLeaseError::Denied)
+    }
 }
 
 /// One connected runtime identity and its isolated, least-authority stores.
@@ -366,74 +400,11 @@ pub struct PlatformBrokerLeaseProvider<A> {
     /// Where this hosted epoch's credential uses fold, under its workspace
     /// binding (#6189). Only a hosted epoch of a service that reports them.
     uses: Option<crate::credential_uses::EpochUses>,
+    /// This intercepted hosted epoch's bound-secret grants (#4003), read at
+    /// admission and dropped with the epoch.
+    bound: Option<bound_secrets::EpochBoundSecrets>,
     #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
     ssh: Option<ssh::Epoch>,
-}
-
-/// One process-wide budget of concurrent leases, shared by every epoch of one
-/// bridge service. A slot covers exactly one lease: its record read, any
-/// authority evaluation it runs or waits for (or its full per-request checks),
-/// and its protected-material read (SQL and the KEK unwrap) or reuse from its
-/// epoch's material cache; never provider I/O, a refresh or a response body.
-/// A lease waits for a slot in arrival order until its connected
-/// identity's original expiry, the deadline that already bounds that lease, so
-/// a burst queues instead of failing.
-#[derive(Clone)]
-pub(crate) struct LeaseBudget {
-    permits: Arc<tokio::sync::Semaphore>,
-    capacity: usize,
-}
-
-impl LeaseBudget {
-    pub(crate) fn new(capacity: usize) -> Self {
-        Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(capacity)),
-            capacity,
-        }
-    }
-
-    /// Fail every waiting and later lease; held slots finish normally.
-    pub(crate) fn close(&self) {
-        self.permits.close();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn available(&self) -> usize {
-        self.permits.available_permits()
-    }
-
-    async fn acquire(
-        &self,
-        expires_at_unix: u64,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, BrokerLeaseError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| BrokerLeaseError::Unavailable)?;
-        let deadline = Duration::from_secs(expires_at_unix)
-            .checked_sub(now)
-            .and_then(|remaining| tokio::time::Instant::now().checked_add(remaining))
-            .ok_or(BrokerLeaseError::Denied)?;
-        let acquired = timing::timed(
-            Phase::LeaseWait,
-            tokio::time::timeout_at(deadline, Arc::clone(&self.permits).acquire_owned()),
-        )
-        .await;
-        match acquired {
-            Ok(Ok(permit)) => Ok(permit),
-            // Closed by shutdown.
-            Ok(Err(_)) => Err(BrokerLeaseError::Unavailable),
-            Err(_) => {
-                timing::capacity_rejected(
-                    "broker_leases",
-                    "lease",
-                    self.capacity,
-                    self.capacity
-                        .saturating_sub(self.permits.available_permits()),
-                );
-                Err(BrokerLeaseError::Unavailable)
-            }
-        }
-    }
 }
 
 /// Private process-local reservation. Possession does not authorize sending.
@@ -478,6 +449,7 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
             decision: None,
             placeholders: None,
             uses: None,
+            bound: None,
             #[cfg(all(feature = "ssh-agent", target_os = "linux"))]
             ssh: None,
         })
@@ -1121,6 +1093,40 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
             return Err(BrokerLeaseError::Denied);
         }
         self.lease(request_id, slot, permission, None).await
+    }
+
+    fn bound_secrets(&self) -> Result<&[EpochBoundSecret], BoundSecretLeaseError> {
+        self.bound.as_ref().map_or(Ok(&[]), |bound| bound.granted())
+    }
+
+    fn audit_bound_secret(&self, swap: BoundSecretSwap<'_>) {
+        tracing::info!(
+            event = "bound_secret_swap",
+            environment_id = self.session.context.environment_id.as_str(),
+            user_id = self.session.context.user_id.as_str(),
+            key = swap.key,
+            scope = swap.scope,
+            host = swap.host,
+            presentation = swap.presentation,
+            outcome = swap.outcome,
+        );
+    }
+
+    async fn lease_bound_secret_row(
+        &self,
+        secret: &FirstBindSecret,
+        host: &str,
+    ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
+        self.bound_secret_row(secret, host).await
+    }
+
+    async fn lease_bound_secret_value(
+        &self,
+        secret: &FirstBindSecret,
+        host: &str,
+        row: &BoundSecretRow,
+    ) -> Result<Zeroizing<Vec<u8>>, BoundSecretLeaseError> {
+        self.bound_secret_value(secret, host, row).await
     }
 
     /// A listed direct delivery exception; see [`codex_login_admissible`].

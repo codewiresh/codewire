@@ -231,6 +231,7 @@ impl TwoPodStore {
                 working_directory: String::new(),
                 defaults: None,
                 interception: None,
+                bound_hosts: Vec::new(),
             },
         );
     }

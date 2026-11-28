@@ -67,6 +67,37 @@ pub fn interception_bindings(
     intercepts(&front_door_hosts(clients))
 }
 
+/// `intercepts` and an exact binding on the front door's port for each of
+/// `bound_hosts`, the hosts a Pod's first bind recorded for its bound
+/// secrets (#4003), each once and never past [`MAX_INTERCEPT_BINDINGS`]: the
+/// bind refused more than 16 bound hosts, so a record past the budget is
+/// broken and gets no assignment rather than part of one.
+pub fn with_bound_hosts(
+    mut intercepts: Vec<Intercept>,
+    bound_hosts: &[String],
+) -> anyhow::Result<Vec<Intercept>> {
+    for host in bound_hosts {
+        let binding = InterceptBinding::new(host, INTERCEPT_PORT)
+            .map_err(|error| anyhow::anyhow!("bound secret host {host:?}: {error}"))?;
+        anyhow::ensure!(
+            binding.hostname() == host,
+            "bound secret host {host:?} is not canonical"
+        );
+        let bound = Intercept {
+            binding,
+            suffix: false,
+        };
+        if !intercepts.contains(&bound) {
+            intercepts.push(bound);
+        }
+    }
+    anyhow::ensure!(
+        intercepts.len() <= MAX_INTERCEPT_BINDINGS,
+        "the front door's hosts and bound secrets' hosts exceed {MAX_INTERCEPT_BINDINGS} interception bindings"
+    );
+    Ok(intercepts)
+}
+
 /// Check at startup that the widest selection's bindings validate, so no
 /// binding's assignment can fail on them later.
 pub fn check_interception_bindings(interception: bool) -> anyhow::Result<()> {

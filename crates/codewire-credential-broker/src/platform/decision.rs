@@ -135,6 +135,16 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
         }
     }
 
+    /// Whether the epoch's runtime authority holds, from its decision while
+    /// young: a bound secret's lease, which has no slot grant to admit, is
+    /// held to the same window (#4003).
+    pub(super) async fn authority_holds(
+        &self,
+        epoch: &EpochDecision,
+    ) -> Result<(), BrokerLeaseError> {
+        self.decision(epoch, false).await.map(drop)
+    }
+
     async fn decide(
         &self,
         evaluated_at: Instant,

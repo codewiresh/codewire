@@ -26,11 +26,15 @@ pub enum RefusalCode {
     Denied,
     CredentialOwnerDeparted,
     CredentialOwnerDisabled,
+    PlaceholderOutsideBinding,
+    SecretNotBoundToHost,
+    SecretBindingChanged,
+    SecretDeleted,
 }
 
 impl RefusalCode {
-    /// Every code, in a fixed order a wire may index.
-    pub const ALL: [Self; 20] = [
+    /// Every code, in a fixed order a wire may index: a new one goes last.
+    pub const ALL: [Self; 24] = [
         Self::CredentialRevoked,
         Self::CredentialExpired,
         Self::CredentialNeedsReconnect,
@@ -52,6 +56,10 @@ impl RefusalCode {
         // Appended: a wire indexes this order.
         Self::CredentialOwnerDeparted,
         Self::CredentialOwnerDisabled,
+        Self::PlaceholderOutsideBinding,
+        Self::SecretNotBoundToHost,
+        Self::SecretBindingChanged,
+        Self::SecretDeleted,
     ];
 
     /// The `Codewire-Refusal` value.
@@ -77,6 +85,10 @@ impl RefusalCode {
             Self::Denied => "denied",
             Self::CredentialOwnerDeparted => "credential_owner_departed",
             Self::CredentialOwnerDisabled => "credential_owner_disabled",
+            Self::PlaceholderOutsideBinding => "placeholder_outside_binding",
+            Self::SecretNotBoundToHost => "secret_not_bound_to_host",
+            Self::SecretBindingChanged => "secret_binding_changed",
+            Self::SecretDeleted => "secret_deleted",
         }
     }
 
@@ -103,6 +115,10 @@ impl RefusalCode {
             Self::Denied => "denied",
             Self::CredentialOwnerDeparted => "creator left the organization",
             Self::CredentialOwnerDisabled => "creator's account disabled",
+            Self::PlaceholderOutsideBinding => "secret sent outside its binding",
+            Self::SecretNotBoundToHost => "secret not bound to this host",
+            Self::SecretBindingChanged => "secret binding changed",
+            Self::SecretDeleted => "secret deleted",
         }
     }
 

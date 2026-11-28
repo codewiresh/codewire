@@ -50,8 +50,9 @@ pub use front_door_session::{
 };
 mod http_ingress;
 pub use http_ingress::{
-    ClassifiedHttpRequest, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
-    classify_http_request, classify_intercepted_request, intercepted_host_route,
+    BOUND_SECRET_ROUTE, BOUND_SECRET_SLOT, BoundSecretRoute, ClassifiedHttpRequest,
+    MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX, classify_http_request,
+    classify_intercepted, classify_intercepted_request, intercepted_host_route,
 };
 mod epoch_refusal;
 mod login;
@@ -909,12 +910,7 @@ impl CredentialBridge {
     {
         let (intercepted_host, destination) = intercepted.unzip();
         let classified = match intercepted_host {
-            Some(host) => classify_intercepted_request(
-                host,
-                request.method(),
-                request.uri(),
-                request.headers(),
-            ),
+            Some(host) => classify_intercepted(host, &request),
             None => classify_http_request(request.method(), request.uri(), request.headers()),
         }
         .map_err(|refusal| (refusal, None))?;

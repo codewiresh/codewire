@@ -210,7 +210,7 @@ fn source_for_path(path: &str) -> Result<WorkloadSecretSource, Error> {
     }
 }
 
-fn paths(selection: &PlatformProjectionSelection) -> Vec<String> {
+pub(crate) fn paths(selection: &PlatformProjectionSelection) -> Vec<String> {
     selection
         .source_identities()
         .into_iter()
@@ -282,7 +282,7 @@ async fn capture<'a>(
 
 /// The live binding's first-bind record of its bound secrets, as text; the
 /// broker's login reads this one column of the binding beyond the scope's.
-const FIRST_BIND_QUERY: &str = "SELECT bound_secrets::text FROM public.sandbox_workspace_bindings \
+pub(crate) const FIRST_BIND_QUERY: &str = "SELECT bound_secrets::text FROM public.sandbox_workspace_bindings \
      WHERE pod_uid=$1 AND environment_id=$2 AND released_at IS NULL";
 
 /// Capture the exact selected tenant-secret metadata while the caller retains

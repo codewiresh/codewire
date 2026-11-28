@@ -209,7 +209,7 @@ pub(super) struct LeavesFor<'a> {
     pub(super) epoch_digest: [u8; 32],
     pub(super) epoch_expires_at_unix: u64,
     pub(super) public_key: &'a [u8],
-    pub(super) hosts: &'a BTreeSet<&'static str>,
+    pub(super) hosts: &'a BTreeSet<&'a str>,
 }
 
 /// At most `per_window` calls per key in any [`WINDOW`]. When it tracks
@@ -311,7 +311,7 @@ pub(super) fn workspace_pod_uid(session: &PlatformRuntimeSession) -> Option<Uuid
     }
 }
 
-fn hosts_digest(hosts: &BTreeSet<&'static str>) -> [u8; 32] {
+fn hosts_digest(hosts: &BTreeSet<&str>) -> [u8; 32] {
     let mut digest = Sha256::new();
     for host in hosts {
         digest.update(host.as_bytes());

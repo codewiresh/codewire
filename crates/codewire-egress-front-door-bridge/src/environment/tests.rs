@@ -472,10 +472,24 @@ async fn the_front_door_stops_when_no_further_session_can_arrive() {
 /// route (#6421), still has its handshake and is refused by name, and nothing
 /// of it reaches the credential broker: the next request it sees is the
 /// routed one. A front door whose only bound host is unrouted still starts.
+/// A bound host this front door has no route for (such as a suffix name
+/// outside the built-in suffix routes, since bound-secret routes cover only
+/// exact names, #6421, #4003) is still terminated and refused by name with
+/// 403 `route_not_served`, without reaching the credential broker.
 #[tokio::test]
 async fn a_bound_host_with_no_route_is_terminated_and_refused_by_name() {
-    const UNROUTED: &str = "unrouted.example.com";
-    let mut running = Running::start(&[UNROUTED, BOUND]).await;
+    use codewire_egress_policy::intercept::{InterceptBinding, InterceptSuffix};
+    const UNROUTED_SUFFIX: &str = "unrouted.example.com";
+    const UNROUTED: &str = "sub.unrouted.example.com";
+    let with_bound = InterceptSet::with_suffixes(
+        [
+            InterceptBinding::new(UNROUTED_SUFFIX, INTERCEPT_PORT).unwrap(),
+            InterceptBinding::new(BOUND, INTERCEPT_PORT).unwrap(),
+        ],
+        [InterceptSuffix::new(UNROUTED_SUFFIX, INTERCEPT_PORT).unwrap()],
+    )
+    .unwrap();
+    let mut running = Running::start_binding(with_bound, |_| {}).await;
     let stream = running.own_stream(UNROUTED);
     let call = running
         .start_request_through(stream, UNROUTED, "/v1/messages")
@@ -492,7 +506,12 @@ async fn a_bound_host_with_no_route_is_terminated_and_refused_by_name() {
     assert_eq!(seen.intercepted_host, BOUND);
     assert_eq!(status, StatusCode::OK);
 
-    let mut alone = Running::start(&[UNROUTED]).await;
+    let suffix_only = InterceptSet::with_suffixes(
+        [InterceptBinding::new(UNROUTED_SUFFIX, INTERCEPT_PORT).unwrap()],
+        [InterceptSuffix::new(UNROUTED_SUFFIX, INTERCEPT_PORT).unwrap()],
+    )
+    .unwrap();
+    let mut alone = Running::start_binding(suffix_only, |_| {}).await;
     let stream = alone.own_stream(UNROUTED);
     let call = alone
         .start_request_through(stream, UNROUTED, "/v1/messages")

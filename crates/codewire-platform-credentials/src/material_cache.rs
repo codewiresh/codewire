@@ -20,6 +20,12 @@
 //! [`MATERIAL_REUSE_TTL`], and while any value remains, one sweeper task per
 //! cache drops each at its expiry even if the epoch makes no further call.
 //! Dropping the cache drops every value at once and stops its sweeper.
+//!
+//! A host-bound application secret's value (#4003) is reused the same way,
+//! keyed by its whole [`SecretVersion`]: the set's path, the key, its
+//! binding's identity and generation, and its `value_version`, which every
+//! new value moves. Its lease rereads that row before the reuse, so a new
+//! value, a changed binding or a deleted secret is read at the next lease.
 
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
@@ -58,9 +64,44 @@ struct Entries {
 }
 
 struct Entry {
-    record: CredentialRecord,
+    key: EntryKey,
     filled_at: Instant,
     value: Zeroizing<Box<[u8]>>,
+}
+
+/// What one retained value was read for.
+#[derive(PartialEq, Eq)]
+enum EntryKey {
+    Credential(CredentialRecord),
+    Secret(SecretVersion),
+}
+
+impl EntryKey {
+    fn credential(&self) -> Option<&CredentialId> {
+        match self {
+            Self::Credential(record) => Some(&record.metadata.id),
+            Self::Secret(_) => None,
+        }
+    }
+
+    fn secret(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Credential(_) => None,
+            Self::Secret(version) => Some((&version.path, &version.key)),
+        }
+    }
+}
+
+/// Exactly one value of one host-bound secret: everything its row's value
+/// is read under. Two reads of one row give equal versions only when
+/// neither its binding nor its value moved between them.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SecretVersion {
+    pub path: String,
+    pub key: String,
+    pub binding_id: String,
+    pub binding_generation: u64,
+    pub value_version: u64,
 }
 
 impl Entry {
@@ -101,8 +142,33 @@ impl EpochMaterialCache {
         let entry = entries
             .values
             .iter()
-            .find(|entry| entry.record == *record)?;
+            .find(|entry| matches!(&entry.key, EntryKey::Credential(held) if held == record))?;
         ProtectedValue::from_slice(&entry.value).ok()
+    }
+
+    /// A fresh copy of the value filled for exactly `version`, if one was
+    /// filled less than [`MATERIAL_REUSE_TTL`] ago.
+    pub fn get_secret(&self, version: &SecretVersion) -> Option<Zeroizing<Vec<u8>>> {
+        let entries = self.entries();
+        let entry = entries
+            .values
+            .iter()
+            .find(|entry| matches!(&entry.key, EntryKey::Secret(held) if held == version))?;
+        Some(Zeroizing::new(entry.value.to_vec()))
+    }
+
+    /// Retain a copy of `value` for exactly `version`, replacing any value of
+    /// the same secret, under the same bounds as [`Self::fill`].
+    pub fn fill_secret(&self, version: &SecretVersion, value: &[u8]) {
+        let same = |entry: &Entry| entry.key.secret() == Some((&version.path, &version.key));
+        self.insert(EntryKey::Secret(version.clone()), value, same);
+    }
+
+    /// Drop every value of the secret `key` stored at `path`.
+    pub fn evict_secret(&self, path: &str, key: &str) {
+        self.entries()
+            .values
+            .retain(|entry| entry.key.secret() != Some((path, key)));
     }
 
     /// Retain a copy of `value` for exactly `record`, replacing any value of
@@ -111,14 +177,21 @@ impl EpochMaterialCache {
     /// values, the oldest fill is dropped. Inside a Tokio runtime this starts
     /// the cache's sweeper if none is running.
     pub fn fill(&self, record: &CredentialRecord, value: &ProtectedValue) {
-        let bytes = value.expose_secret();
+        let same = |entry: &Entry| entry.key.credential() == Some(&record.metadata.id);
+        self.insert(
+            EntryKey::Credential(record.clone()),
+            value.expose_secret(),
+            same,
+        );
+    }
+
+    /// Retain `bytes` under `key`, first dropping every value `same` names.
+    fn insert(&self, key: EntryKey, bytes: &[u8], same: impl Fn(&Entry) -> bool) {
         if bytes.len() > MAX_REUSED_MATERIAL_BYTES {
             return;
         }
         let mut entries = self.entries();
-        entries
-            .values
-            .retain(|entry| entry.record.metadata.id != record.metadata.id);
+        entries.values.retain(|entry| !same(entry));
         if entries.values.len() >= MAX_REUSED_MATERIALS
             && let Some(oldest) = entries
                 .values
@@ -130,7 +203,7 @@ impl EpochMaterialCache {
             entries.values.swap_remove(oldest);
         }
         entries.values.push(Entry {
-            record: record.clone(),
+            key,
             filled_at: Instant::now(),
             value: Zeroizing::new(Box::from(bytes)),
         });
@@ -147,15 +220,15 @@ impl EpochMaterialCache {
     pub fn evict(&self, credential: &CredentialId) {
         self.entries()
             .values
-            .retain(|entry| entry.record.metadata.id != *credential);
+            .retain(|entry| entry.key.credential() != Some(credential));
     }
 
-    /// Keep only values whose credential `keep` accepts. `keep` runs under
-    /// the cache's lock and must not call back into it.
+    /// Keep only values whose credential `keep` accepts, and every secret's.
+    /// `keep` runs under the cache's lock and must not call back into it.
     pub fn retain_credentials(&self, keep: impl Fn(&CredentialId) -> bool) {
         self.entries()
             .values
-            .retain(|entry| keep(&entry.record.metadata.id));
+            .retain(|entry| entry.key.credential().is_none_or(&keep));
     }
 
     /// Drop every value.
@@ -526,5 +599,70 @@ mod tests {
             second.expose_secret().as_ptr()
         );
         assert_eq!(first.expose_secret(), second.expose_secret());
+    }
+
+    fn secret_version(value_version: u64) -> SecretVersion {
+        SecretVersion {
+            path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+            key: "FANCY_TOKEN".into(),
+            binding_id: "00000000-0000-0000-0000-000000000007".into(),
+            binding_generation: 2,
+            value_version,
+        }
+    }
+
+    /// A secret's value is reused only for its whole version: a new value,
+    /// a moved binding or a re-created secret reads through, and a new
+    /// fill replaces the secret's older value. A credential's values are
+    /// untouched by it.
+    #[test]
+    fn a_secret_value_is_reused_only_for_its_exact_version() {
+        let cache = EpochMaterialCache::new();
+        let credential = record("synthetic-credential");
+        cache.fill(&credential, &value(b"synthetic-credential-material"));
+        cache.fill_secret(&secret_version(1), b"synthetic-secret-1");
+        assert_eq!(
+            cache
+                .get_secret(&secret_version(1))
+                .as_deref()
+                .map(Vec::as_slice),
+            Some(&b"synthetic-secret-1"[..])
+        );
+        assert!(cache.get_secret(&secret_version(2)).is_none());
+        for moved in [
+            SecretVersion {
+                binding_generation: 3,
+                ..secret_version(1)
+            },
+            SecretVersion {
+                binding_id: "00000000-0000-0000-0000-000000000008".into(),
+                ..secret_version(1)
+            },
+            SecretVersion {
+                key: "OTHER_TOKEN".into(),
+                ..secret_version(1)
+            },
+        ] {
+            assert!(cache.get_secret(&moved).is_none());
+        }
+        cache.fill_secret(&secret_version(2), b"synthetic-secret-2");
+        assert!(cache.get_secret(&secret_version(1)).is_none());
+        assert_eq!(cache.len(), 2);
+        // A grant evaluation keeps secrets; only credentials follow it.
+        cache.retain_credentials(|_| false);
+        assert_eq!(cache.len(), 1);
+        cache.evict_secret(
+            "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b",
+            "FANCY_TOKEN",
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_secret_value_expires_like_any_other() {
+        let cache = EpochMaterialCache::new();
+        cache.fill_secret(&secret_version(1), b"synthetic-secret-1");
+        tokio::time::advance(MATERIAL_REUSE_TTL).await;
+        assert!(cache.get_secret(&secret_version(1)).is_none());
     }
 }

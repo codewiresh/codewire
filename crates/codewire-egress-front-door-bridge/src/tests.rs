@@ -1859,3 +1859,127 @@ async fn the_brokers_refusals_are_reported_and_a_providers_answers_are_not() {
         [row("api.anthropic.com", RefusalCode::NameNotAllowed)]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Host-bound secrets (#4003)
+
+fn bindings(hosts: &[&str]) -> InterceptSet {
+    InterceptSet::new(
+        hosts
+            .iter()
+            .map(|host| InterceptBinding::new(host, INTERCEPT_PORT).unwrap()),
+    )
+    .unwrap()
+}
+
+/// A hosted Pod's table routes each built-in host it binds as before, and
+/// gives every other exact name it binds a bound-secret route on every
+/// path. A name it doesn't bind gets no route, and a table of bound hosts
+/// alone still serves.
+#[test]
+fn a_bound_secret_route_is_made_only_for_a_bound_name() {
+    let table =
+        RouteTable::for_intercepts(&bindings(&["api.anthropic.com", "api.fancy.com"])).unwrap();
+    assert_eq!(table.hosts(), ["api.anthropic.com", "api.fancy.com"]);
+    assert!(table.serves_bound_secret("api.fancy.com"));
+    assert!(!table.serves_bound_secret("api.anthropic.com"));
+    assert!(!table.serves_bound_secret("api.other.com"));
+    assert_eq!(
+        rewrite(&table, "api.fancy.com", "/v1/things?page=2"),
+        Ok("/v1/things?page=2".into())
+    );
+    assert_eq!(
+        rewrite(&table, "api.other.com", "/v1/things"),
+        Err(StatusCode::FORBIDDEN)
+    );
+    let alone = RouteTable::for_intercepts(&bindings(&["api.fancy.com"])).unwrap();
+    assert_eq!(alone.hosts(), ["api.fancy.com"]);
+    assert!(RouteTable::for_intercepts(&InterceptSet::new([]).unwrap()).is_none());
+    // GitHub's hosts keep their own route whatever is bound beside them.
+    let github = RouteTable::for_intercepts(&bindings(&["github.com", "api.fancy.com"])).unwrap();
+    assert!(!github.serves_bound_secret("github.com"));
+}
+
+/// A bound-secret route never names a host a built-in route serves, and
+/// covers every path with no prefix.
+#[test]
+fn a_bound_secret_route_is_validated() {
+    for host in [
+        "api.anthropic.com",
+        "github.com",
+        "chatgpt.com",
+        "x.chatgpt.com",
+    ] {
+        assert_eq!(
+            RouteTable::new([HostRoute::bound_secret(host)]),
+            Err(RouteTableError::BoundSecret),
+            "{host}"
+        );
+    }
+    assert_eq!(
+        RouteTable::new([HostRoute {
+            strip_prefix: "/v1".into(),
+            ..HostRoute::bound_secret("api.fancy.com")
+        }]),
+        Err(RouteTableError::BoundSecret)
+    );
+    assert_eq!(
+        RouteTable::new([
+            HostRoute::bound_secret("api.fancy.com"),
+            HostRoute::bound_secret("api.fancy.com"),
+        ]),
+        Err(RouteTableError::Duplicate)
+    );
+    assert_eq!(
+        RouteTable::new(
+            (0..=MAX_ROUTES).map(|index| HostRoute::bound_secret(format!("h{index}.fancy.com")))
+        ),
+        Err(RouteTableError::Count)
+    );
+}
+
+/// A request to a bound host reaches the bridge on the bound secrets'
+/// route, with its path, query and headers as received and the host named;
+/// the environment's Host header selects nothing.
+#[tokio::test]
+async fn a_bound_hosts_request_reaches_the_bridge_on_the_bound_secrets_route() {
+    let mut host = Host::start().await;
+    let backend = host.backend(
+        RouteTable::for_intercepts(&bindings(&["api.anthropic.com", "api.fancy.com"])).unwrap(),
+    );
+    for claimed in ["api.fancy.com", "api.anthropic.com", "github.com"] {
+        let request = Request::post("/v1/things?page=2")
+            .header(HOST, claimed)
+            .header("authorization", "Bearer ft_cwp1_synthetic")
+            .body(Full::from("{}"))
+            .unwrap();
+        let (seen, _) = through_backend(&mut host, &backend, "api.fancy.com", request).await;
+        assert_eq!(
+            (
+                seen.capability_slot.as_str(),
+                seen.route.as_str(),
+                seen.path.as_str(),
+                seen.query.as_str(),
+                seen.intercepted_host.as_str(),
+            ),
+            (
+                codewire_credential_bridge::BOUND_SECRET_SLOT,
+                codewire_credential_bridge::BOUND_SECRET_ROUTE,
+                "/v1/things",
+                "page=2",
+                "api.fancy.com",
+            ),
+            "claiming {claimed}"
+        );
+        assert_eq!(header_names(&seen), ["authorization"]);
+        assert_eq!(seen.body, b"{}");
+    }
+    // A built-in host beside it keeps its own route.
+    let request = Request::post("/v1/messages")
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(Full::from("{}"))
+        .unwrap();
+    let (seen, _) = through_backend(&mut host, &backend, "api.anthropic.com", request).await;
+    assert_eq!(seen.capability_slot, "anthropic");
+}

@@ -125,8 +125,9 @@ pub(crate) async fn placeholder_keys_privileges(pool: &PgPool) -> Result<bool, s
     .await
 }
 
-/// Every projection with a winning secret reads its binding (#4003): without
-/// SELECT on the three binding columns each one would fail at its first read,
+/// Every projection with a winning secret reads its binding, and a bound
+/// secret's lease its value version (#4003): without SELECT on the four
+/// binding columns each one would fail at its first read,
 /// so the service refuses to start, and a rollout stalls while the version
 /// already running keeps serving. Infra's grant lands first.
 async fn binding_columns_granted(pool: &PgPool) -> Result<(), RuntimeError> {
@@ -137,18 +138,18 @@ async fn binding_columns_granted(pool: &PgPool) -> Result<(), RuntimeError> {
         Ok(())
     } else {
         Err(RuntimeError::Configuration(
-            "application-secret projection needs SELECT on tenant_secrets.binding, binding_id and binding_generation",
+            "application-secret projection needs SELECT on tenant_secrets.binding, binding_id, binding_generation and value_version",
         ))
     }
 }
 
-/// Whether this login can SELECT all three binding columns of
+/// Whether this login can SELECT all four binding columns of
 /// `tenant_secrets`; false when the table or a column does not exist.
 pub(crate) async fn binding_columns_privileges(pool: &PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT count(*) = 3 FROM pg_catalog.pg_attribute a \
+        "SELECT count(*) = 4 FROM pg_catalog.pg_attribute a \
          WHERE a.attrelid = pg_catalog.to_regclass('public.tenant_secrets') \
-         AND a.attname = ANY(ARRAY['binding','binding_id','binding_generation']) \
+         AND a.attname = ANY(ARRAY['binding','binding_id','binding_generation','value_version']) \
          AND a.attnum > 0 AND NOT a.attisdropped \
          AND pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'SELECT')",
     )

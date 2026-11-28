@@ -12,6 +12,7 @@
 //! body being dropped, not an uncommunicated remote loss of interest; the
 //! original authenticated expiry and owner shutdown still bound that epoch.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -869,21 +870,30 @@ where
             if intercepted && !self.state.hosted_placeholders {
                 self.log_placeholders_off();
             }
-            let projected = if intercepted {
-                Some(
-                    provider
-                        .projected_placeholders()
-                        .await
-                        .map_err(lease_status)?,
+            let (projected, bound) = if intercepted {
+                (
+                    Some(
+                        provider
+                            .projected_placeholders()
+                            .await
+                            .map_err(lease_status)?,
+                    ),
+                    Some(
+                        provider
+                            .admitted_bound_secrets()
+                            .await
+                            .map_err(lease_status)?,
+                    ),
                 )
             } else {
-                None
+                (None, None)
             };
-            Ok::<_, Status>((admitted, projected))
+            Ok::<_, Status>((admitted, projected, bound))
         })
         .await
         .map_err(|_| denied())??;
-        let (admitted, projected) = admitted;
+        let (admitted, projected, bound) = admitted;
+        let provider = PlatformBrokerLeaseProvider { bound, ..provider };
         epoch.ensure_live().map_err(bridge_status)?;
         // A forward from here would leave from the platform, past the
         // Sandbox's own policy and cw-egress, so none is sent (#5555). Where
@@ -1025,7 +1035,15 @@ where
             .evaluate_grants(&session.context)
             .await
             .map_err(|_| unavailable())?;
-        let hosts = crate::network::RouteHost::interceptable(&grants);
+        // A bound secret's hosts, as its Pod's first bind recorded them and
+        // only for a secret its selection holds (#4003).
+        let bound = authority.bound_secrets().await.map_err(runtime_status)?;
+        let mut hosts: BTreeSet<&str> = crate::network::RouteHost::interceptable(&grants);
+        hosts.extend(
+            bound
+                .iter()
+                .flat_map(|secret| secret.hosts.iter().map(String::as_str)),
+        );
         interception
             .sign(interception::LeavesFor {
                 pod_uid,

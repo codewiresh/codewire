@@ -221,6 +221,7 @@ fn guest_request(
         body,
         intercepted_host,
         routed: None,
+        bound: None,
     }
 }
 
@@ -429,6 +430,7 @@ async fn antigravity_token_host_answers_managed_refresh_with_placeholder_and_ref
             body,
             intercepted_host: Some(RouteHost::AntigravityOAuth),
             routed: None,
+            bound: None,
         })
         .await
         .unwrap();
@@ -455,6 +457,7 @@ async fn antigravity_token_host_answers_managed_refresh_with_placeholder_and_ref
                 body: format!("token={token}").into_bytes(),
                 intercepted_host: Some(RouteHost::AntigravityOAuth),
                 routed: None,
+                bound: None,
             })
             .await
             .unwrap();

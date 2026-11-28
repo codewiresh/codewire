@@ -93,7 +93,8 @@ pub use projection::{
     SSH_PLATFORM_AUTH_SOCK, github_known_hosts_additions,
 };
 pub use refusal::{
-    REFUSAL_HEADER, Refusal, RefusalCode, RefusalProvider, Unforwarded, UpstreamFailure,
+    BoundSecretRefusal, OutsideBinding, REFUSAL_HEADER, Refusal, RefusalCode, RefusalProvider,
+    Unforwarded, UpstreamFailure,
 };
 pub use secret_slot::{InvalidSecretSlot, SecretKind, SecretSlot};
 

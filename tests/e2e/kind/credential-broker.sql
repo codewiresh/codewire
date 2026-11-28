@@ -57,7 +57,7 @@ GRANT EXECUTE ON FUNCTION public.codewire_platform_projection_metadata(text) TO 
 GRANT EXECUTE ON FUNCTION public.codewire_platform_lock_projection_authority(text,text,text,text)
     TO codewire_credential_broker;
 GRANT SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,
-    binding,binding_id,binding_generation)
+    binding,binding_id,binding_generation,value_version)
     ON public.tenant_secrets TO codewire_credential_broker;
 GRANT SELECT (dek_id,scope,scope_id,provider,key_name,key_version,wrapped_dek,format,revision)
     ON public.tenant_secret_deks TO codewire_credential_broker;

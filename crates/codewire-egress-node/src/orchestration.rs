@@ -347,10 +347,11 @@ impl crate::leaves::LeafSigner for Orchestration {
 pub use report::{Enforcement, RECORDS_PER_CALL, wire_record};
 
 /// Whether this build's front door serves bound-secret routes, as the
-/// admission reports it. False until its route table can carry a host a
-/// secret's binding names (#4003, the swap): a Pod whose selection binds one
-/// is refused at its first bind rather than handed to a door with no route.
-const BOUND_ROUTES: bool = false;
+/// admission reports it (#4003): its route table gives every exact name a
+/// Pod's assignment binds that no built-in route serves a bound-secret route
+/// (`RouteTable::for_intercepts`), so a Pod whose first bind recorded a bound
+/// secret's host is served, not refused.
+const BOUND_ROUTES: bool = true;
 
 /// Every name this build's front door has a route for, on its port, as the
 /// admission reports it (#6290): its own built-in route table, each exact
@@ -413,6 +414,21 @@ mod tests {
             assert!(exact.contains(&host), "{host}");
         }
         assert_eq!(suffixes, ["chatgpt.com"]);
+    }
+
+    /// The admission says this build serves bound-secret routes exactly when
+    /// its route table gives a bound name beside the built-in ones a route.
+    #[test]
+    fn the_admission_reports_bound_routes_this_front_door_serves() {
+        use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
+        let bound = InterceptSet::new(
+            ["api.anthropic.com", "api.fancy.com"]
+                .map(|host| InterceptBinding::new(host, 443).unwrap()),
+        )
+        .unwrap();
+        let table = RouteTable::for_intercepts(&bound).unwrap();
+        assert_eq!(table.serves_bound_secret("api.fancy.com"), BOUND_ROUTES);
+        assert!(table.serves_bound_secret("api.fancy.com"));
     }
 
     #[test]

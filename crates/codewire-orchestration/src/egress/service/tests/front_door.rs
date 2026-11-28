@@ -50,6 +50,7 @@ impl BindingStore for Bound {
                     working_directory: String::new(),
                     defaults: None,
                     interception: None,
+                    bound_hosts: Vec::new(),
                 }
             }),
         )

@@ -18,6 +18,7 @@
 #![allow(clippy::unwrap_used)]
 
 mod authority;
+mod bound_lease;
 #[cfg(feature = "enrollment")]
 pub mod delegation;
 #[cfg(feature = "enrollment")]

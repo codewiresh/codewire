@@ -496,6 +496,38 @@ impl BrokerUpstreamTransport for ProviderHttpsTransport {
         upstream_response(response)
     }
 
+    async fn send_bound_secret(
+        &self,
+        mut request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        if request.take_body_stream().is_some() {
+            return Err(BrokerUpstreamError::Protocol);
+        }
+        let pinned = request
+            .pinned()
+            .ok_or(BrokerUpstreamError::DestinationDenied)?;
+        let (method, target, headers, body) = request.into_parts();
+        let host = validate_bound_secret_target(&target, &method)?;
+        let client = pinned_client(
+            client_builder(ConnectionReuse::PerRequest),
+            host,
+            admit_pinned(pinned.ip())?,
+        )?;
+        let response = client
+            .request(method, target.as_str())
+            .headers(headers)
+            .body(body)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| request_failed(BOUND_SECRET_HOST_LABEL, false, error))?;
+        // Redirects are never followed, so the answer is the target's own.
+        if response.url() != &target {
+            return Err(BrokerUpstreamError::DestinationDenied);
+        }
+        upstream_response(response)
+    }
+
     async fn upgrade(
         &self,
         mut request: BrokerUpstreamRequest,
@@ -1004,6 +1036,39 @@ pub(crate) fn admit_pinned(address: IpAddr) -> Result<SocketAddr, BrokerUpstream
         .into_iter()
         .next()
         .ok_or(BrokerUpstreamError::DestinationDenied)
+}
+
+/// The fixed name a bound secret's host is logged as: the host itself is the
+/// user's, and a transport failure line names no request text.
+const BOUND_SECRET_HOST_LABEL: &str = "bound-secret-host";
+
+/// The destination check for a request carrying a host-bound secret's value
+/// (#4003): HTTPS on 443 to an exact canonical name of at least two labels
+/// that no provider route, routed suffix or interception rule of the
+/// platform's own names, a plain method, and nothing in the URL but its host,
+/// path and query. Returns the host.
+fn validate_bound_secret_target<'a>(
+    target: &'a url::Url,
+    method: &Method,
+) -> Result<&'a str, BrokerUpstreamError> {
+    let denied = BrokerUpstreamError::DestinationDenied;
+    let host = target.host_str().ok_or(denied)?;
+    let canonical = InterceptBinding::new(host, OPENAI_PORT)
+        .is_ok_and(|binding| binding.hostname() == host && host.contains('.'));
+    if !canonical
+        || codewire_access::is_provider_host(host)
+        || routed_host(host)
+        || target.scheme() != "https"
+        || target.port_or_known_default() != Some(OPENAI_PORT)
+        || target.port().is_some()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+        || !transparent_method(method)
+    {
+        return Err(denied);
+    }
+    Ok(host)
 }
 
 /// The destination check for a request dialled at a pinned address: only a

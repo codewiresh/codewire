@@ -439,7 +439,7 @@ pub struct PreparedOpenAiResponse {
 }
 
 impl PreparedOpenAiResponse {
-    fn transparent(redaction: RedactionSet, max_body_bytes: usize) -> Self {
+    pub(crate) fn transparent(redaction: RedactionSet, max_body_bytes: usize) -> Self {
         Self {
             allowed_headers: None,
             max_body_bytes,

@@ -170,11 +170,12 @@ impl<L: LeafSource> EnvironmentFrontDoor<L> {
             .map_err(|_| StartError::Identity)?;
         // Each route follows its binding: the boot chain binds exactly the
         // hosts its selected credentials name (`RouteTable::for_clients`,
-        // #5215), so the front door routes those and no others. A bound host
-        // this build has no route for stays bound and is refused by name; a
-        // front door with none routed still starts (#6421).
-        let routes = RouteTable::serving(|host| intercepts.binds(host, INTERCEPT_PORT))
-            .unwrap_or_else(RouteTable::unrouted);
+        // #5215), and a hosted Pod's assignment those and the hosts its
+        // first bind recorded for bound secrets (#4003), so the front door
+        // routes those and no others. A bound host this build has no route
+        // for stays bound and is refused by name; a front door with none
+        // routed still starts (#6421).
+        let routes = RouteTable::for_intercepts(&intercepts).unwrap_or_else(RouteTable::unrouted);
         let backend = CredentialRouteBackend::new(routes, bridge.clone());
         let backend = match refusals {
             Some(sink) => backend.reporting_refusals(sink),

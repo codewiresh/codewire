@@ -245,5 +245,5 @@ fn each_refusal_has_the_code_its_header_names() {
         assert!(!code.description().contains('_'), "{code:?}");
     }
     assert_eq!(RefusalCode::from_code("Path_Not_Served"), None);
-    assert_eq!(RefusalCode::at(20), None);
+    assert_eq!(RefusalCode::at(24), None);
 }

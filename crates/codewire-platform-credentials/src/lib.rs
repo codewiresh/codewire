@@ -53,6 +53,7 @@ mod transient;
 
 pub use material_cache::{
     EpochMaterialCache, MATERIAL_REUSE_TTL, MAX_REUSED_MATERIAL_BYTES, MAX_REUSED_MATERIALS,
+    SecretVersion,
 };
 pub use model::{CredentialRecord, CredentialRegistration, CredentialVersion};
 pub use profiles::{

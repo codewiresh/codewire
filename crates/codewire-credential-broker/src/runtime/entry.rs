@@ -7,15 +7,18 @@ use std::sync::Arc;
 use codewire_daemon_proto::codewire::bridge::v1;
 
 use super::antigravity_token::ANTIGRAVITY_TOKEN_ROUTE;
+use super::bound_secret::BoundDial;
 use super::claude_token::CLAUDE_TOKEN_ROUTE;
 use super::routed::FrontDoorSession;
 use super::{
     BrokerHttpResponse, BrokerLeaseProvider, BrokerRequestBodyStream, BrokerRequestError,
     BrokerUpstreamTransport, OpenAiBroker, ValidatedGuestRequest,
 };
+use crate::bound_secret::{BOUND_SECRET_ROUTE, BOUND_SECRET_SLOT};
 use crate::bridge::BridgeEntry;
 use crate::network::{RouteHost, routed_host};
 use crate::network_policy;
+use codewire_egress_policy::intercept::InterceptBinding;
 use url::Url;
 
 impl<P, U> OpenAiBroker<P, U>
@@ -89,6 +92,10 @@ where
             return Err(BrokerRequestError::UpstreamFailed);
         }
         let result = match body {
+            None if request.bound.is_some() => match request.bound.clone() {
+                Some(dial) => self.execute_bound_secret(dial, request).await,
+                None => Err(BrokerRequestError::InvalidRequest),
+            },
             body if request.intercepted_host.is_some() => {
                 let session = session.ok_or(BrokerRequestError::InvalidRequest)?;
                 self.execute_intercepted(request, body, session).await
@@ -210,6 +217,7 @@ pub(super) fn intercepted(
             Ok((None, None))
         }
         BridgeEntry::Loopback => Err(invalid),
+        BridgeEntry::FrontDoor if is_bound_secret_route(request) => Ok((None, None)),
         BridgeEntry::FrontDoor => {
             let host = request.intercepted_host.as_str();
             if let Some(bound) =
@@ -229,6 +237,42 @@ pub(super) fn intercepted(
             Err(invalid)
         }
     }
+}
+
+fn is_bound_secret_route(request: &v1::CredentialBridgeRequest) -> bool {
+    (request.capability_slot.as_str(), request.route.as_str())
+        == (BOUND_SECRET_SLOT, BOUND_SECRET_ROUTE)
+}
+
+/// A front-door request on a bound secret's route (#4003): the host it was
+/// intercepted for, an exact canonical name no provider route names, which
+/// the epoch's grants choose the secret by, and the address its dial was
+/// admitted to. A loopback request never takes this route.
+pub(super) fn bound_dial(
+    entry: BridgeEntry,
+    request: &v1::CredentialBridgeRequest,
+) -> Result<Option<BoundDial>, BrokerRequestError> {
+    let invalid = BrokerRequestError::InvalidRequest;
+    if !is_bound_secret_route(request) {
+        return Ok(None);
+    }
+    if entry != BridgeEntry::FrontDoor {
+        return Err(invalid);
+    }
+    let host = request.intercepted_host.as_str();
+    let canonical = InterceptBinding::new(host, 443)
+        .is_ok_and(|binding| binding.hostname() == host && host.contains('.'));
+    if !canonical || codewire_access::is_provider_host(host) {
+        return Err(invalid);
+    }
+    let destination = match request.destination_ip.as_str() {
+        "" => None,
+        address => Some(address.parse::<IpAddr>().map_err(|_| invalid)?),
+    };
+    Ok(Some(BoundDial {
+        host: host.to_owned(),
+        destination,
+    }))
 }
 
 #[cfg(test)]

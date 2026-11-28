@@ -28,7 +28,9 @@ use tokio_util::sync::CancellationToken;
 use codewire_egress_node::replacement::StartLimiter;
 
 use super::admission::{self, CallerUse, Reviewed};
-use super::assignment::{AssignedPolicy, Intercept, environment_policy, interception_bindings};
+use super::assignment::{
+    AssignedPolicy, Intercept, environment_policy, interception_bindings, with_bound_hosts,
+};
 use super::front_door_hosts;
 use super::lockdown;
 use super::reports;
@@ -191,17 +193,22 @@ fn denied() -> ConnectError {
 }
 
 /// The hosts a bound sandbox's front door serves, from its binding's encoded
-/// clients, or none while the Pod doesn't intercept. The encoding is
-/// read only while it does; then one this build can't read withholds the
-/// assignment, so the sandbox has no egress rather than another selection's
-/// hosts.
-fn binding_intercepts(interception: bool, encoded: &str) -> Result<Vec<Intercept>, ConnectError> {
+/// clients and the hosts its first bind recorded for bound secrets (#4003),
+/// or none while the Pod doesn't intercept. The encoding is read only while
+/// it does; then one this build can't read withholds the assignment, so the
+/// sandbox has no egress rather than another selection's hosts.
+fn binding_intercepts(
+    interception: bool,
+    encoded: &str,
+    bound_hosts: &[String],
+) -> Result<Vec<Intercept>, ConnectError> {
     if !interception {
         return Ok(Vec::new());
     }
     let clients = ManagedCredentialClients::decode(encoded)
         .map_err(|error| unavailable("read the binding's credential clients", error))?;
     interception_bindings(true, clients)
+        .and_then(|intercepts| with_bound_hosts(intercepts, bound_hosts))
         .map_err(|error| unavailable("select the binding's interception hosts", error))
 }
 
@@ -553,6 +560,7 @@ impl EgressServiceState {
         let intercepts = binding_intercepts(
             self.intercepts(Some(&binding))?,
             &binding.managed_credential_clients,
+            &binding.bound_hosts,
         )?;
         Ok(Assignment::Bound {
             environment_id: binding.environment_id,

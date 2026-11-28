@@ -14,6 +14,7 @@
 pub mod anthropic;
 pub mod antigravity;
 mod antigravity_oauth;
+pub mod bound_secret;
 mod bridge;
 mod claude_oauth;
 mod codex_oauth;

@@ -45,8 +45,9 @@ use codewire_access::{
     one_label_under,
 };
 use codewire_credential_bridge::{
-    CredentialBridge, FrontDoorRequestId, MANAGED_GITHUB_GIT_PREFIX, MANAGED_OPENAI_API_PREFIX,
-    REQUEST_ID_HEADER, UpgradeAnswer, intercepted_host_route, refusal_response,
+    BoundSecretRoute, CredentialBridge, FrontDoorRequestId, MANAGED_GITHUB_GIT_PREFIX,
+    MANAGED_OPENAI_API_PREFIX, REQUEST_ID_HEADER, UpgradeAnswer, intercepted_host_route,
+    refusal_response,
 };
 use codewire_egress_front_door::{
     Backend, BoxError, FrontDoorRefusal, Incoming, InterceptedDestination, ResponseBody,
@@ -108,6 +109,8 @@ pub struct HostRoute {
     /// empty for a host whose route the bridge selects from the host itself
     /// ([`Self::by_host`]).
     pub add_prefix: String,
+    /// Set for a host-bound secret's host (#4003, [`Self::bound_secret`]).
+    pub bound_secret: bool,
 }
 
 impl HostRoute {
@@ -120,6 +123,17 @@ impl HostRoute {
             host: host.into(),
             strip_prefix: strip_prefix.into(),
             add_prefix: add_prefix.into(),
+            bound_secret: false,
+        }
+    }
+
+    /// Every path of a host-bound secret's `host`, as received (#4003): the
+    /// bridge takes it to the bound secrets' route, where the broker chooses
+    /// the secret from its epoch's grants. No built-in route names the host.
+    pub fn bound_secret(host: impl Into<String>) -> Self {
+        Self {
+            bound_secret: true,
+            ..Self::by_host(host)
         }
     }
 
@@ -152,6 +166,8 @@ pub enum RouteTableError {
     Duplicate,
     #[error("a route suffix must be one of the table's own hosts")]
     Suffix,
+    #[error("a bound secret's route covers every path of a host no built-in route names")]
+    BoundSecret,
 }
 
 /// Validated host routes, and suffix routes for the names exactly one label
@@ -243,6 +259,37 @@ impl RouteTable {
             routes: Vec::new(),
             suffixes: Vec::new(),
         }
+    }
+
+    /// The routes a hosted Pod's bindings select (#4003): the built-in
+    /// routes of each host `intercepts` binds on 443, and a bound-secret
+    /// route for every other exact name it binds there, which orchestration
+    /// binds only for a host the Pod's first bind recorded for a bound
+    /// secret. `None` when it binds none.
+    pub fn for_intercepts(intercepts: &InterceptSet) -> Option<Self> {
+        let built_in = Self::built_in();
+        let bound: Vec<HostRoute> = intercepts
+            .bindings()
+            .iter()
+            .filter(|binding| binding.port() == INTERCEPT_PORT)
+            .map(|binding| binding.hostname())
+            .filter(|host| !built_in.hosts().contains(host))
+            .map(HostRoute::bound_secret)
+            .collect();
+        let Some(served) = Self::serving(|host| intercepts.binds(host, INTERCEPT_PORT)) else {
+            return Self::new(bound).ok();
+        };
+        let routes = checked(served.routes.into_iter().chain(bound), 0).ok()?;
+        let suffixes = checked(served.suffixes, routes.len()).ok()?;
+        Some(Self { routes, suffixes })
+    }
+
+    /// Whether `host` is a host-bound secret's, which the front door marks
+    /// for the bridge ([`BoundSecretRoute`]).
+    pub fn serves_bound_secret(&self, host: &str) -> bool {
+        self.routes
+            .iter()
+            .any(|route| route.bound_secret && route.host == host)
     }
 
     /// The built-in routes of each host `serves` names, with Codex's suffix
@@ -504,6 +551,9 @@ impl CredentialRouteBackend {
         let (mut parts, body) = request.into_parts();
         parts.uri = uri;
         parts.headers = forwarded_headers(std::mem::take(&mut parts.headers));
+        if self.routes.serves_bound_secret(host) {
+            parts.extensions.insert(BoundSecretRoute);
+        }
         Ok(Request::from_parts(parts, body))
     }
 }
@@ -575,6 +625,20 @@ where
         // no prefix: a prefix there would send its requests to a route
         // the bridge then picks by host anyway, under another path.
         let by_host = intercepted_host_route(&route.host).is_some();
+        if route.bound_secret {
+            if by_host
+                || codewire_access::is_provider_host(&route.host)
+                || !route.selected_by_host()
+                || route.strip_prefix != "/"
+            {
+                return Err(RouteTableError::BoundSecret);
+            }
+            if table.iter().any(|existing| existing.host == route.host) {
+                return Err(RouteTableError::Duplicate);
+            }
+            table.push(route);
+            continue;
+        }
         if by_host && (!route.selected_by_host() || route.strip_prefix != "/") {
             return Err(RouteTableError::HostRoute);
         }

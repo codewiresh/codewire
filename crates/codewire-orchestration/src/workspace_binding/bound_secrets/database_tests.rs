@@ -336,3 +336,56 @@ async fn db_the_bound_secrets_are_recorded_once_with_the_decision() -> Result<()
     .await;
     db.finish(result).await
 }
+
+/// The live binding reads the hosts its first bind recorded, each once and
+/// sorted, which the Pod's assignment then binds; before that bind, none.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_the_live_binding_reads_the_recorded_bound_hosts() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        let digest = seed(&db).await?;
+        secrets(&db).await?;
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend \
+             (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at) \
+             VALUES ($1,'sandboxes','claim-first-bind','c0ffee00-e29b-41d4-a716-446655440000', \
+             'sandbox-first-bind',$2,now())",
+        )
+        .bind(ENV)
+        .bind(POD)
+        .execute(&db.pool)
+        .await?;
+        let store = PgBindingStore::from_pool(db.pool.clone());
+        let live = || store.live_binding(POD, "sandboxes", "sandbox-first-bind");
+        let before = live()
+            .await
+            .map_err(|_| anyhow::anyhow!("read"))?
+            .ok_or_else(|| anyhow::anyhow!("the binding is live"))?;
+        ensure!(before.bound_hosts.is_empty(), "{:?}", before.bound_hosts);
+        let first = selected(&db.pool, ENV, Some(&digest))
+            .await
+            .map_err(|_| anyhow::anyhow!("the selection reads"))?;
+        store
+            .record_interception(POD, true, &first)
+            .await
+            .map_err(|_| anyhow::anyhow!("record"))?;
+        let after = live()
+            .await
+            .map_err(|_| anyhow::anyhow!("read"))?
+            .ok_or_else(|| anyhow::anyhow!("the binding is live"))?;
+        ensure!(
+            after.bound_hosts
+                == [
+                    "api.fancy.example",
+                    "api.other.example",
+                    "uploads.other.example"
+                ],
+            "{:?}",
+            after.bound_hosts
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

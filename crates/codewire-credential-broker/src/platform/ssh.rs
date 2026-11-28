@@ -273,6 +273,7 @@ impl<A: PlatformRuntimeAuthority + 'static> PlatformBrokerLeaseProvider<A> {
             placeholders: None,
             // A signature goes to no host through this broker.
             uses: None,
+            bound: None,
             ssh: None,
         };
         let admission = scope.clone();

@@ -186,6 +186,49 @@ pub fn classify_intercepted_request<'a>(
     let Some((capability_slot, route)) = intercepted_host_route(host) else {
         return classify_http_request(method, uri, headers);
     };
+    classify_by_host(capability_slot, route, method, uri, headers)
+}
+
+/// The capability slot and route of a request to a host-bound secret's host
+/// (#4003). The broker chooses the secret from its epoch's grants by host
+/// and placeholder; nothing in the request names it.
+pub const BOUND_SECRET_SLOT: &str = "bound-secret";
+pub const BOUND_SECRET_ROUTE: &str = "bound-secret";
+
+/// Marks a front door's request for a host its own route table serves as a
+/// host-bound secret's (#4003). Only the front door's back end inserts it,
+/// from its route table; nothing the environment sends can.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundSecretRoute;
+
+/// [`classify_intercepted_request`] for `request`, intercepted for `host`.
+/// A request the front door marked [`BoundSecretRoute`] takes the bound
+/// secrets' route whatever its path, exactly as a GitHub host's does.
+pub fn classify_intercepted<'a, B>(
+    host: &str,
+    request: &'a axum::http::Request<B>,
+) -> Result<ClassifiedHttpRequest<'a>, Refusal> {
+    if request.extensions().get::<BoundSecretRoute>().is_some() {
+        return classify_by_host(
+            BOUND_SECRET_SLOT,
+            BOUND_SECRET_ROUTE,
+            request.method(),
+            request.uri(),
+            request.headers(),
+        );
+    }
+    classify_intercepted_request(host, request.method(), request.uri(), request.headers())
+}
+
+/// A request on a route its intercepted host selects: any plain method and
+/// safe path, a bounded query, no upgrade, and a well-formed Host if any.
+fn classify_by_host<'a>(
+    capability_slot: &'static str,
+    route: &'static str,
+    method: &Method,
+    uri: &'a Uri,
+    headers: &HeaderMap,
+) -> Result<ClassifiedHttpRequest<'a>, Refusal> {
     let denied = Refusal::RequestNotForwarded(Unforwarded::Refused);
     let path = uri.path();
     let query = uri.query();

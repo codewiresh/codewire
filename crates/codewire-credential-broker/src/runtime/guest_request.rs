@@ -6,7 +6,7 @@ use codewire_daemon_proto::codewire::bridge::v1;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use uuid::Uuid;
 
-use super::{BrokerRequestError, entry, routed};
+use super::{BrokerRequestError, bound_secret, entry, routed};
 use crate::bridge::BridgeEntry;
 use crate::network::RouteHost;
 
@@ -25,6 +25,9 @@ pub(super) struct ValidatedGuestRequest {
     /// A front-door request to a name under a routed suffix, served only at
     /// the origin its session recorded (#3999, `runtime/routed.rs`).
     pub(super) routed: Option<routed::RoutedDial>,
+    /// A front-door request to a host-bound secret's host (#4003,
+    /// `runtime/bound_secret.rs`): set exactly when its slot is that route's.
+    pub(super) bound: Option<bound_secret::BoundDial>,
 }
 
 impl ValidatedGuestRequest {
@@ -46,14 +49,17 @@ impl ValidatedGuestRequest {
             return Err(BrokerRequestError::InvalidRequest);
         }
         let (intercepted_host, routed) = entry::intercepted(entry, &request)?;
-        if !matches!(
-            (request.capability_slot.as_str(), request.route.as_str()),
-            ("codex" | "openai", "openai-api")
-                | ("anthropic", "anthropic-api" | "claude-oauth-token")
-                | ("github", "github-api" | "github-https")
-                | ("gemini", "gemini-api")
-                | ("antigravity", "antigravity-api" | "antigravity-oauth-token")
-        ) || request.body.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
+        let bound = entry::bound_dial(entry, &request)?;
+        if !(bound.is_some()
+            || matches!(
+                (request.capability_slot.as_str(), request.route.as_str()),
+                ("codex" | "openai", "openai-api")
+                    | ("anthropic", "anthropic-api" | "claude-oauth-token")
+                    | ("github", "github-api" | "github-https")
+                    | ("gemini", "gemini-api")
+                    | ("antigravity", "antigravity-api" | "antigravity-oauth-token")
+            ))
+            || request.body.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_REQUEST_BYTES
             || request.headers.len() > codewire_daemon_proto::CREDENTIAL_BRIDGE_MAX_HEADERS
             || request.path.len() > 2048
             || request.query.len() > 4096
@@ -105,6 +111,7 @@ impl ValidatedGuestRequest {
             body: request.body,
             intercepted_host,
             routed,
+            bound,
         })
     }
 }

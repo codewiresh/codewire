@@ -61,6 +61,10 @@ pub struct LiveBinding {
     /// (#4001); `None` until that bind. Read by the bind, every rebind and
     /// every relay epoch, never recomputed.
     pub interception: Option<bool>,
+    /// The hosts of the bound secrets its first bind recorded (#4003),
+    /// sorted and each once; none before that bind or for a Pod that
+    /// recorded none. Its cw-egress binds them beside its credentials'.
+    pub bound_hosts: Vec<String>,
 }
 
 /// What [`LiveBinding::defaults`] carries. No `Debug`: the values are the
@@ -326,6 +330,7 @@ struct LiveBindingRow {
     account_name: Option<String>,
     email: Option<String>,
     interception: Option<bool>,
+    bound_secrets: Option<String>,
 }
 
 #[async_trait]
@@ -355,7 +360,8 @@ impl BindingStore for PgBindingStore {
                       u.git_email,
                       u.name AS account_name,
                       u.email,
-                      w.interception
+                      w.interception,
+                      w.bound_secrets::text AS bound_secrets
                  FROM sandbox_workspace_bindings w
                  JOIN sandbox_environment_backend b
                    ON b.environment_id = w.environment_id
@@ -755,6 +761,7 @@ fn live_binding_from_row(
         account_name,
         email,
         interception,
+        bound_secrets,
     }: LiveBindingRow,
 ) -> Result<LiveBinding, BindingStoreUnavailable> {
     // The schema constrains the scope; anything else is a broken store.
@@ -776,7 +783,24 @@ fn live_binding_from_row(
         working_directory,
         defaults: bind_defaults(environment, git_name, git_email, account_name, email),
         interception,
+        bound_hosts: recorded_hosts(bound_secrets.as_deref())?,
     })
+}
+
+/// Every host the Pod's first-bind record of bound secrets names, sorted
+/// and each once. A record that doesn't read back is a broken store, never
+/// an empty one: its hosts would then go unbound and unserved.
+fn recorded_hosts(stored: Option<&str>) -> Result<Vec<String>, BindingStoreUnavailable> {
+    let Some(stored) = stored else {
+        return Ok(Vec::new());
+    };
+    let recorded: Vec<FirstBindSecret> =
+        serde_json::from_str(stored).map_err(|_| BindingStoreUnavailable)?;
+    let hosts: std::collections::BTreeSet<String> = recorded
+        .into_iter()
+        .flat_map(|secret| secret.hosts)
+        .collect();
+    Ok(hosts.into_iter().collect())
 }
 
 /// The daemon's defaults from the bind statement's columns. A missing or
@@ -955,6 +979,7 @@ mod tests {
                 account_name: None,
                 email: None,
                 interception: None,
+                bound_secrets: None,
             }
         };
         assert_eq!(
@@ -963,6 +988,40 @@ mod tests {
         );
         assert_eq!(
             live_binding_from_row(row("node")),
+            Err(BindingStoreUnavailable)
+        );
+    }
+
+    /// A Pod binds the hosts its first-bind record names, each once; one
+    /// with no record binds none, and a record that doesn't read back is a
+    /// broken store, never an empty one (#4003).
+    #[test]
+    fn a_bindings_bound_hosts_are_its_records() {
+        assert_eq!(recorded_hosts(None), Ok(Vec::new()));
+        assert_eq!(recorded_hosts(Some("[]")), Ok(Vec::new()));
+        let secret = |key: &str, hosts: &[&str]| FirstBindSecret {
+            path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+            key: key.into(),
+            binding_id: "00000000-0000-0000-0000-000000000007".into(),
+            binding_generation: 1,
+            prefix: None,
+            hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+        };
+        let stored = serde_json::to_string(&[
+            secret("B_TOKEN", &["api.b.com", "api.a.com"]),
+            secret("C_TOKEN", &["api.c.com"]),
+        ])
+        .unwrap();
+        assert_eq!(
+            recorded_hosts(Some(&stored)),
+            Ok(vec![
+                "api.a.com".into(),
+                "api.b.com".into(),
+                "api.c.com".into()
+            ])
+        );
+        assert_eq!(
+            recorded_hosts(Some("{\"hosts\":[]}")),
             Err(BindingStoreUnavailable)
         );
     }

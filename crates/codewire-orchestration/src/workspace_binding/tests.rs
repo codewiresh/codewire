@@ -252,6 +252,7 @@ fn binding(scope: WorkspaceCredentialScope) -> LiveBinding {
         working_directory: "/workspace/app".into(),
         defaults: None,
         interception: None,
+        bound_hosts: Vec::new(),
     }
 }
 

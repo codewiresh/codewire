@@ -60,7 +60,7 @@ async fn grant_projection(f: &Fixture) -> Result<()> {
     let role = quote_ident(&f.role);
     for grant in [
         "EXECUTE ON FUNCTION public.codewire_platform_lock_projection_authority(text,text,text,text)",
-        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,binding,binding_id,binding_generation) ON public.tenant_secrets",
+        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,binding,binding_id,binding_generation,value_version) ON public.tenant_secrets",
         "SELECT (dek_id,scope,scope_id,provider,key_name,key_version,wrapped_dek,format,revision) ON public.tenant_secret_deks",
     ] {
         sqlx::query(&format!("GRANT {grant} TO {role}"))
@@ -445,16 +445,18 @@ async fn projection_restricted_reader_cannot_read_configuration_or_mutate_author
                 .contains("synthetic-ordinary-never-returned")
         );
         ensure!(metadata["ordinary_keys"] == json!(["KEY"]));
-        // The binding columns are readable (#4003); nothing else beside them.
-        sqlx::query("SELECT binding,binding_id,binding_generation FROM tenant_secrets")
-            .execute(&f.pool)
-            .await?;
+        // The binding columns and the value version are readable (#4003);
+        // nothing else beside them.
+        sqlx::query(
+            "SELECT binding,binding_id,binding_generation,value_version FROM tenant_secrets",
+        )
+        .execute(&f.pool)
+        .await?;
         for statement in [
             "SELECT project_spec FROM environments",
             "SELECT * FROM tenant_secrets",
             "SELECT * FROM tenant_secret_deks",
             "SELECT * FROM tenant_secret_kek_canary",
-            "SELECT value_version FROM tenant_secrets",
             "SELECT created_at FROM tenant_secrets",
             "UPDATE tenant_secrets SET key=key",
             "UPDATE tenant_secret_deks SET revision=revision",

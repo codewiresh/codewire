@@ -1030,3 +1030,36 @@ fn only_githubs_hosts_select_a_route_by_themselves() {
         Err(Refusal::RequestNotForwarded(Unforwarded::Refused))
     );
 }
+
+/// Only a request its front door marked takes the bound secrets' route, on
+/// any safe path, whatever its Host says; unmarked, the same host is
+/// classified by its managed prefix as before, which a bound host's paths
+/// never carry.
+#[test]
+fn only_a_marked_request_takes_the_bound_secrets_route() {
+    let mut marked = axum::http::Request::post("/v1/things?page=2")
+        .header(HOST, "api.anthropic.com")
+        .body(())
+        .unwrap();
+    marked.extensions_mut().insert(BoundSecretRoute);
+    assert_eq!(
+        classify_intercepted("api.fancy.com", &marked),
+        Ok(ClassifiedHttpRequest {
+            capability_slot: BOUND_SECRET_SLOT,
+            route: BOUND_SECRET_ROUTE,
+            path: "/v1/things",
+            query: Some("page=2"),
+        })
+    );
+    let unmarked = axum::http::Request::post("/things").body(()).unwrap();
+    assert!(classify_intercepted("api.fancy.com", &unmarked).is_err());
+    let mut marked = axum::http::Request::post("/things").body(()).unwrap();
+    marked.extensions_mut().insert(BoundSecretRoute);
+    assert_eq!(
+        classify_intercepted("api.fancy.com", &marked).map(|classified| classified.route),
+        Ok(BOUND_SECRET_ROUTE)
+    );
+    let mut unsafe_path = axum::http::Request::get("/a/../b").body(()).unwrap();
+    unsafe_path.extensions_mut().insert(BoundSecretRoute);
+    assert!(classify_intercepted("api.fancy.com", &unsafe_path).is_err());
+}

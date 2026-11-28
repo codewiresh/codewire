@@ -99,6 +99,13 @@ impl SecretPlaceholder {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether `presented` is exactly this placeholder, compared in constant
+    /// time over their bytes.
+    pub fn ct_eq(&self, presented: &[u8]) -> bool {
+        use subtle::ConstantTimeEq as _;
+        self.0.as_bytes().ct_eq(presented).into()
+    }
 }
 
 impl fmt::Debug for SecretPlaceholder {

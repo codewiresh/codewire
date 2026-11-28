@@ -1378,6 +1378,7 @@ fn binding() -> LiveBinding {
         working_directory: String::new(),
         defaults: None,
         interception: None,
+        bound_hosts: Vec::new(),
     }
 }
 
@@ -2230,6 +2231,7 @@ async fn a_stored_decision_gives_the_ca_and_the_bindings_together() {
             let bindings = binding_intercepts(
                 state.intercepts(Some(&binding)).unwrap(),
                 &binding.managed_credential_clients,
+                &binding.bound_hosts,
             )
             .unwrap();
             let case = format!("switch {setting}, stored {stored}");
@@ -2309,12 +2311,15 @@ async fn an_admission_gives_the_recorded_trust_never_the_switch_now() {
 /// withholds the assignment with it on (#4001 step P).
 #[test]
 fn a_bindings_clients_are_read_only_while_intercepting() {
-    assert_eq!(binding_intercepts(false, "unreadable").unwrap(), Vec::new());
-    assert!(binding_intercepts(true, "unreadable").is_err());
+    assert_eq!(
+        binding_intercepts(false, "unreadable", &[]).unwrap(),
+        Vec::new()
+    );
+    assert!(binding_intercepts(true, "unreadable", &[]).is_err());
     let sign_in = codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"])
         .and_then(codewire_access::ManagedCredentialClients::with_anthropic_sign_in)
         .unwrap();
-    let hosts: Vec<String> = binding_intercepts(true, sign_in.encode())
+    let hosts: Vec<String> = binding_intercepts(true, sign_in.encode(), &[])
         .unwrap()
         .into_iter()
         .map(|intercept| intercept.binding.hostname().to_owned())
@@ -2324,6 +2329,42 @@ fn a_bindings_clients_are_read_only_while_intercepting() {
             .iter()
             .any(|host| host == codewire_access::CLAUDE_TOKEN_HOST)
     );
+}
+
+/// A Pod's assignment binds the hosts its first bind recorded for bound
+/// secrets beside its credentials' (#4003), exactly, on 443 and each once,
+/// only while it intercepts; a record past the 32 bindings a set holds
+/// withholds the assignment rather than binding part of it.
+#[test]
+fn a_pods_recorded_bound_hosts_are_bound_beside_its_credentials() {
+    let clients = codewire_access::ManagedCredentialClients::from_profile_slots(["anthropic"])
+        .unwrap()
+        .encode();
+    let bound = vec!["api.fancy.com".to_owned(), "api.other.com".to_owned()];
+    let intercepts = binding_intercepts(true, clients, &bound).unwrap();
+    let exact: Vec<&str> = intercepts
+        .iter()
+        .filter(|intercept| !intercept.suffix && intercept.binding.port() == 443)
+        .map(|intercept| intercept.binding.hostname())
+        .collect();
+    assert!(exact.contains(&"api.anthropic.com"));
+    assert!(exact.contains(&"api.fancy.com"));
+    assert!(exact.contains(&"api.other.com"));
+    assert_eq!(
+        intercepts.len(),
+        binding_intercepts(true, clients, &[]).unwrap().len() + 2
+    );
+    assert!(
+        binding_intercepts(false, clients, &bound)
+            .unwrap()
+            .is_empty()
+    );
+    // Only a credential-free selection: the bound hosts alone are bound.
+    let none = codewire_access::ManagedCredentialClients::default().encode();
+    assert_eq!(binding_intercepts(true, none, &bound).unwrap().len(), 2);
+    let too_many: Vec<String> = (0..40).map(|index| format!("h{index}.fancy.com")).collect();
+    assert!(binding_intercepts(true, clients, &too_many).is_err());
+    assert!(binding_intercepts(true, clients, &["API.FANCY.COM".to_owned()]).is_err());
 }
 
 /// #6070, cw-security's amendment 3: with the switch off and the broker

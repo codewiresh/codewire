@@ -8,7 +8,9 @@
 
 use std::borrow::Cow;
 
+mod bound_secret;
 mod code;
+pub use bound_secret::{BoundSecretRefusal, OutsideBinding};
 pub use code::RefusalCode;
 
 /// The response header that carries [`Refusal::reason`].

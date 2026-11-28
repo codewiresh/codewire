@@ -8,6 +8,7 @@ use codewire_access::{
     AccessProfile, EnvironmentId, GrantContext, GrantPlacement, Owner, OwnerId, Placement,
     builtin_provider_catalog,
 };
+use codewire_credential_broker::bound_secret::{BoundSecretLeaseError, BoundSecretRow};
 use codewire_credential_broker::platform::bridge::{
     PlatformBridgeAuthenticationError, PlatformBridgeAuthenticator, RelayCaller,
 };
@@ -303,6 +304,26 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
         application_key: Option<codewire_access::ApplicationSecretKey>,
     ) -> Result<Vec<u8>, Error> {
         self.project(request, application_key).await
+    }
+
+    async fn bound_secrets(&self) -> Result<Vec<codewire_access::FirstBindSecret>, Error> {
+        self.bound_secret_grants().await
+    }
+
+    async fn bound_secret_row(
+        &self,
+        secret: &codewire_access::FirstBindSecret,
+        host: &str,
+    ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
+        KubernetesPlatformRuntimeAuthority::bound_secret_row(self, secret, host).await
+    }
+
+    async fn bound_secret_value(
+        &self,
+        secret: &codewire_access::FirstBindSecret,
+        host: &str,
+    ) -> Result<(u64, Zeroizing<Vec<u8>>), BoundSecretLeaseError> {
+        KubernetesPlatformRuntimeAuthority::bound_secret_value(self, secret, host).await
     }
 
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {

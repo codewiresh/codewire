@@ -263,7 +263,7 @@ async fn setup_owner_sources_with_entries(
     let role = quote_ident(&h.role);
     for grant in [
         "EXECUTE ON FUNCTION public.codewire_platform_lock_owner_source_authority(text,text,text)",
-        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,binding,binding_id,binding_generation) ON public.tenant_secrets",
+        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,binding,binding_id,binding_generation,value_version) ON public.tenant_secrets",
         "SELECT (dek_id,scope,scope_id,provider,key_name,key_version,wrapped_dek,format,revision) ON public.tenant_secret_deks",
     ] {
         sqlx::query(&format!("GRANT {grant} TO {role}"))

@@ -60,6 +60,20 @@ pub trait BrokerUpstreamTransport: Send + Sync {
         drop(request);
         Err(BrokerUpstreamError::DestinationDenied)
     }
+
+    /// Send a front-door request to a host-bound secret's host, its value
+    /// already swapped in (#4003). The host is no provider's, so it was never
+    /// resolved here: the request is dialled only at its pinned address,
+    /// the one the egress broker admitted under the environment's network
+    /// policy, checked again, and TLS verifies the host's certificate. A
+    /// transport that does not send bound secrets refuses the destination.
+    async fn send_bound_secret(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        drop(request);
+        Err(BrokerUpstreamError::DestinationDenied)
+    }
 }
 
 /// A runtime with application sources only has no provider DNS/socket setup.
@@ -96,6 +110,16 @@ impl<T: BrokerUpstreamTransport> BrokerUpstreamTransport for Option<T> {
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         match self {
             Some(transport) => transport.forward_github(request).await,
+            None => Err(BrokerUpstreamError::DestinationDenied),
+        }
+    }
+
+    async fn send_bound_secret(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        match self {
+            Some(transport) => transport.send_bound_secret(request).await,
             None => Err(BrokerUpstreamError::DestinationDenied),
         }
     }
