@@ -55,7 +55,17 @@ spec:
               drop: [ALL]
             seccompProfile:
               type: RuntimeDefault
-          {{- include "codewire.serviceContainer" (dict "root" $ "service" .) | nindent 10 }}
+          {{- $extraEnv := list }}
+          {{- if .localKeyring.enabled }}
+          {{- $kekMount := required "orchestration.localKeyring.mountPath is required when orchestration.localKeyring.enabled is true" .localKeyring.mountPath }}
+          {{- $kekActiveId := required "orchestration.localKeyring.activeKeyId is required when orchestration.localKeyring.enabled is true" .localKeyring.activeKeyId }}
+          {{- $extraEnv = list
+                (dict "name" "CODEWIRE_SECRET_KEK_PROVIDER" "value" "local-keyring")
+                (dict "name" "CODEWIRE_SECRET_KEK_DIR" "value" $kekMount)
+                (dict "name" "CODEWIRE_SECRET_KEK_ACTIVE_ID" "value" $kekActiveId)
+          }}
+          {{- end }}
+          {{- include "codewire.serviceContainer" (dict "root" $ "service" . "extraEnv" $extraEnv) | nindent 10 }}
           ports:
             - containerPort: 8084
               name: http
@@ -128,6 +138,11 @@ spec:
             # makes in it at startup; never the mount's group-writable root.
             - name: cw-runtime-staging
               mountPath: /var/lib/codewire-orchestration/staging
+            {{- if .localKeyring.enabled }}
+            - name: tenant-keks
+              mountPath: {{ required "orchestration.localKeyring.mountPath is required when orchestration.localKeyring.enabled is true" .localKeyring.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         # cert-manager-owned leaf for the internal TLS listener. Readable by
         # the image's 65532 group only, through the pod fsGroup.
@@ -188,6 +203,12 @@ spec:
         - name: cw-runtime-staging
           emptyDir:
             sizeLimit: 2Gi
+        {{- if .localKeyring.enabled }}
+        - name: tenant-keks
+          secret:
+            secretName: {{ required "orchestration.localKeyring.secretName is required when orchestration.localKeyring.enabled is true" .localKeyring.secretName }}
+            defaultMode: 0440
+        {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

@@ -17,6 +17,7 @@ One Helm chart for the whole Codewire platform (#2908). It is being built one co
 - Mesh (`mesh.enabled`, off by default): the Mesh chart's own templates, kept verbatim in `templates/_mesh.tpl` and rendered with `mesh.values` as that chart's values and `mesh.release` as its release name, so the objects match today's `codewire-mesh` release. Its `helm test` hook is not rendered. Until the cut-over, Dev and Production still deploy `apps/cli/charts/codewire-mesh`, and a change there must be made in `_mesh.tpl` too.
 - Orchestration: its Deployment, ServiceAccount, Services, RBAC (cluster-wide read-only, its own namespace, and the sandbox namespace), admission policies and bindings, the image-registries and hosted-egress ConfigMaps (hosted egress off by default), its Certificates, and its workspace-binding NetworkPolicy.
 - The credential service: its Deployment, ServiceAccount, Service, RBAC (its Role and RoleBinding for reading Sandboxes in `sandboxNamespace`), broker Certificate, NetworkPolicy and PodDisruptionBudget.
+- Optional self-hosted components (all off by default, #6706): `orchestration.localKeyring` (local-keyring tenant KEK mount), `orchestration.internalIssuer` (namespace-local self-signed cert-manager CA Issuer), `temporal` (in-cluster Temporal backed by PostgreSQL), `gateway` (Envoy Gateway `Gateway`, `Backend` h2c, `HTTPRoute` and `BackendTrafficPolicy` objects), `databaseInit` (pre-install PostgreSQL database/extension bootstrap Job), and `adminBootstrap` (post-install `codewire-idp create-admin` Job).
 
 ## Values
 

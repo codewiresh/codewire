@@ -1,0 +1,129 @@
+{{- with .Values.temporal }}
+{{- if .enabled }}
+{{- $pgHost := required "temporal.postgres.host is required when temporal.enabled is true" .postgres.host }}
+{{- $pgUser := required "temporal.postgres.user is required when temporal.enabled is true" .postgres.user }}
+{{- $pgSecret := required "temporal.postgres.passwordSecretName is required when temporal.enabled is true" .postgres.passwordSecretName }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codewire-temporal
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "temporal" | nindent 4 }}
+spec:
+  replicas: {{ .replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "codewire.selectorLabels" "temporal" | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "codewire.selectorLabels" "temporal" | nindent 8 }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: temporal
+          image: {{ include "codewire.image" (dict "family" "temporal" "images" $.Values.images) }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - containerPort: 7233
+              name: grpc
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: {{ .postgres.port | quote }}
+            - name: POSTGRES_SEEDS
+              value: {{ $pgHost | quote }}
+            - name: POSTGRES_USER
+              value: {{ $pgUser | quote }}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $pgSecret }}
+                  key: {{ .postgres.passwordSecretKey }}
+            - name: DBNAME
+              value: {{ .postgres.databaseName | quote }}
+            - name: VISIBILITY_DBNAME
+              value: {{ .postgres.visibilityDatabaseName | quote }}
+            - name: SKIP_DB_CREATE
+              value: {{ ternary "true" "false" .postgres.skipDbCreate | quote }}
+            - name: DEFAULT_NAMESPACE_RETENTION
+              value: {{ .defaultNamespaceRetention | quote }}
+            - name: BIND_ON_IP
+              value: "0.0.0.0"
+            {{- if .postgres.tlsEnabled }}
+            - name: SQL_TLS_ENABLED
+              value: "true"
+            - name: SQL_TLS_DISABLE_HOST_VERIFICATION
+              value: {{ ternary "true" "false" .postgres.tlsDisableHostVerification | quote }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .serviceName }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "temporal" | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "codewire.selectorLabels" "temporal" | nindent 6 }}
+  ports:
+    - port: 7233
+      targetPort: grpc
+      name: grpc
+{{- if .networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: codewire-temporal
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "temporal" | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "codewire.selectorLabels" "temporal" | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "codewire.podPeer" (dict "labels" (dict "app.kubernetes.io/name" "codewire" "app.kubernetes.io/component" "orchestration") "from" "temporal.networkPolicy.orchestration") | nindent 8 }}
+        {{- include "codewire.podPeer" (dict "labels" (dict "app.kubernetes.io/name" "codewire" "app.kubernetes.io/component" "billing") "from" "temporal.networkPolicy.billing") | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 7233
+{{- end }}
+{{- end }}
+{{- end }}

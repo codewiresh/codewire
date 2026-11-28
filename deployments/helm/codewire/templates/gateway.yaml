@@ -1,0 +1,597 @@
+{{- with .Values.gateway }}
+{{- if .enabled }}
+{{- $host := required "gateway.host is required when gateway.enabled is true" .host }}
+{{- $tlsSecret := required "gateway.tlsSecret is required when gateway.enabled is true" .tlsSecret }}
+{{- $gwName := required "gateway.name is required when gateway.enabled is true" .name }}
+{{- $gwNamespace := default $.Release.Namespace .namespace }}
+{{- $ns := $.Release.Namespace }}
+# Cleartext HTTP/2 (h2c) Envoy Backends for native gRPC bidirectional streams.
+{{- if $.Values.orchestration.enabled }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: orchestration-h2c
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  appProtocols: [gateway.envoyproxy.io/h2c]
+  endpoints:
+    - fqdn:
+        hostname: codewire-orchestration-grpc.{{ $ns }}.svc.cluster.local
+        port: 8084
+{{- end }}
+{{- if $.Values.coordinator.enabled }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: coordinator-h2c
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  appProtocols: [gateway.envoyproxy.io/h2c]
+  endpoints:
+    - fqdn:
+        hostname: codewire-coordinator.{{ $ns }}.svc.cluster.local
+        port: 8090
+{{- end }}
+{{- if $.Values.mesh.enabled }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: mesh-h2c
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  appProtocols: [gateway.envoyproxy.io/h2c]
+  endpoints:
+    - fqdn:
+        hostname: codewire-mesh-http.{{ $ns }}.svc.cluster.local
+        port: 8080
+{{- end }}
+{{- if $.Values.credentialService.enabled }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: credential-h2c
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  appProtocols: [gateway.envoyproxy.io/h2c]
+  endpoints:
+    - fqdn:
+        hostname: codewire-credential-service.{{ $ns }}.svc.cluster.local
+        port: 8086
+{{- end }}
+{{- if .createGateway }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ $gwName }}
+  namespace: {{ $gwNamespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ required "gateway.className is required when gateway.createGateway is true" .className }}
+  {{- with .infrastructure }}
+  infrastructure:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ $host | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ $tlsSecret }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- if .previewHost }}
+    - name: https-preview
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .previewHost | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ required "gateway.previewTlsSecret is required when gateway.previewHost is set" .previewTlsSecret }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+    {{- if and $.Values.derp.enabled .derpHost }}
+    - name: https-derp
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .derpHost | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: {{ required "gateway.derpTlsSecret is required when gateway.derpHost is set" .derpTlsSecret }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+{{- end }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: codewire-http-redirect
+  namespace: {{ $gwNamespace }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  parentRefs:
+    - name: {{ $gwName }}
+      sectionName: http
+  hostnames:
+    - {{ $host | quote }}
+    {{- if .previewHost }}
+    - {{ .previewHost | quote }}
+    {{- end }}
+    {{- if and $.Values.derp.enabled .derpHost }}
+    - {{ .derpHost | quote }}
+    {{- end }}
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: codewire-apex
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  parentRefs:
+    - name: {{ $gwName }}
+      namespace: {{ $gwNamespace }}
+      sectionName: https
+  hostnames:
+    - {{ $host | quote }}
+  rules:
+    {{- if $.Values.billing.enabled }}
+    - name: billing-console
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]console[.]v1[.]BillingService/.*"
+      filters:
+        {{- include "codewire.gatewayEdgeFilters" . | nindent 8 }}
+      backendRefs:
+        - name: codewire-billing
+          port: 8081
+    - name: stripe-webhook
+      matches:
+        - path:
+            type: Exact
+            value: /api/webhooks/stripe
+      filters:
+        {{- include "codewire.gatewayEdgeFilters" . | nindent 8 }}
+      backendRefs:
+        - name: codewire-billing
+          port: 8081
+    - name: billing-catalog
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]admin[.]v1[.]BillingCatalogService/.*"
+      filters:
+        {{- include "codewire.gatewayEdgeFilters" . | nindent 8 }}
+      backendRefs:
+        - name: codewire-billing
+          port: 8081
+    {{- end }}
+    {{- if $.Values.orchestration.enabled }}
+    - name: admin
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]admin[.]v1[.]AdminService/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-orchestration
+          port: 8084
+    {{- end }}
+    {{- if $.Values.mesh.enabled }}
+    - name: mesh-api
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]v1[.]Mesh(Network|Node|Invite|Group|KeyValue)Service/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-mesh-http
+          port: 8080
+    - name: mesh-coordinator-grpc
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]internal[.]v1[.]MeshCoordinatorService/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - group: gateway.envoyproxy.io
+          kind: Backend
+          name: mesh-h2c
+    {{- end }}
+    {{- if $.Values.credentialService.enabled }}
+    - name: credential-mutation
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]v1[.](CredentialMutation|GithubRepository)Service/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-credential-service
+          port: 8086
+    - name: credential-delegation-grpc
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]v1[.]CredentialDelegationService/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - group: gateway.envoyproxy.io
+          kind: Backend
+          name: credential-h2c
+    {{- end }}
+    {{- if $.Values.coordinator.enabled }}
+    - name: coordinator-grpc
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]internal[.]v1[.]CoordinatorService/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - group: gateway.envoyproxy.io
+          kind: Backend
+          name: coordinator-h2c
+    {{- end }}
+    {{- if $.Values.orchestration.enabled }}
+    - name: environment-session-grpc
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]v1[.]EnvironmentSessionService/.*"
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.]v1[.]HostAgentService/.*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - group: gateway.envoyproxy.io
+          kind: Backend
+          name: orchestration-h2c
+    - name: connect-fallback
+      matches:
+        - path:
+            type: RegularExpression
+            value: "^/codewire[.].*"
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-orchestration
+          port: 8084
+    {{- end }}
+    {{- if $.Values.idp.enabled }}
+    - name: idp
+      matches:
+        - path: { type: PathPrefix, value: /api/oauth }
+        - path: { type: PathPrefix, value: /api/auth/two-factor }
+        - path: { type: PathPrefix, value: /api/auth/verify-email }
+        - path: { type: PathPrefix, value: /api/auth/forget-password }
+        - path: { type: PathPrefix, value: /api/auth/reset-password }
+        - path: { type: PathPrefix, value: /api/auth/send-verification-email }
+        - path: { type: PathPrefix, value: /api/auth/sign-up }
+        - path: { type: PathPrefix, value: /api/auth/sign-in }
+        - path: { type: PathPrefix, value: /api/auth/sign-out }
+        - path: { type: PathPrefix, value: /api/auth/get-session }
+        - path: { type: PathPrefix, value: /api/auth/oauth }
+        - path: { type: PathPrefix, value: /api/oidc }
+        - path: { type: PathPrefix, value: /.well-known/openid-configuration }
+        - path: { type: PathPrefix, value: /.well-known/oauth-authorization-server }
+        - path: { type: PathPrefix, value: /.well-known/jwks.json }
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-idp
+          port: 8091
+    {{- end }}
+    {{- if $.Values.dashboard.enabled }}
+    - name: oauth-callback
+      matches:
+        - path:
+            type: Exact
+            value: /api/v1/github/oauth/callback
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: {{ $.Values.dashboard.service.name }}
+          port: {{ $.Values.dashboard.service.port }}
+    {{- end }}
+    {{- if $.Values.orchestration.enabled }}
+    - name: orchestration-api
+      matches:
+        - path: { type: PathPrefix, value: /api }
+        - path: { type: PathPrefix, value: /readyz }
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-orchestration
+          port: 8084
+    {{- end }}
+    {{- if $.Values.dashboard.enabled }}
+    - name: dashboard
+      matches:
+        - path: { type: Exact, value: /.well-known/apple-app-site-association }
+        - path: { type: PathPrefix, value: /docs }
+        - path: { type: PathPrefix, value: /install.sh }
+        - path: { type: PathPrefix, value: /healthz }
+        - path: { type: PathPrefix, value: / }
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: {{ $.Values.dashboard.service.name }}
+          port: {{ $.Values.dashboard.service.port }}
+    {{- end }}
+{{- if and $.Values.orchestration.enabled .previewHost }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: codewire-preview
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  parentRefs:
+    - name: {{ $gwName }}
+      namespace: {{ $gwNamespace }}
+      sectionName: https-preview
+  hostnames:
+    - {{ .previewHost | quote }}
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+      backendRefs:
+        - name: codewire-orchestration
+          port: 8084
+{{- end }}
+{{- if and $.Values.derp.enabled .derpHost }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: codewire-derp
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  parentRefs:
+    - name: {{ $gwName }}
+      namespace: {{ $gwNamespace }}
+      sectionName: https-derp
+  hostnames:
+    - {{ .derpHost | quote }}
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      filters:
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            set:
+              - name: Strict-Transport-Security
+                value: "max-age=31536000; includeSubDomains"
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            remove: [traceparent, tracestate, baggage]
+      backendRefs:
+        - name: codewire-derp
+          port: 8080
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: codewire-derp
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: codewire-derp
+  httpUpgrade:
+    - type: DERP
+    - type: websocket
+  timeout:
+    http:
+      requestTimeout: 0s
+      maxStreamDuration: 0s
+      streamIdleTimeout: 3600s
+{{- end }}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: codewire-long-lived
+  namespace: {{ $ns }}
+  labels:
+    app.kubernetes.io/name: codewire
+    app.kubernetes.io/part-of: codewire
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: codewire-apex
+    {{- if and $.Values.orchestration.enabled .previewHost }}
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: codewire-preview
+    {{- end }}
+  timeout:
+    http:
+      requestTimeout: 0s
+      maxStreamDuration: 0s
+      streamIdleTimeout: 3600s
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        - clientSelectors:
+            - path: { type: RegularExpression, value: "^/api/oauth/token([?].*)?$" }
+              sourceCIDR: { type: Distinct, value: 0.0.0.0/0 }
+          limit: { requests: 120, unit: Minute }
+        - clientSelectors:
+            - path: { type: RegularExpression, value: "^/api/oauth/token([?].*)?$" }
+              sourceCIDR: { type: Distinct, value: "::/0" }
+          limit: { requests: 120, unit: Minute }
+        - clientSelectors:
+            - path: { type: RegularExpression, value: "^/api/oauth/authorize([?].*)?$" }
+              sourceCIDR: { type: Distinct, value: 0.0.0.0/0 }
+          limit: { requests: 30, unit: Minute }
+        - clientSelectors:
+            - path: { type: RegularExpression, value: "^/api/oauth/authorize([?].*)?$" }
+              sourceCIDR: { type: Distinct, value: "::/0" }
+          limit: { requests: 30, unit: Minute }
+        - clientSelectors:
+            - path: { type: PathPrefix, value: /api/oauth/device }
+              sourceCIDR: { type: Distinct, value: 0.0.0.0/0 }
+          limit: { requests: 20, unit: Minute }
+        - clientSelectors:
+            - path: { type: PathPrefix, value: /api/oauth/device }
+              sourceCIDR: { type: Distinct, value: "::/0" }
+          limit: { requests: 20, unit: Minute }
+{{- end }}
+{{- end }}

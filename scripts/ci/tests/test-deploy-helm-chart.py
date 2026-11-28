@@ -695,6 +695,135 @@ class ChartEquivalence(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, f"{re.escape(path)} is empty: a peer selecting no labels admits every Pod"):
                         helm("prod", [SOURCE_VALUES, Path(scratch, "values.yaml")])
 
+    def test_orchestration_local_keyring_toggle_mounts_secret_and_fails_closed(self) -> None:
+        docs = objects(helm(
+            "codewire",
+            [SOURCE_VALUES],
+            SEPARATE + (
+                "--set", "orchestration.localKeyring.enabled=true",
+                "--set", "orchestration.localKeyring.secretName=codewire-tenant-keks",
+            ),
+        ))
+        orch = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "codewire-orchestration")
+        container = orch["spec"]["template"]["spec"]["containers"][0]
+        env_map = {e["name"]: e.get("value") for e in container["env"]}
+        self.assertEqual(env_map.get("CODEWIRE_SECRET_KEK_PROVIDER"), "local-keyring")
+        self.assertEqual(env_map.get("CODEWIRE_SECRET_KEK_DIR"), "/var/run/secrets/codewire/tenant-keks")
+        self.assertEqual(env_map.get("CODEWIRE_SECRET_KEK_ACTIVE_ID"), "v1")
+        self.assertTrue(any(m["name"] == "tenant-keks" and m["readOnly"] for m in container["volumeMounts"]))
+        self.assertTrue(any(
+            v["name"] == "tenant-keks" and v["secret"]["secretName"] == "codewire-tenant-keks"
+            for v in orch["spec"]["template"]["spec"]["volumes"]
+        ))
+        with self.assertRaisesRegex(RuntimeError, "orchestration.localKeyring.secretName is required"):
+            helm("codewire", [SOURCE_VALUES], SEPARATE + (
+                "--set", "orchestration.localKeyring.enabled=true",
+                "--set", "orchestration.localKeyring.secretName=",
+            ))
+
+    def test_temporal_and_bootstrap_jobs_render_and_fail_closed(self) -> None:
+        docs = objects(helm(
+            "codewire",
+            [SOURCE_VALUES],
+            SEPARATE + (
+                "--set", "temporal.enabled=true",
+                "--set", "temporal.postgres.host=rds.internal.test",
+                "--set", "images.temporal.repository=mirror.example.test/temporalio/auto-setup",
+                "--set", "images.temporal.digest=",
+                "--set", "images.temporal.tag=1.29.0",
+                "--set", "databaseInit.enabled=true",
+                "--set", "databaseInit.host=rds.internal.test",
+                "--set", "images.databaseInit.repository=mirror.example.test/library/postgres",
+                "--set", "images.databaseInit.digest=",
+                "--set", "images.databaseInit.tag=17-alpine",
+                "--set", "adminBootstrap.enabled=true",
+                "--set", "adminBootstrap.email=admin@example.test",
+                "--set", "adminBootstrap.passwordSecretName=codewire-admin-init",
+                "--set", "orchestration.internalIssuer.create=true",
+            ),
+        ))
+        kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+        self.assertIn(("Deployment", "codewire-temporal"), kinds_names)
+        self.assertIn(("Service", "temporal-frontend"), kinds_names)
+        self.assertIn(("NetworkPolicy", "codewire-temporal"), kinds_names)
+        self.assertIn(("Job", "codewire-database-init"), kinds_names)
+        self.assertIn(("Job", "codewire-admin-bootstrap"), kinds_names)
+        self.assertIn(("Issuer", "codewire-orchestration-internal"), kinds_names)
+        temporal_dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "codewire-temporal")
+        self.assertEqual(
+            temporal_dep["spec"]["template"]["spec"]["containers"][0]["image"],
+            "mirror.example.test/temporalio/auto-setup:1.29.0",
+        )
+        db_init_job = next(d for d in docs if d["kind"] == "Job" and d["metadata"]["name"] == "codewire-database-init")
+        self.assertEqual(
+            db_init_job["spec"]["template"]["spec"]["containers"][0]["image"],
+            "mirror.example.test/library/postgres:17-alpine",
+        )
+        self.assertEqual(
+            db_init_job["spec"]["template"]["spec"].get("imagePullSecrets"),
+            [{"name": "harbor-registry"}],
+        )
+        admin_job = next(d for d in docs if d["kind"] == "Job" and d["metadata"]["name"] == "codewire-admin-bootstrap")
+        admin_pod = admin_job["spec"]["template"]["spec"]
+        admin_container = admin_pod["containers"][0]
+        admin_env_names = {e["name"] for e in admin_container.get("env") or []}
+        self.assertNotIn("IDP_SIGNING_KEK_DIR", admin_env_names)
+        self.assertNotIn("IDP_SIGNING_ACTIVE_KEK_ID", admin_env_names)
+        self.assertFalse(any(
+            "idp-signing-kek" in (v.get("name", "") + (v.get("secret") or {}).get("secretName", ""))
+            for v in admin_pod.get("volumes") or []
+        ))
+        self.assertFalse(any(
+            "idp-signing-kek" in (m.get("name", "") + m.get("mountPath", ""))
+            for m in admin_container.get("volumeMounts") or []
+        ))
+        with self.assertRaisesRegex(RuntimeError, "temporal.postgres.host is required"):
+            helm("codewire", [SOURCE_VALUES], SEPARATE + ("--set", "temporal.enabled=true"))
+        with self.assertRaisesRegex(RuntimeError, "databaseInit.host is required"):
+            helm("codewire", [SOURCE_VALUES], SEPARATE + ("--set", "databaseInit.enabled=true"))
+        with self.assertRaisesRegex(RuntimeError, "adminBootstrap.email is required"):
+            helm("codewire", [SOURCE_VALUES], SEPARATE + (
+                "--set", "adminBootstrap.enabled=true",
+                "--set", "adminBootstrap.passwordSecretName=codewire-admin-init",
+            ))
+
+    def test_gateway_api_routes_render_and_fail_closed(self) -> None:
+        docs = objects(helm(
+            "codewire",
+            [SOURCE_VALUES],
+            SEPARATE + (
+                "--set", "gateway.enabled=true",
+                "--set", "gateway.host=codewire.example.test",
+                "--set", "gateway.tlsSecret=codewire-tls",
+                "--set", "gateway.previewHost=*.preview.example.test",
+                "--set", "gateway.previewTlsSecret=codewire-preview-tls",
+                "--set", "gateway.derpHost=derp.example.test",
+                "--set", "gateway.derpTlsSecret=codewire-derp-tls",
+            ),
+        ))
+        kinds_names = {(d["kind"], d["metadata"]["name"]) for d in docs}
+        for expected in (
+            ("Gateway", "codewire-public"),
+            ("Backend", "orchestration-h2c"),
+            ("HTTPRoute", "codewire-http-redirect"),
+            ("HTTPRoute", "codewire-apex"),
+            ("HTTPRoute", "codewire-preview"),
+            ("HTTPRoute", "codewire-derp"),
+            ("BackendTrafficPolicy", "codewire-long-lived"),
+            ("BackendTrafficPolicy", "codewire-derp"),
+        ):
+            self.assertIn(expected, kinds_names)
+        apex = next(d for d in docs if d["kind"] == "HTTPRoute" and d["metadata"]["name"] == "codewire-apex")
+        grpc_rule = next(r for r in apex["spec"]["rules"] if r["name"] == "environment-session-grpc")
+        match_values = {m["path"]["value"] for m in grpc_rule["matches"]}
+        self.assertIn("^/codewire[.]v1[.]HostAgentService/.*", match_values)
+        self.assertIn("^/codewire[.]v1[.]EnvironmentSessionService/.*", match_values)
+        with self.assertRaisesRegex(RuntimeError, "gateway.host is required"):
+            helm("codewire", [SOURCE_VALUES], SEPARATE + (
+                "--set", "gateway.enabled=true",
+                "--set", "gateway.tlsSecret=codewire-tls",
+            ))
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main(verbosity=2))

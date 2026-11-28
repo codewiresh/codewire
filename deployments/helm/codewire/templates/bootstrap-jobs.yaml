@@ -1,0 +1,161 @@
+{{- with .Values.databaseInit }}
+{{- if .enabled }}
+{{- $pgHost := required "databaseInit.host is required when databaseInit.enabled is true" .host }}
+{{- $pgUser := required "databaseInit.user is required when databaseInit.enabled is true" .user }}
+{{- $pgSecret := required "databaseInit.passwordSecretName is required when databaseInit.enabled is true" .passwordSecretName }}
+# One-shot pre-install/pre-upgrade Job that ensures Temporal's logical databases
+# exist alongside the primary Codewire database and enables pgcrypto (#6706).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codewire-database-init
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "database-init" | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "codewire.selectorLabels" "database-init" | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: database-init
+          image: {{ include "codewire.image" (dict "family" "databaseInit" "images" $.Values.images) }}
+          command:
+            - /bin/sh
+            - -ceu
+            - |
+              psql -v ON_ERROR_STOP=1 --dbname "$PGDATABASE" <<'SQL'
+              CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+              SELECT 'CREATE DATABASE temporal'
+              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'temporal')\gexec
+              SELECT 'CREATE DATABASE temporal_visibility'
+              WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'temporal_visibility')\gexec
+              SQL
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: PGHOST
+              value: {{ $pgHost | quote }}
+            - name: PGPORT
+              value: {{ .port | quote }}
+            - name: PGUSER
+              value: {{ $pgUser | quote }}
+            - name: PGDATABASE
+              value: {{ .databaseName | quote }}
+            - name: PGSSLMODE
+              value: {{ .sslMode | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $pgSecret }}
+                  key: {{ .passwordSecretKey }}
+          resources:
+            {{- toYaml .resources | nindent 12 }}
+{{- end }}
+{{- end }}
+{{- with .Values.adminBootstrap }}
+{{- if .enabled }}
+{{- $email := required "adminBootstrap.email is required when adminBootstrap.enabled is true" .email }}
+{{- $passwordSecret := required "adminBootstrap.passwordSecretName is required when adminBootstrap.enabled is true" .passwordSecretName }}
+---
+# One-shot post-install Job that creates the first administrator via
+# `codewire-idp create-admin`, passing the password on stdin from a mounted
+# Secret (never in argv, env, or logs). Idempotent when an admin exists (#6706).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codewire-admin-bootstrap
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "admin-bootstrap" | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "codewire.selectorLabels" "admin-bootstrap" | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: admin-bootstrap
+          image: {{ include "codewire.image" (dict "family" "services" "images" $.Values.images) }}
+          command:
+            - /bin/sh
+            - -ceu
+            - exec /codewire-idp create-admin --email "$CODEWIRE_ADMIN_EMAIL" < /var/run/secrets/codewire/admin-bootstrap/password
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          envFrom:
+            - configMapRef:
+                name: {{ include "codewire.configName" $ }}
+            - secretRef:
+                name: {{ $.Values.sharedSecret }}
+          env:
+            - name: CODEWIRE_ADMIN_EMAIL
+              value: {{ $email | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: codewire-db-app
+                  key: password
+          volumeMounts:
+            - name: admin-bootstrap-password
+              mountPath: /var/run/secrets/codewire/admin-bootstrap
+              readOnly: true
+          resources:
+            {{- toYaml .resources | nindent 12 }}
+      volumes:
+        - name: admin-bootstrap-password
+          secret:
+            secretName: {{ $passwordSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .passwordSecretKey }}
+                path: password
+{{- end }}
+{{- end }}

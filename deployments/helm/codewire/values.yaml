@@ -537,6 +537,19 @@ orchestration:
   # those Secrets itself.
   internalCertificate: true
   udpRelayAllocatorClientCertificate: true
+  # Self-hosted namespace-local cert-manager CA Issuer for internal TLS (#6706).
+  # Off by default: hosted clusters provision `codewire-orchestration-internal`
+  # from infrastructure.
+  internalIssuer:
+    create: false
+  # Local-keyring tenant-secret KEK directory (#4121, #6706). Off by default
+  # (hosted clusters use OpenBao Transit). Enabling mounts the Secret read-only
+  # and sets CODEWIRE_SECRET_KEK_PROVIDER=local-keyring explicitly.
+  localKeyring:
+    enabled: false
+    secretName: codewire-tenant-keks
+    mountPath: /var/run/secrets/codewire/tenant-keks
+    activeKeyId: v1
 
 # The hosted-egress switch (#4000) and what the warm-pool template admission
 # policy needs for its broker arm: codewire-hosted-egress. Off, so only today's
@@ -773,6 +786,16 @@ images:
     repository: ""
     tag: ""
     digest: ""
+  # Optional in-cluster Temporal server image (temporal.enabled).
+  temporal:
+    repository: docker.io/temporalio/auto-setup
+    tag: "1.29.0"
+    digest: sha256:6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909
+  # Optional pre-install PostgreSQL init Job image (databaseInit.enabled).
+  databaseInit:
+    repository: docker.io/library/postgres
+    tag: "17-alpine"
+    digest: sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
 
 dashboard:
   enabled: true
@@ -826,3 +849,85 @@ dashboard:
   networkPolicy:
     # It admits the public edge (edge.peers) only.
     enabled: true
+
+# Optional in-cluster Temporal server backed by PostgreSQL (#2908, #6706). Off
+# by default: Dev and Production deploy Temporal through its own HelmRelease.
+# The container image is parameterized under images.temporal.
+temporal:
+  enabled: false
+  replicas: 1
+  serviceName: temporal-frontend
+  defaultNamespaceRetention: 7d
+  postgres:
+    host: ""
+    port: "5432"
+    user: codewire
+    passwordSecretName: codewire-db-app
+    passwordSecretKey: password
+    databaseName: temporal
+    visibilityDatabaseName: temporal_visibility
+    skipDbCreate: true
+    tlsEnabled: true
+    tlsDisableHostVerification: false
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1536Mi
+  networkPolicy:
+    enabled: true
+
+# Optional Envoy Gateway (Gateway API) edge routes (#6706). Off by default:
+# Dev and Production manage Gateway routes in infrastructure and Kind uses
+# ingress.local.
+gateway:
+  enabled: false
+  createGateway: true
+  name: codewire-public
+  namespace: ""
+  className: eg
+  annotations: {}
+  infrastructure: null
+  host: ""
+  tlsSecret: ""
+  previewHost: ""
+  previewTlsSecret: ""
+  derpHost: ""
+  derpTlsSecret: ""
+
+# Optional one-shot pre-install/pre-upgrade Job that ensures Temporal's
+# databases (`temporal`, `temporal_visibility`) and `pgcrypto` exist (#6706).
+# The container image is parameterized under images.databaseInit.
+databaseInit:
+  enabled: false
+  host: ""
+  port: "5432"
+  user: codewire
+  databaseName: codewire
+  sslMode: require
+  passwordSecretName: codewire-db-app
+  passwordSecretKey: password
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+# Optional one-shot post-install Job that creates the first administrator via
+# `codewire-idp create-admin` reading the password from a mounted Secret (#6706).
+adminBootstrap:
+  enabled: false
+  email: ""
+  passwordSecretName: ""
+  passwordSecretKey: password
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

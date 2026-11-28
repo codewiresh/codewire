@@ -1,0 +1,48 @@
+{{- if and .Values.orchestration.enabled .Values.orchestration.internalIssuer.create }}
+# Self-hosted namespace-local CA Issuer for orchestration's internal TLS
+# listener (8088) and workspace-binding listener (8087), paired with
+# orchestration-certificate.yaml when no external infrastructure CA provisions
+# the `codewire-orchestration-internal` Issuer (#6706).
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: codewire-orchestration-internal-bootstrap
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "orchestration" | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: codewire-orchestration-internal-ca
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "orchestration" | nindent 4 }}
+spec:
+  isCA: true
+  commonName: codewire-orchestration-internal-ca
+  secretName: codewire-orchestration-internal-ca
+  duration: 87600h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    encoding: PKCS8
+  issuerRef:
+    name: codewire-orchestration-internal-bootstrap
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: codewire-orchestration-internal
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "codewire.labels" "orchestration" | nindent 4 }}
+spec:
+  ca:
+    secretName: codewire-orchestration-internal-ca
+{{- end }}

@@ -94,6 +94,9 @@ envFrom:
   {{- end }}
 env:
   {{- toYaml .service.env | nindent 2 }}
+  {{- with .extraEnv }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
 resources:
   {{- toYaml .service.resources | nindent 2 }}
 {{- with .service.startupProbe }}
@@ -175,4 +178,20 @@ and "from", the value they come from, for the refusal.
 {{- end }}
 {{- end }}
 {{- include "codewire.celStrings" .names }}
+{{- end }}
+
+{{/*
+Standard Envoy Gateway response/request filters for public HTTPS routes:
+strict HSTS and stripping caller-supplied trace context headers so traces start
+at the edge (#5628, #5633).
+*/}}
+{{- define "codewire.gatewayEdgeFilters" -}}
+- type: ResponseHeaderModifier
+  responseHeaderModifier:
+    set:
+      - name: Strict-Transport-Security
+        value: "max-age=31536000; includeSubDomains"
+- type: RequestHeaderModifier
+  requestHeaderModifier:
+    remove: [traceparent, tracestate, baggage]
 {{- end }}
