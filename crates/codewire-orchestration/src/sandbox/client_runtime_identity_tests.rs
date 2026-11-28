@@ -353,6 +353,122 @@ fn the_bind_trigger_needs_converged_labels_and_started_containers_not_readiness(
     assert!(evaluate(claim(7), sandbox(7), sidecar));
 }
 
+#[test]
+fn restoring_standard_workspace_is_bind_ready_while_startup_probe_waits_on_rebind() {
+    let evaluate = |claim: Value, sandbox: Value, pod: Value| {
+        runtime_bind_ready(
+            &serde_json::from_value(claim).unwrap(),
+            &serde_json::from_value(sandbox).unwrap(),
+            &serde_json::from_value(pod).unwrap(),
+            &opts(),
+        )
+    };
+    let not_ready = |mut object: Value| {
+        object["status"]["conditions"][0]["status"] = json!("False");
+        object
+    };
+    let restoring_pod = || {
+        let mut pod = pod(7);
+        pod["spec"] = json!({
+            "runtimeClassName": "standard",
+            "containers": [{
+                "name": "workspace",
+                "image": "pod-runtime@sha256:1",
+                "env": [{ "name": "CODEWIRE_VM_RESTORE_GENERATION", "value": "1" }]
+            }]
+        });
+        pod["status"] = json!({
+            "phase": "Running",
+            "conditions": [{ "type": "Ready", "status": "False" }],
+            "containerStatuses": [{
+                "name": "workspace",
+                "image": "pod-runtime@sha256:1",
+                "imageID": "pod-runtime@sha256:1",
+                "ready": false,
+                "started": false,
+                "restartCount": 0,
+                "state": { "running": {} }
+            }]
+        });
+        pod
+    };
+
+    // During hibernate restore, pod-runtime withholds daemon/ready until the
+    // restored daemon completes BindWorkspace; kubelet keeps started=false
+    // while state.running is set with a resolved imageID.
+    assert!(evaluate(
+        not_ready(claim(7)),
+        not_ready(sandbox(7)),
+        restoring_pod()
+    ));
+    assert!(!runtime_identity_converged(
+        &serde_json::from_value(not_ready(claim(7))).unwrap(),
+        &serde_json::from_value(not_ready(sandbox(7))).unwrap(),
+        &serde_json::from_value(restoring_pod()).unwrap(),
+        &opts(),
+    ));
+
+    type Mutation = (&'static str, fn(&mut Value));
+    let refusals: [Mutation; 7] = [
+        ("still waiting", |p| {
+            p["status"]["containerStatuses"][0]["state"] = json!({ "waiting": {} });
+        }),
+        ("no imageID", |p| {
+            p["status"]["containerStatuses"][0]["imageID"] = json!("");
+        }),
+        ("cold boot without restore env", |p| {
+            p["spec"]["containers"][0]["env"] = json!([]);
+        }),
+        ("zero restore generation", |p| {
+            p["spec"]["containers"][0]["env"][0]["value"] = json!("0");
+        }),
+        ("non-numeric restore generation", |p| {
+            p["spec"]["containers"][0]["env"][0]["value"] = json!("abc");
+        }),
+        ("valueFrom restore env", |p| {
+            p["spec"]["containers"][0]["env"][0] = json!({
+                "name": "CODEWIRE_VM_RESTORE_GENERATION",
+                "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } }
+            });
+        }),
+        ("non-standard runtime class", |p| {
+            p["spec"]["runtimeClassName"] = json!("kata-clh");
+        }),
+    ];
+    for (label, mutate) in refusals {
+        let mut pod = restoring_pod();
+        mutate(&mut pod);
+        assert!(
+            !evaluate(not_ready(claim(7)), not_ready(sandbox(7)), pod),
+            "{label}"
+        );
+    }
+
+    // Non-workspace containers still require started=true even on a restoring Pod.
+    let mut with_sidecar = restoring_pod();
+    with_sidecar["spec"]["containers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "name": "dind", "image": "d" }));
+    with_sidecar["status"]["containerStatuses"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "name": "dind",
+            "image": "d",
+            "imageID": "d@sha256:2",
+            "ready": false,
+            "started": false,
+            "restartCount": 0,
+            "state": { "running": {} }
+        }));
+    assert!(!evaluate(
+        not_ready(claim(7)),
+        not_ready(sandbox(7)),
+        with_sidecar
+    ));
+}
+
 #[tokio::test]
 async fn publisher_sends_only_the_validated_conditional_patch() {
     let (client, requests) = client(vec![(StatusCode::OK, claim(6)), (StatusCode::OK, claim(7))]);

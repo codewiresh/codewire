@@ -10,9 +10,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use codewire_daemon_proto::POD_RUNTIME_RESTORE_GENERATION_ENV;
 use crc32fast::Hasher as Crc32Hasher;
 use k8s_openapi::api::core::v1::{
-    ContainerStatus, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, ResourceRequirements,
+    Container, ContainerStatus, Namespace, PersistentVolume, PersistentVolumeClaim, Pod, PodSpec,
+    ResourceRequirements,
 };
 use k8s_openapi::api::storage::v1::StorageClass;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
@@ -30,15 +32,15 @@ use super::template::{
     CpuSharingRatio, DOCKER_DATA_INIT_CONTAINER, DOCKER_DATA_INIT_ENV,
     KATA_COCO_INIT_DATA_ANNOTATION_KEY, KATA_CONFIDENTIAL_VOLUME_ANNOTATION,
     KATA_HYPERVISOR_KERNEL_PARAMS_ANNOTATION_KEY, LEGACY_DIND_BOOTSTRAP_SCRIPT,
-    LEGACY_WORKSPACE_MOUNT_VOLUME, MOUNT_WORKSPACE_CONTAINER, RUNTIME_CLASS_RUNC, TemplateOpts,
-    WORKSPACE_MOUNT_VOLUME, WorkspaceVolume, commodity_dind_bootstrap_script,
-    dind_bootstrap_script, direct_udp_service_name, docker_data_init_container,
-    docker_data_size_gib, eager_mkfs_dind_bootstrap_script, growth_in_dind_bootstrap_script,
-    is_commodity_runtime_class, pre_growth_dind_bootstrap_script, render_direct_udp_service,
-    render_sandbox_shadow_pool, render_sandbox_template, render_warm_member_bridge,
-    render_workspace_daemon_network_policy, render_workspace_daemon_service,
-    warm_member_daemon_bridge_name, workspace_daemon_network_policy_name,
-    workspace_daemon_service_name,
+    LEGACY_WORKSPACE_MOUNT_VOLUME, MOUNT_WORKSPACE_CONTAINER, RUNTIME_CLASS_RUNC,
+    RUNTIME_CLASS_STANDARD, TemplateOpts, WORKSPACE_MOUNT_VOLUME, WorkspaceVolume,
+    commodity_dind_bootstrap_script, dind_bootstrap_script, direct_udp_service_name,
+    docker_data_init_container, docker_data_size_gib, eager_mkfs_dind_bootstrap_script,
+    growth_in_dind_bootstrap_script, is_commodity_runtime_class, pre_growth_dind_bootstrap_script,
+    render_direct_udp_service, render_sandbox_shadow_pool, render_sandbox_template,
+    render_warm_member_bridge, render_workspace_daemon_network_policy,
+    render_workspace_daemon_service, warm_member_daemon_bridge_name,
+    workspace_daemon_network_policy_name, workspace_daemon_service_name,
 };
 use super::{
     CRD_VERSION, ClaimOpts, EXTENSIONS_GROUP, LABEL_ENV_ID, LABEL_ORG_ID, LABEL_TYPE,
@@ -1508,12 +1510,38 @@ fn sandbox_status_current(sandbox: &DynamicObject) -> bool {
         if condition.get("observedGeneration").and_then(Value::as_i64) == Some(generation))
 }
 
+/// Whether `container` is the `workspace` container of a `standard` Pod that
+/// is restoring from hibernate (#6647). During restore, `pod-runtime` keeps
+/// `/codewire/run/daemon/ready` absent until the restored guest daemon finishes
+/// `BindWorkspace` and reports `rebind-ok\n`; because `workspace`'s
+/// `startupProbe` tests that same file, kubelet leaves `started = false` while
+/// the container is already `state.running` from its resolved image.
+fn restoring_standard_workspace(spec: &PodSpec, container: &Container) -> bool {
+    spec.runtime_class_name.as_deref() == Some(RUNTIME_CLASS_STANDARD)
+        && container.name == "workspace"
+        && container
+            .env
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|var| {
+                var.name == POD_RUNTIME_RESTORE_GENERATION_ENV
+                    && var.value_from.is_none()
+                    && var
+                        .value
+                        .as_deref()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .is_some_and(|generation| generation > 0)
+            })
+}
+
 /// Every container the Pod spec declares has started from a resolved image:
-/// each regular container reports `started` with a non-empty `imageID`, and
-/// each init container has a non-empty `imageID` and either completed
-/// successfully or, as a restartable sidecar, started. Readiness is not
-/// required, so a DinD container whose Docker daemon is still starting
-/// counts.
+/// each regular container reports `started` with a non-empty `imageID` (or, for
+/// a `standard` `workspace` container restoring from hibernate, `state.running`
+/// while its startup probe waits on post-restore re-bind), and each init
+/// container has a non-empty `imageID` and either completed successfully or, as
+/// a restartable sidecar, started. Readiness is not required, so a DinD
+/// container whose Docker daemon is still starting counts.
 pub(crate) fn pod_containers_started(pod: &Pod) -> bool {
     let (Some(spec), Some(status)) = (pod.spec.as_ref(), pod.status.as_ref()) else {
         return false;
@@ -1524,10 +1552,20 @@ pub(crate) fn pod_containers_started(pod: &Pod) -> bool {
         .as_deref()
         .unwrap_or_default();
     let resolved = |status: &ContainerStatus| !status.image_id.trim().is_empty();
+    let running = |status: &ContainerStatus| {
+        status
+            .state
+            .as_ref()
+            .and_then(|state| state.running.as_ref())
+            .is_some()
+    };
     statuses.len() == spec.containers.len()
         && spec.containers.iter().all(|container| {
             statuses.iter().any(|status| {
-                status.name == container.name && status.started == Some(true) && resolved(status)
+                status.name == container.name
+                    && resolved(status)
+                    && (status.started == Some(true)
+                        || (restoring_standard_workspace(spec, container) && running(status)))
             })
         })
         && init_statuses.len() == spec.init_containers.as_deref().unwrap_or_default().len()
