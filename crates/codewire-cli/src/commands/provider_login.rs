@@ -198,8 +198,8 @@ fn claude_sign_in_error(error: ClaudeSignInError) -> anyhow::Error {
 
 /// Sign in to Google for Antigravity (`agy`): the same sign-in the platform
 /// service runs, here in the host CLI, which alone holds this sign-in's
-/// verifier. The person opens the authorize page and pastes back the callback
-/// URL or `code#state`.
+/// verifier. The person opens the authorize page and pastes back the raw
+/// authorization code, callback URL, or `code#state`.
 pub(crate) async fn antigravity_sign_in(
     sign_in: SignInScreen<'_>,
     interrupt: &mut Interrupt,

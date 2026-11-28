@@ -1,8 +1,8 @@
 //! The Antigravity sign-in's two calls (#6555). Start returns Google's
 //! authorize page and a sealed handle, which the dashboard keeps in a cookie
-//! and never renders. Complete returns the handle with the pasted callback URL
-//! or `code#state`, and the credential service checks that the state is this
-//! sign-in's before Google is contacted.
+//! and never renders. Complete returns the handle with the pasted raw
+//! authorization code, callback URL, or `code#state`, and the credential
+//! service checks state when supplied before exchanging the code with PKCE.
 
 use std::time::Duration;
 
@@ -27,8 +27,11 @@ const MAX_AUTHORIZE_URL_BYTES: usize = 2048;
 const SIGN_IN_LIFETIME_SECONDS: u64 = 15 * 60;
 /// A browser keeps a cookie of about 4 KiB at most, name included.
 const MAX_HANDLE_BYTES: usize = 3800;
-/// Bounded pasted callback URL or `code#state`, matching the broker.
+/// Bounded pasted raw authorization code, callback URL, or `code#state`,
+/// matching the broker.
 const MAX_PASTE_BYTES: usize = 4096;
+/// Bounded authorization code or state part, matching the broker.
+const MAX_CODE_BYTES: usize = 1024;
 /// Longer than the service's own 75 s for the exchange, so the page never
 /// reports a failure for a sign-in the service then stores.
 const COMPLETE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -78,40 +81,67 @@ fn valid_start(started: &StartedAntigravitySignIn, now: u64) -> bool {
         && started.expires_at_unix <= now + SIGN_IN_LIFETIME_SECONDS
 }
 
-/// Either the callback URL (`https://antigravity.google/oauth-callback?...`)
-/// carrying `code` and `state` query parameters, or `code#state`, trimmed.
+/// A pasted callback URL (`https://antigravity.google/oauth-callback?code=...`,
+/// with optional `state`), `code#state`, or raw Google authorization code,
+/// trimmed.
 pub(crate) fn pasted_antigravity_code(pasted: &str) -> Option<Vec<u8>> {
     let trimmed = pasted.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_PASTE_BYTES {
         return None;
     }
-    if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+    if is_http_url(trimmed) {
         let parsed = Url::parse(trimmed).ok()?;
         let mut has_code = false;
         let mut has_state = false;
         for (name, value) in parsed.query_pairs() {
             if name == "code" {
-                if has_code || value.is_empty() || !value.bytes().all(|b| b.is_ascii_graphic()) {
+                if has_code || !valid_code_part(&value) {
                     return None;
                 }
                 has_code = true;
             } else if name == "state" {
-                if has_state || value.is_empty() || !value.bytes().all(|b| b.is_ascii_graphic()) {
+                if has_state || !valid_code_part(&value) {
                     return None;
                 }
                 has_state = true;
             }
         }
-        (has_code && has_state).then(|| trimmed.as_bytes().to_vec())
+        has_code.then(|| trimmed.as_bytes().to_vec())
+    } else if let Some((code, state)) = trimmed.split_once('#') {
+        (valid_code_part(code) && valid_code_part(state) && !state.contains('#'))
+            .then(|| trimmed.as_bytes().to_vec())
     } else {
-        let (code, state) = trimmed.split_once('#')?;
-        let valid = |part: &str| {
-            !part.is_empty()
-                && part.len() <= 1024
-                && part.bytes().all(|byte| byte.is_ascii_graphic())
-        };
-        (valid(code) && valid(state)).then(|| trimmed.as_bytes().to_vec())
+        (!looks_like_malformed_url(trimmed) && valid_code_part(trimmed))
+            .then(|| trimmed.as_bytes().to_vec())
     }
+}
+
+fn valid_code_part(part: &str) -> bool {
+    !part.is_empty()
+        && part.len() <= MAX_CODE_BYTES
+        && part.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn is_http_url(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://"))
+        || bytes
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http://"))
+}
+
+fn looks_like_malformed_url(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.contains("://")
+        || value.contains('?')
+        || bytes
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http:"))
+        || bytes
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https:"))
 }
 
 /// Store the sign-in, or reconnect the exact one a row's dialog observed.
@@ -208,5 +238,73 @@ pub(crate) fn antigravity_sign_in_refusal(
             Some(AntigravitySignInRefusal::Expired)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasted_antigravity_code_accepts_raw_code_code_hash_state_and_callback_url() {
+        assert_eq!(
+            pasted_antigravity_code("  4/0AanRRrt_example-code/with_slashes  \n").unwrap(),
+            b"4/0AanRRrt_example-code/with_slashes"
+        );
+        assert_eq!(
+            pasted_antigravity_code("4/0AY_synthetic_code#state_123").unwrap(),
+            b"4/0AY_synthetic_code#state_123"
+        );
+        assert_eq!(
+            pasted_antigravity_code(
+                "https://antigravity.google/oauth-callback?code=4/0AY_synthetic_code&state=state_123"
+            )
+            .unwrap(),
+            b"https://antigravity.google/oauth-callback?code=4/0AY_synthetic_code&state=state_123"
+        );
+        assert_eq!(
+            pasted_antigravity_code(
+                "https://antigravity.google/oauth-callback?code=4/0AY_synthetic_code"
+            )
+            .unwrap(),
+            b"https://antigravity.google/oauth-callback?code=4/0AY_synthetic_code"
+        );
+    }
+
+    #[test]
+    fn pasted_antigravity_code_rejects_malformed_oversized_and_whitespace_inputs() {
+        let oversized_code = "a".repeat(1025);
+        let oversized_paste = format!(
+            "https://antigravity.google/oauth-callback?code={}",
+            "a".repeat(MAX_PASTE_BYTES)
+        );
+        for invalid in [
+            "",
+            "   ",
+            "4/0AY with spaces",
+            "4/0AY\ncode",
+            "4/0AY\x00code",
+            "4/0AY_é",
+            "#state_only",
+            "4/0AY#",
+            "4/0AY#state1#state2",
+            "https://antigravity.google/oauth-callback",
+            "https://antigravity.google/oauth-callback?state=only_state",
+            "https://antigravity.google/oauth-callback?code=",
+            "https://antigravity.google/oauth-callback?code=4/0AY&state=",
+            "https://antigravity.google/oauth-callback?code=a&code=b&state=s",
+            "https://antigravity.google/oauth-callback?code=a&state=s1&state=s2",
+            "https://[::1",
+            "ftp://antigravity.google/oauth-callback?code=4/0AY",
+            "https:antigravity.google/oauth-callback",
+            "antigravity.google/oauth-callback?code=4/0AY",
+            oversized_code.as_str(),
+            oversized_paste.as_str(),
+        ] {
+            assert!(
+                pasted_antigravity_code(invalid).is_none(),
+                "expected refusal for {invalid:?}"
+            );
+        }
     }
 }

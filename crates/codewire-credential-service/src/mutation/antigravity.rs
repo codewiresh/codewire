@@ -1,5 +1,5 @@
-//! Antigravity sign-in by pasted callback URL or `code#state`: Google Desktop
-//! OAuth for the Antigravity CLI (`agy`).
+//! Antigravity sign-in by pasted raw authorization code, callback URL, or
+//! `code#state`: Google Desktop OAuth for the Antigravity CLI (`agy`).
 //!
 //! Start creates the PKCE verifier and state and returns Google's authorize
 //! URL with an opaque handle; nothing is sent to Google or stored, so either
@@ -7,11 +7,12 @@
 //! the credential store's KEK, bound to the person who started the sign-in,
 //! its purpose and its issue time, so Complete refuses another person's
 //! handle, an altered one and one issued more than 15 minutes ago, before
-//! Google is contacted. Complete checks the pasted callback URL or
-//! `code#state` against the handle, exchanges the code with Google, verifies
-//! the 6-scope allow-list and publishes the login through the same enrollment
-//! fences as every other OAuth connection. A failed completion asks Google
-//! once, best effort, to revoke any token issued that could not be stored.
+//! Google is contacted. Complete validates the pasted code (and checks state
+//! when supplied) against the handle, exchanges the code with Google using the
+//! sealed PKCE verifier, verifies the 6-scope allow-list and publishes the
+//! login through the same enrollment fences as every other OAuth connection.
+//! A failed completion asks Google once, best effort, to revoke any token
+//! issued that could not be stored.
 
 use std::sync::Arc;
 use std::time::Duration;

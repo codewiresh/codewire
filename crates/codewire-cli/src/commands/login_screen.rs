@@ -25,6 +25,8 @@ pub(super) const INDENT: &str = "  ";
 
 /// The hidden prompt for the code Claude shows after sign-in.
 pub(super) const PASTE_CODE_PROMPT: &str = "  Paste the code Claude shows after you sign in > ";
+pub(super) const ANTIGRAVITY_PASTE_CODE_PROMPT: &str =
+    "  Paste the code Google shows after you sign in > ";
 
 /// The hint under the link while `c` copies it.
 pub(super) const COPY_HINT: &str = "Press c to copy the link";
@@ -327,8 +329,8 @@ pub(super) fn claude_sign_in_code(
 }
 
 /// The Antigravity sign-in page, in both placements: Google's authorize link,
-/// then the callback URL or `code#state` read from a no-echo prompt or stdin,
-/// never argv ([`super::credential_input::prompt_antigravity_code`]).
+/// then the raw authorization code, callback URL, or `code#state` read from a
+/// no-echo prompt or stdin, never argv ([`super::credential_input::prompt_antigravity_code`]).
 pub(super) fn antigravity_sign_in_code(
     sign_in: SignInScreen<'_>,
     authorize_url: &str,
@@ -612,6 +614,10 @@ mod tests {
         assert_eq!(
             PASTE_CODE_PROMPT,
             "  Paste the code Claude shows after you sign in > "
+        );
+        assert_eq!(
+            ANTIGRAVITY_PASTE_CODE_PROMPT,
+            "  Paste the code Google shows after you sign in > "
         );
     }
 }

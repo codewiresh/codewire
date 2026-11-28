@@ -3,12 +3,14 @@
 //!
 //! The flow is authorization code with PKCE S256 and Antigravity's manual
 //! redirect (`https://antigravity.google/oauth-callback`): the person signs in
-//! in their browser and pastes either the full callback URL or `code#state`.
+//! in their browser and pastes the raw authorization code Google shows, a
+//! callback URL, or `code#state`.
 //! [`AntigravitySignIn::start`] creates the PKCE verifier and state and builds
-//! the authorize URL; [`AntigravitySignIn::complete`] checks state, exchanges
-//! the code at `POST https://oauth2.googleapis.com/token` (form-encoded with
-//! `client_id`, `client_secret`, and `code_verifier`), validates granted scopes
-//! and `id_token` `iss`/`aud`, and returns the canonical import.
+//! the authorize URL; [`AntigravitySignIn::complete`] checks state when
+//! supplied, exchanges the code at `POST https://oauth2.googleapis.com/token`
+//! (form-encoded with `client_id`, `client_secret`, and `code_verifier`),
+//! validates granted scopes and `id_token` `iss`/`aud`, and returns the
+//! canonical import.
 //!
 //! Per Google's installed-application OAuth specification and the owner's
 //! 2026-11-25 decision on #6555, Desktop OAuth `client_id` and `client_secret`
@@ -163,9 +165,10 @@ impl AntigravitySignIn {
         start_at(now_unix()?)
     }
 
-    /// Validate the pasted callback URL or `code#state` against `handle`,
-    /// exchange the code at `POST https://oauth2.googleapis.com/token`, and
-    /// return the canonical import.
+    /// Validate the pasted raw authorization code, callback URL, or
+    /// `code#state` against `handle` (verifying `state` in constant time when
+    /// supplied), exchange the code at `POST https://oauth2.googleapis.com/token`
+    /// with the PKCE verifier, and return the canonical import.
     pub async fn complete(
         &self,
         handle: &str,
@@ -364,15 +367,18 @@ fn parse_handle(raw: &str) -> Result<Handle, AntigravitySignInError> {
     })
 }
 
-/// Parse either a full callback URL (`https://antigravity.google/oauth-callback?code=...&state=...`)
-/// or `code#state` (matching Claude's manual paste UX). State must match the
-/// started sign-in in constant time.
+/// Parse a pasted callback URL (`https://antigravity.google/oauth-callback?code=...`),
+/// `code#state`, or raw Google authorization code (as copied from
+/// `antigravity.google/oauth-callback`, which strips query parameters from the
+/// address bar and copies only `code`). When `state` is supplied it must match
+/// the started sign-in in constant time; PKCE `code_verifier` in the sealed
+/// handle authenticates the exchange with Google's `/token` endpoint.
 fn parse_pasted_code(pasted: &str, expected_state: &str) -> Result<Secret, AntigravitySignInError> {
     let trimmed = pasted.trim();
     if trimmed.is_empty() || trimmed.len() > MAX_PASTE_BYTES {
         return Err(AntigravitySignInError::InvalidCode);
     }
-    let (code, state) = if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+    let (code, state) = if is_http_url(trimmed) {
         let parsed = Url::parse(trimmed).map_err(|_| AntigravitySignInError::InvalidCode)?;
         let mut code: Option<String> = None;
         let mut state: Option<String> = None;
@@ -389,23 +395,47 @@ fn parse_pasted_code(pasted: &str, expected_state: &str) -> Result<Secret, Antig
                 state = Some(value.into_owned());
             }
         }
-        (
-            code.ok_or(AntigravitySignInError::InvalidCode)?,
-            state.ok_or(AntigravitySignInError::InvalidCode)?,
-        )
+        (code.ok_or(AntigravitySignInError::InvalidCode)?, state)
     } else if let Some((code, state)) = trimmed.split_once('#') {
-        (code.to_owned(), state.to_owned())
+        (code.to_owned(), Some(state.to_owned()))
     } else {
-        return Err(AntigravitySignInError::InvalidCode);
+        if looks_like_malformed_url(trimmed) {
+            return Err(AntigravitySignInError::InvalidCode);
+        }
+        (trimmed.to_owned(), None)
     };
     if code.is_empty()
         || code.len() > MAX_CODE_BYTES
         || !code.bytes().all(|byte| byte.is_ascii_graphic())
-        || !ct_eq(state.as_bytes(), expected_state.as_bytes())
+        || state
+            .as_deref()
+            .is_some_and(|value| !ct_eq(value.as_bytes(), expected_state.as_bytes()))
     {
         return Err(AntigravitySignInError::InvalidCode);
     }
     Ok(Secret::new(code))
+}
+
+fn is_http_url(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https://"))
+        || bytes
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http://"))
+}
+
+fn looks_like_malformed_url(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.contains("://")
+        || value.contains('?')
+        || bytes
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"http:"))
+        || bytes
+            .get(..6)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"https:"))
 }
 
 fn ct_eq(left: &[u8], right: &[u8]) -> bool {

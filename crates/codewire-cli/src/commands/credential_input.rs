@@ -674,8 +674,8 @@ pub(super) const CLAUDE_TOKEN_GUIDANCE: &str =
 /// A pasted value that is not Claude's `code#state`; one retry follows at a
 /// terminal.
 pub(super) const CLAUDE_CODE_SHAPE_HINT: &str = "That doesn't look like Claude's code (expected text with a # in the middle, like abc…#xyz…); copy the whole code and paste it again.";
-/// A pasted value that is not a Google OAuth callback URL or `code#state`.
-pub(super) const ANTIGRAVITY_CODE_SHAPE_HINT: &str = "That doesn't look like Google's redirect URL or code#state; copy the full address from your browser's address bar and paste it again.";
+/// A pasted value that is not Google's authorization code, callback URL, or `code#state`.
+pub(super) const ANTIGRAVITY_CODE_SHAPE_HINT: &str = "That doesn't look like the code or callback URL Google shows; copy the code from the page and paste it again.";
 
 /// The longest code or state part accepted from a paste.
 const MAX_CLAUDE_CODE_PART_BYTES: usize = 4096;
@@ -1239,15 +1239,15 @@ pub(super) fn normalize_claude_code(pasted: &[u8]) -> Option<Zeroizing<Vec<u8>>>
     Some(normalized)
 }
 
-/// Read the callback URL or `code#state` after Google sign-in for Antigravity
-/// from the hidden prompt (or piped stdin) and return it as `code#state`.
+/// Read the raw authorization code, callback URL, or `code#state` after Google
+/// sign-in for Antigravity from the hidden prompt (or piped stdin).
 pub(super) fn prompt_antigravity_code(copy: Option<&str>) -> anyhow::Result<ProtectedValue> {
     let interactive = std::io::stdin().is_terminal();
     antigravity_code_with_retry(
         interactive,
         || {
             prompt_hidden_copying(
-                super::login_screen::PASTE_CODE_PROMPT,
+                super::login_screen::ANTIGRAVITY_PASTE_CODE_PROMPT,
                 super::login_screen::INDENT,
                 copy,
             )
@@ -1279,69 +1279,11 @@ fn antigravity_code_with_retry(
         }
     }
     anyhow::bail!(
-        "that doesn't look like Google's redirect URL or code#state; nothing was sent to Google. Run the command again and paste the full redirect URL"
+        "that doesn't look like the code or callback URL Google shows; nothing was sent to Google. Run the command again and paste the code shown after signing in"
     )
 }
 
-/// Google's `code#state` from what was pasted, or `None` for any other shape.
-/// Accepts either `code#state` or an `http(s)` callback URL carrying `code`
-/// and `state` query parameters (Google authorization codes contain `/`).
-pub(super) fn normalize_antigravity_code(pasted: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
-    let text = std::str::from_utf8(pasted).ok()?.trim();
-    let (code, state) = match text
-        .strip_prefix("https://")
-        .or_else(|| text.strip_prefix("http://"))
-    {
-        Some(rest) => {
-            let query = rest.split_once('?')?.1;
-            let query = query.split('#').next().unwrap_or_default();
-            let (mut code, mut state) = (None, None);
-            for pair in query.split('&') {
-                match pair.split_once('=') {
-                    Some(("code", value)) => {
-                        if code.is_some() {
-                            return None;
-                        }
-                        code = Some(percent_decode(value)?);
-                    }
-                    Some(("state", value)) => {
-                        if state.is_some() {
-                            return None;
-                        }
-                        state = Some(percent_decode(value)?);
-                    }
-                    _ => {}
-                }
-            }
-            (code?, state?)
-        }
-        None => {
-            let (code, state) = text.split_once('#')?;
-            (
-                Zeroizing::new(code.as_bytes().to_vec()),
-                Zeroizing::new(state.as_bytes().to_vec()),
-            )
-        }
-    };
-    let valid_code = !code.is_empty()
-        && code.len() <= MAX_CLAUDE_CODE_PART_BYTES
-        && code.iter().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/')
-        });
-    let valid_state = !state.is_empty()
-        && state.len() <= MAX_CLAUDE_CODE_PART_BYTES
-        && state
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'));
-    if !valid_code || !valid_state {
-        return None;
-    }
-    let mut normalized = Zeroizing::new(Vec::with_capacity(code.len() + 1 + state.len()));
-    normalized.extend_from_slice(&code);
-    normalized.push(b'#');
-    normalized.extend_from_slice(&state);
-    Some(normalized)
-}
+pub(super) use antigravity::normalize_antigravity_code;
 
 /// `%XX` decoding of one query value; any other byte is kept as is.
 fn percent_decode(value: &str) -> Option<Zeroizing<Vec<u8>>> {
@@ -1546,6 +1488,7 @@ fn read_ssh_passphrase(
     Ok((!bytes.is_empty()).then_some(bytes))
 }
 
+mod antigravity;
 pub(super) mod connect;
 pub(super) mod types;
 
@@ -2206,7 +2149,13 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_code_accepts_code_hash_state_and_callback_url_and_rejects_duplicates() {
+    fn antigravity_code_accepts_raw_code_code_hash_state_and_callback_url_and_rejects_invalid() {
+        assert_eq!(
+            normalize_antigravity_code(b"  4/0AanRRrt_example-code/with_slashes  \n")
+                .unwrap()
+                .as_slice(),
+            b"4/0AanRRrt_example-code/with_slashes"
+        );
         assert_eq!(
             normalize_antigravity_code(b"  4/0ASyntheticCode#state_123  ")
                 .unwrap()
@@ -2221,18 +2170,41 @@ mod tests {
             .as_slice(),
             b"4/0ASyntheticCode#state_123"
         );
-        // Duplicate code= or state= query params must be rejected (parity with server).
-        assert!(
+        assert_eq!(
             normalize_antigravity_code(
-                b"https://antigravity.google/oauth-callback?code=4%2Ffirst&code=4%2Fsecond&state=s1"
+                b"https://antigravity.google/oauth-callback?code=4%2F0ASyntheticCode"
             )
-            .is_none()
+            .unwrap()
+            .as_slice(),
+            b"4/0ASyntheticCode"
         );
-        assert!(
-            normalize_antigravity_code(
-                b"https://antigravity.google/oauth-callback?code=4%2Ffirst&state=s1&state=s2"
-            )
-            .is_none()
-        );
+        let oversized = "a".repeat(1025);
+        for invalid in [
+            b"".as_slice(),
+            b"   ",
+            b"4/0A with spaces",
+            b"4/0A\ncode",
+            b"4/0A\x00code",
+            b"#state_123",
+            b"4/0A#",
+            b"4/0A#s1#s2",
+            b"https://antigravity.google/oauth-callback",
+            b"https://antigravity.google/oauth-callback?state=only_state",
+            b"https://antigravity.google/oauth-callback?code=",
+            b"https://antigravity.google/oauth-callback?code=4%2Ffirst&state=",
+            b"https://antigravity.google/oauth-callback?code=4%2Ffirst&code=4%2Fsecond&state=s1",
+            b"https://antigravity.google/oauth-callback?code=4%2Ffirst&state=s1&state=s2",
+            b"https://antigravity.google/oauth-callback?code=4%2F0A%23smuggled&state=s1",
+            b"ftp://antigravity.google/oauth-callback?code=4%2F0A",
+            b"https:antigravity.google/oauth-callback",
+            b"antigravity.google/oauth-callback?code=4%2F0A",
+            oversized.as_bytes(),
+        ] {
+            assert!(
+                normalize_antigravity_code(invalid).is_none(),
+                "expected refusal for {:?}",
+                String::from_utf8_lossy(invalid)
+            );
+        }
     }
 }

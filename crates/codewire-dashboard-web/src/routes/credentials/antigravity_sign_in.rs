@@ -1,8 +1,8 @@
 //! The dashboard's Antigravity sign-in (#6555). Start keeps the sealed handle
 //! in a cookie scoped to these two actions and shows Google's authorize page.
-//! Complete sends the handle back with the pasted callback URL or `code#state`.
-//! The handle never reaches the page or a URL, and the pasted value is never
-//! shown again.
+//! Complete sends the handle back with the pasted raw authorization code,
+//! callback URL, or `code#state`. The handle never reaches the page or a URL,
+//! and the pasted value is never shown again.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
