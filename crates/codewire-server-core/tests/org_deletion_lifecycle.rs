@@ -1980,6 +1980,9 @@ async fn schema_guard_enumerates_org_preset_and_environment_dependencies() {
             "environment_ports:cascade",
             "environment_resize_operations:cascade",
             "environment_sessions:cascade",
+            // A host environment's recorded SSH host key goes with it (0068,
+            // #3609).
+            "host_environment_ssh_host_keys:cascade",
             "identity_minting_stops:cascade",
             "platform_environment_access_bindings:cascade",
             "platform_environment_network_policies:cascade",

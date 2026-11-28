@@ -1303,8 +1303,8 @@ method accepts a host key.
 - **Revocation** by the owner or an organization owner or admin is final. It
   refuses the next attach, and ends a live session at the host's next
   message.
-- **Access calls** (capability version 3; not shipped: the server answers
-  them from slice 3's PR 2, and hosts make them from its PR 4, #3609). The
+- **Access calls** (capability version 3; the server answers them, and
+  hosts make them from slice 3's PR 4, so nothing calls them yet, #3609). The
   host's tailnet peer for one running VM asks its session for an access
   grant, records the VM's SSH host key, and asks for a peer relay, as a
   hosted daemon does over its Pod binding. A call is admitted only on the
@@ -1323,9 +1323,14 @@ method accepts a host key.
     nothing: the token and the write-once host-key slot stay at the
     operation generation, and a different key there is refused.
   - **What ends it:** revoking the host, moving or deleting the environment,
-    or a new operation generation refuses the next refresh, and the
-    coordinator ends the node's session once the record that admitted it is
-    gone. The token's 10 minutes is the outer bound.
+    or a new operation generation refuses the next refresh. The coordinator
+    re-checks each environment node every 60 seconds, and ends its session
+    once the environment is gone, at another operation generation, or on a
+    host that is revoked or gone. The token's 10 minutes is the outer bound.
+  - **The host key** a client verifies is the one the host recorded for the
+    environment's current operation generation, chosen by the environment's
+    own placement; until that generation has one, the lookup is not found,
+    never an older generation's key.
 
 The stream mount takes no user credential at the HTTP layer
 (`with_connect_routes_and_protocol_policy`). Its public leg is native gRPC, on

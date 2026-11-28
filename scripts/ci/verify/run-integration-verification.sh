@@ -2303,6 +2303,13 @@ run_coordinator() {
       connect::tests::production_client_session_ends_when_its_access_is_revoked -- --exact \
       --nocapture
 
+  # #3609: a host environment's peer stays current only while its host stands.
+  logfile="$RUN_DIR/coordinator-host-peer.log"
+  listed_run "coordinator host peer generation" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo_ci test --profile ci -p codewire-coordinator --lib \
+      peer::tests::production_a_host_environments_peer_is_current_only_while_its_host_stands -- --exact \
+      --nocapture
+
   # #5529: only an authorized hello naming a suspended Sandbox asks for its wake.
   logfile="$RUN_DIR/coordinator-hello-wake.log"
   listed_run "coordinator hello wake" "$logfile" DATABASE_URL="$DATABASE_URL_RUST" -- \

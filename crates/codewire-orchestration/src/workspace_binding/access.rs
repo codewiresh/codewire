@@ -23,6 +23,30 @@ pub struct AccessSettings {
     pub mesh_url: String,
 }
 
+/// Names the coordinator origin a daemon or a host's tailnet peer joins, when
+/// it isn't the API's own.
+pub const SANDBOX_PUBLIC_COORDINATOR_URL_ENV: &str = "CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL";
+
+/// The public coordinator origin access grants name: the configured one, or
+/// the API's base URL.
+pub fn public_coordinator_url(api_base_url: &str) -> String {
+    public_coordinator_url_from(
+        std::env::var(SANDBOX_PUBLIC_COORDINATOR_URL_ENV)
+            .ok()
+            .as_deref(),
+        api_base_url,
+    )
+}
+
+fn public_coordinator_url_from(configured: Option<&str>, api_base_url: &str) -> String {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(api_base_url.trim())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
 /// Length of an `ssh-ed25519` public key blob: the string "ssh-ed25519" and
 /// the 32-byte key, each length-prefixed.
 const ED25519_BLOB_LEN: usize = 4 + 11 + 4 + 32;
@@ -217,6 +241,25 @@ mod tests {
         ] {
             assert!(!valid_host_key(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn workspace_daemons_join_the_public_coordinator() {
+        assert_eq!(
+            public_coordinator_url_from(None, "https://dev.codewire.sh/"),
+            "https://dev.codewire.sh"
+        );
+        assert_eq!(
+            public_coordinator_url_from(Some(" "), "https://dev.codewire.sh"),
+            "https://dev.codewire.sh"
+        );
+        assert_eq!(
+            public_coordinator_url_from(
+                Some("https://coordinator.example/"),
+                "https://dev.codewire.sh"
+            ),
+            "https://coordinator.example"
+        );
     }
 
     #[test]

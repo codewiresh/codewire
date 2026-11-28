@@ -37,9 +37,12 @@ use crate::api::host_tunnels::{HostTunnels, Registration};
 use crate::api::hosts::{HostPlatform, OFFLINE_AFTER_SECS};
 use crate::drain::Drain;
 
+mod access;
 mod operations;
 mod tunnel_stream;
 
+use access::ACCESS_CAPABILITY;
+pub use access::HostAccessSettings;
 use operations::{Heard, OPERATIONS_CAPABILITY, Relay};
 
 #[cfg(test)]
@@ -86,6 +89,12 @@ pub fn router(
         state.drain.clone(),
         signals,
         Arc::clone(&state.host_tunnels),
+        Some(Arc::new(HostAccessSettings {
+            session_secret: state.session_secret.clone(),
+            coordinator_url: crate::workspace_binding::public_coordinator_url(
+                &state.sandbox_cfg.api_base_url,
+            ),
+        })),
     )
 }
 
@@ -96,6 +105,7 @@ pub fn router_with(
     drain: Drain,
     signals: Arc<HostOperationSignals>,
     tunnels: Arc<HostTunnels>,
+    access: Option<Arc<HostAccessSettings>>,
 ) -> connectrpc::Router {
     connectrpc::Router::new().add_service(Arc::new(HostAgentConnectService {
         pool,
@@ -104,6 +114,7 @@ pub fn router_with(
         drain,
         signals,
         tunnels,
+        access,
     }))
 }
 
@@ -119,6 +130,9 @@ struct HostAgentConnectService {
     signals: Arc<HostOperationSignals>,
     /// Tunnels asked for on this replica's host sessions.
     tunnels: Arc<HostTunnels>,
+    /// What a grant to a host's tailnet peer names; none, and access calls
+    /// are refused as unavailable.
+    access: Option<Arc<HostAccessSettings>>,
 }
 
 type Outbound = mpsc::Sender<Result<AttachHostResponse, ConnectError>>;
@@ -129,6 +143,7 @@ struct Session {
     timing: Timing,
     signals: Arc<HostOperationSignals>,
     tunnels: Arc<HostTunnels>,
+    access: Option<Arc<HostAccessSettings>>,
 }
 
 #[allow(refining_impl_trait)]
@@ -150,6 +165,7 @@ impl HostAgentService for HostAgentConnectService {
                 timing: self.timing,
                 signals: self.signals.clone(),
                 tunnels: self.tunnels.clone(),
+                access: self.access.clone(),
             },
             permit,
             requests,
@@ -309,7 +325,8 @@ async fn attached_session(
     // is missed.
     let signals = context.signals.subscribe();
     let (host, session_generation) = admit(context, handshake_permit, requests, tx).await?;
-    let relay = hello(context, &host, session_generation, requests, tx).await?;
+    let (relay, capability_version) =
+        hello(context, &host, session_generation, requests, tx).await?;
     if let Some(relay) = &relay {
         relay.send_outstanding(&context.pool, tx).await?;
     }
@@ -320,7 +337,10 @@ async fn attached_session(
     Serving {
         context,
         host: &host,
+        session_generation,
         relay: relay.as_ref(),
+        // Access calls come from a host that declared capability 3 (#3609).
+        access_calls: capability_version >= ACCESS_CAPABILITY,
         signals,
         tunnels,
     }
@@ -396,7 +416,7 @@ async fn hello(
     session_generation: i64,
     requests: &mut InboundStream<AttachHostRequest>,
     tx: &Outbound,
-) -> Result<Option<Relay>, End> {
+) -> Result<(Option<Relay>, i32), End> {
     let pool = &context.pool;
     let hello = match next_input(
         requests,
@@ -431,12 +451,15 @@ async fn hello(
         return Err(revoked(tx).await);
     }
     if capability_version < OPERATIONS_CAPABILITY {
-        return Ok(None);
+        return Ok((None, capability_version));
     }
-    Ok(Some(
-        Relay::new(&host.id, session_generation)
-            .record_inventory(pool, hello.inventory)
-            .await?,
+    Ok((
+        Some(
+            Relay::new(&host.id, session_generation)
+                .record_inventory(pool, hello.inventory)
+                .await?,
+        ),
+        capability_version,
     ))
 }
 
@@ -455,6 +478,9 @@ async fn next_tunnel(
 struct Serving<'a> {
     context: &'a Session,
     host: &'a AttachingHost,
+    session_generation: i64,
+    /// Whether the host declared the access calls' capability.
+    access_calls: bool,
     /// For a host that runs operations.
     relay: Option<&'a Relay>,
     signals: tokio::sync::broadcast::Receiver<HostOperationSignal>,
@@ -525,10 +551,46 @@ impl Serving<'_> {
                     attach_host_request::Input::OperationProgress(_) => {
                         self.operations()?;
                     }
+                    attach_host_request::Input::AccessRefresh(call) => {
+                        let answer = match self.access()? {
+                            Some(access) => {
+                                access
+                                    .refresh(&self.context.pool, &self.host.id, self.session_generation, &call)
+                                    .await?
+                            }
+                            None => access::unavailable(&call.request_id)?,
+                        };
+                        send(tx, answer).await?;
+                    }
+                    attach_host_request::Input::HostKeyRecord(call) => {
+                        let answer = match self.access()? {
+                            Some(access) => {
+                                access
+                                    .record_host_key(&self.context.pool, &self.host.id, self.session_generation, &call)
+                                    .await?
+                            }
+                            None => access::unavailable(&call.request_id)?,
+                        };
+                        send(tx, answer).await?;
+                    }
+                    attach_host_request::Input::PeerRelayAllocate(call) => {
+                        self.access()?;
+                        send(tx, access::allocate_peer_relay(&call)?).await?;
+                    }
                     _ => return Err(out_of_order("ping or proof").into()),
                 },
             }
         }
+    }
+
+    /// This replica's access settings, for a message only a host that
+    /// declared the access calls' capability sends; `None` when this replica
+    /// issues no grants.
+    fn access(&self) -> Result<Option<&HostAccessSettings>, End> {
+        if !self.access_calls || self.relay.is_none() {
+            return Err(out_of_order("ping or proof").into());
+        }
+        Ok(self.context.access.as_deref())
     }
 
     /// The relay, for a message only a host that runs operations sends.

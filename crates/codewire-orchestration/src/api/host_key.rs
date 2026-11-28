@@ -3,6 +3,13 @@
 //! `RecordHostKey`. `cw ssh known-hosts` trusts exactly this key, so a
 //! released or replaced Pod's key is never returned and no key is
 //! `NOT_FOUND`, which the client treats as a refusal.
+//!
+//! An environment placed on a host (#3609, slice 3) is answered with the key
+//! its host recorded over its session for the environment's current
+//! operation generation. Placement is read from the environment's own row,
+//! never from anything a host or client says, so no host answers for a Pod
+//! environment, and until the current generation has a key the answer is
+//! `NOT_FOUND`, never an older generation's key.
 
 pub use crate::sandbox::host_keys::{HostKeyStore, RecordedHostKeys};
 use base64::Engine as _;
@@ -29,14 +36,44 @@ pub async fn get_environment_host_key_core(
     store: &dyn HostKeyStore,
 ) -> AppResult<EnvironmentHostKey> {
     let environment = get_environment_core(state, user, org_id, environment_id).await?;
-    let recorded = store
-        .current_host_key(&environment.id)
+    let unavailable = |error: sqlx::Error| {
+        tracing::warn!(environment_id = %environment.id, %error, "read environment host key failed");
+        AppError::ServiceUnavailable("environment host key is unavailable".into())
+    };
+    let recorded = match host_placed_key(&state.pool, &environment.id)
         .await
-        .map_err(|error| {
-            tracing::warn!(environment_id = %environment.id, %error, "read environment host key failed");
-            AppError::ServiceUnavailable("environment host key is unavailable".into())
-        })?;
+        .map_err(unavailable)?
+    {
+        Some(on_host) => on_host,
+        None => store
+            .current_host_key(&environment.id)
+            .await
+            .map_err(unavailable)?,
+    };
     current_key(recorded)
+}
+
+/// For an environment placed on a host, the key its host recorded for the
+/// environment's current operation generation, if any: none when the host is
+/// gone or revoked. `None` for an environment the platform runs, which alone
+/// reads the Pod store.
+async fn host_placed_key(
+    pool: &sqlx::PgPool,
+    environment_id: &str,
+) -> Result<Option<Option<(i64, String)>>, sqlx::Error> {
+    let row: Option<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT e.environment_operation_generation, k.public_key \
+         FROM environments e \
+         LEFT JOIN hosts h ON h.id = e.host_id AND h.revoked_at IS NULL \
+         LEFT JOIN host_environment_ssh_host_keys k ON k.environment_id = e.id \
+          AND k.operation_generation = e.environment_operation_generation \
+          AND k.host_id = h.id \
+         WHERE e.id = $1 AND e.runtime_backend = 'host'",
+    )
+    .bind(environment_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(generation, key)| key.map(|key| (generation, key))))
 }
 
 fn not_recorded() -> AppError {

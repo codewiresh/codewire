@@ -61,7 +61,6 @@ const ORCHESTRATION_WORKSPACE_BINDING_PORT_ENV: &str =
 /// Public origin of the coordinator a workspace daemon joins its tailnet
 /// through. Defaults to the public API origin, whose ingress routes
 /// `CoordinatorService` to the coordinator.
-const SANDBOX_PUBLIC_COORDINATOR_URL_ENV: &str = "CODEWIRE_SANDBOX_PUBLIC_COORDINATOR_URL";
 // Orchestration's client certificate for the UDP relay allocator and the
 // public roots that verify the relay (#4011): all three, or none.
 const UDP_RELAY_ALLOCATOR_ROOTS_FILE_ENV: &str = "CODEWIRE_UDP_RELAY_ALLOCATOR_ROOTS_FILE";
@@ -124,15 +123,6 @@ fn disco_admission()
             std::env::var(PEER_RELAY_ADMISSION_URL_ENV).ok().as_deref(),
         )?,
     ))
-}
-
-fn sandbox_public_coordinator_url(configured: Option<&str>, api_base_url: &str) -> String {
-    configured
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(api_base_url.trim())
-        .trim_end_matches('/')
-        .to_owned()
 }
 
 fn env_list(name: &str) -> Vec<String> {
@@ -968,10 +958,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_access(
             codewire_orchestration::workspace_binding::AccessSettings {
-                coordinator_url: sandbox_public_coordinator_url(
-                    std::env::var(SANDBOX_PUBLIC_COORDINATOR_URL_ENV)
-                        .ok()
-                        .as_deref(),
+                coordinator_url: codewire_orchestration::workspace_binding::public_coordinator_url(
                     &api_state.sandbox_cfg.api_base_url,
                 ),
                 mesh_url: api_state.sandbox_cfg.mesh_public_url.clone(),
@@ -1279,25 +1266,6 @@ mod tests {
         assert!(
             listeners.identity.is_none(),
             "identity is off unless enabled"
-        );
-    }
-
-    #[test]
-    fn workspace_daemons_join_the_public_coordinator() {
-        assert_eq!(
-            sandbox_public_coordinator_url(None, "https://dev.codewire.sh/"),
-            "https://dev.codewire.sh"
-        );
-        assert_eq!(
-            sandbox_public_coordinator_url(Some(" "), "https://dev.codewire.sh"),
-            "https://dev.codewire.sh"
-        );
-        assert_eq!(
-            sandbox_public_coordinator_url(
-                Some("https://coordinator.example/"),
-                "https://dev.codewire.sh"
-            ),
-            "https://coordinator.example"
         );
     }
 

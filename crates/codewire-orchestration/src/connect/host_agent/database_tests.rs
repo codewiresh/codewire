@@ -31,6 +31,9 @@ use codewire_server_core::auth::AuthUser;
 const BOUND: Duration = Duration::from_secs(20);
 const ORG: &str = "host-session-org";
 const OWNER: &str = "host-session-owner";
+/// What this test server's access grants are signed with and name.
+const ACCESS_SECRET: &str = "synthetic-host-access-session-secret";
+const ACCESS_COORDINATOR: &str = "https://coordinator.example.test";
 
 type HostStream = BidiStream<reqwest::Body, AttachHostRequest, AttachHostResponseView<'static>>;
 
@@ -106,6 +109,10 @@ async fn serve_with(
             drain,
             signals,
             tunnels.clone(),
+            Some(Arc::new(HostAccessSettings {
+                session_secret: ACCESS_SECRET.into(),
+                coordinator_url: ACCESS_COORDINATOR.into(),
+            })),
         ),
         ProtocolPolicy::ConnectAndGrpc,
     );
@@ -1236,6 +1243,439 @@ async fn db_a_tunnel_opened_without_the_hosts_proof_is_refused() -> Result<()> {
             .await?;
         let opened = tokio::time::timeout(BOUND, opening).await???;
         ensure!(opened.daemon_capability.as_str() == "synthetic-capability");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+// ── Slice 3: access calls ──────────────────────────────────────────────────
+
+use codewire_proto::codewire::v1::{
+    HostAccessRefresh, HostKeyRecord as ProtoHostKeyRecord, HostPeerRelayAllocate,
+};
+
+const ACCESS_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+const OTHER_ACCESS_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const REQUEST: &str = "6f1d2e3a-4b5c-4d6e-8f70-819203a4b5c6";
+
+/// The environment placed on `host_id`, running at operation generation 5,
+/// and the host's report of its VM: `LOCAL` at boot generation 1, `state`.
+async fn running_on_host(db: &TestDatabase, host_id: &str, state: &str) -> Result<()> {
+    placed_environment(db, host_id).await?;
+    sqlx::query(
+        "UPDATE environments SET state = 'running', desired_state = 'started', \
+         environment_operation_generation = 5 WHERE id = $1",
+    )
+    .bind(ENVIRONMENT)
+    .execute(&db.pool)
+    .await?;
+    report(db, host_id, 1, state).await
+}
+
+/// The host's report of its VM, as its session would record it.
+async fn report(db: &TestDatabase, host_id: &str, generation: i64, state: &str) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO host_environments (host_id, environment_id, local_environment_id, \
+         generation, state) VALUES ($1, $2, $3::uuid, $4, $5) \
+         ON CONFLICT (host_id, environment_id) DO UPDATE SET \
+         local_environment_id = EXCLUDED.local_environment_id, \
+         generation = EXCLUDED.generation, state = EXCLUDED.state",
+    )
+    .bind(host_id)
+    .bind(ENVIRONMENT)
+    .bind(LOCAL)
+    .bind(generation)
+    .bind(state)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+fn refresh(local: &str, generation: u64) -> AttachHostRequest {
+    input(attach_host_request::Input::AccessRefresh(Box::new(
+        HostAccessRefresh {
+            request_id: REQUEST.into(),
+            environment_id: ENVIRONMENT.into(),
+            local_environment_id: local.into(),
+            generation,
+            ..Default::default()
+        },
+    )))
+}
+
+fn record_key(generation: u64, key: &str) -> AttachHostRequest {
+    input(attach_host_request::Input::HostKeyRecord(Box::new(
+        ProtoHostKeyRecord {
+            request_id: REQUEST.into(),
+            environment_id: ENVIRONMENT.into(),
+            local_environment_id: LOCAL.into(),
+            generation,
+            public_key_openssh: key.into(),
+            ..Default::default()
+        },
+    )))
+}
+
+/// A capability-3 host's attached session, past its first pong.
+async fn access_session(served: &Served, id: &str, key: &SigningKey) -> Result<HostStream> {
+    let mut session = attach_as(served, Protocol::Grpc, id, key, 3).await?;
+    session.send(ping()).await?;
+    ensure!(matches!(
+        output(&mut session).await?,
+        attach_host_response::Output::Pong(_)
+    ));
+    Ok(session)
+}
+
+/// The refusal code an access call was answered with, or what came instead.
+async fn access_refused(session: &mut HostStream) -> Result<String> {
+    match next_but_pongs(session).await? {
+        attach_host_response::Output::AccessRefused(refusal) => {
+            ensure!(refusal.request_id == REQUEST);
+            Ok(refusal.code)
+        }
+        other => anyhow::bail!("expected a refusal, got {other:?}"),
+    }
+}
+
+async fn stored_keys(db: &TestDatabase) -> Result<Vec<(i64, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT operation_generation, public_key FROM host_environment_ssh_host_keys \
+         WHERE environment_id = $1 ORDER BY operation_generation",
+    )
+    .bind(ENVIRONMENT)
+    .fetch_all(&db.pool)
+    .await?)
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_running_vms_peer_gets_a_grant_bound_to_the_operation_generation() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "access-grant", 1).await?;
+        running_on_host(&db, &id, "running").await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = access_session(&served, &id, &key).await?;
+        session.send(refresh(LOCAL, 1)).await?;
+        let attach_host_response::Output::AccessGrant(grant) = next_but_pongs(&mut session).await?
+        else {
+            anyhow::bail!("expected a grant");
+        };
+        ensure!(grant.request_id == REQUEST);
+        ensure!(grant.coordinator_url == ACCESS_COORDINATOR && grant.app_ports.is_empty());
+        // The environment's operation generation, not the boot generation the
+        // host named.
+        ensure!(grant.operation_generation == 5);
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+        )?;
+        let claims =
+            codewire_server_core::peer_token::validate(ACCESS_SECRET, &grant.peer_token, now)?;
+        ensure!(claims.environment_id == ENVIRONMENT && claims.generation == 5);
+        ensure!(grant.peer_token_expires_at > now);
+
+        // This control plane has no peer relay for hosts.
+        session
+            .send(input(attach_host_request::Input::PeerRelayAllocate(
+                Box::new(HostPeerRelayAllocate {
+                    request_id: REQUEST.into(),
+                    environment_id: ENVIRONMENT.into(),
+                    local_environment_id: LOCAL.into(),
+                    generation: 1,
+                    ..Default::default()
+                }),
+            )))
+            .await?;
+        ensure!(access_refused(&mut session).await? == "unsupported");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_access_calls_are_refused_unless_the_vm_is_held_running_and_current() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "access-refusals", 1).await?;
+        let (other_host, _) = host(&db, "access-other", 2).await?;
+        running_on_host(&db, &id, "running").await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = access_session(&served, &id, &key).await?;
+
+        // Another local environment, and a boot generation not reported.
+        session
+            .send(refresh("00000000-0000-4000-8000-000000000009", 1))
+            .await?;
+        ensure!(access_refused(&mut session).await? == "not_held");
+        session.send(refresh(LOCAL, 2)).await?;
+        ensure!(access_refused(&mut session).await? == "stale_generation");
+
+        // A boot generation the host reports but not RUNNING (cw-security).
+        report(&db, &id, 1, "starting").await?;
+        session.send(refresh(LOCAL, 1)).await?;
+        ensure!(access_refused(&mut session).await? == "not_running");
+        report(&db, &id, 1, "running").await?;
+
+        // The environment stopping, moved to another host, or being deleted.
+        for change in [
+            "UPDATE environments SET desired_state = 'stopped' WHERE id = $1",
+            "UPDATE environments SET host_id = $2 WHERE id = $1",
+            "UPDATE environments SET deletion_requested_at = now() WHERE id = $1",
+        ] {
+            let mut transaction = db.pool.begin().await?;
+            sqlx::query(change)
+                .bind(ENVIRONMENT)
+                .bind(&other_host)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            session.send(refresh(LOCAL, 1)).await?;
+            let code = access_refused(&mut session).await?;
+            ensure!(
+                code == "not_running" || code == "not_held",
+                "{change}: {code}"
+            );
+            sqlx::query(
+                "UPDATE environments SET desired_state = 'started', host_id = $2, \
+                 deletion_requested_at = NULL WHERE id = $1",
+            )
+            .bind(ENVIRONMENT)
+            .bind(&id)
+            .execute(&db.pool)
+            .await?;
+        }
+
+        // A session that is no longer the host's current one, and a revoked
+        // host.
+        sqlx::query("UPDATE hosts SET session_generation = session_generation + 1 WHERE id = $1")
+            .bind(&id)
+            .execute(&db.pool)
+            .await?;
+        session.send(refresh(LOCAL, 1)).await?;
+        ensure!(access_refused(&mut session).await? == "not_held");
+        sqlx::query("UPDATE hosts SET session_generation = session_generation - 1, revoked_at = now() WHERE id = $1")
+            .bind(&id)
+            .execute(&db.pool)
+            .await?;
+        session.send(refresh(LOCAL, 1)).await?;
+        ensure!(access_refused(&mut session).await? == "not_held");
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_vms_host_key_is_written_once_per_operation_generation() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "access-keys", 1).await?;
+        running_on_host(&db, &id, "running").await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = access_session(&served, &id, &key).await?;
+        let recorded = |output: attach_host_response::Output| match output {
+            attach_host_response::Output::HostKeyRecorded(recorded) => {
+                recorded.request_id == REQUEST
+            }
+            _ => false,
+        };
+
+        session.send(record_key(1, "ssh-ed25519 AAAA")).await?;
+        ensure!(access_refused(&mut session).await? == "invalid_key");
+        session.send(record_key(1, ACCESS_KEY)).await?;
+        ensure!(recorded(next_but_pongs(&mut session).await?));
+        // The same key again is accepted; another is a conflict.
+        session.send(record_key(1, ACCESS_KEY)).await?;
+        ensure!(recorded(next_but_pongs(&mut session).await?));
+        session.send(record_key(1, OTHER_ACCESS_KEY)).await?;
+        ensure!(access_refused(&mut session).await? == "key_conflict");
+
+        // A host that reports a new boot generation on its own gets no new
+        // slot: the operation generation is unchanged (cw-security).
+        report(&db, &id, 2, "running").await?;
+        session.send(record_key(2, OTHER_ACCESS_KEY)).await?;
+        ensure!(access_refused(&mut session).await? == "key_conflict");
+        ensure!(stored_keys(&db).await? == [(5, ACCESS_KEY.to_owned())]);
+
+        // A real start, at a new operation generation, has its own slot.
+        sqlx::query("UPDATE environments SET environment_operation_generation = 6 WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        session.send(record_key(2, OTHER_ACCESS_KEY)).await?;
+        ensure!(recorded(next_but_pongs(&mut session).await?));
+        ensure!(
+            stored_keys(&db).await?
+                == [(5, ACCESS_KEY.to_owned()), (6, OTHER_ACCESS_KEY.to_owned())]
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_access_calls_end_a_session_below_capability_3_or_with_a_bad_request_id() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "access-capability", 1).await?;
+        running_on_host(&db, &id, "running").await?;
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = attach(&served, Protocol::Grpc, &id, &key).await?;
+        session.send(refresh(LOCAL, 1)).await?;
+        let ended = tokio::time::timeout(BOUND, session.message::<AttachHostResponse>()).await?;
+        ensure!(
+            matches!(&ended, Err(error) if error.code == ErrorCode::InvalidArgument),
+            "a capability-2 host's access call: {ended:?}"
+        );
+
+        let mut session = access_session(&served, &id, &key).await?;
+        session
+            .send(input(attach_host_request::Input::AccessRefresh(Box::new(
+                HostAccessRefresh {
+                    request_id: "not-a-uuid".into(),
+                    environment_id: ENVIRONMENT.into(),
+                    local_environment_id: LOCAL.into(),
+                    generation: 1,
+                    ..Default::default()
+                },
+            ))))
+            .await?;
+        let ended = tokio::time::timeout(BOUND, async {
+            loop {
+                match session.message::<AttachHostResponse>().await {
+                    Ok(Some(_)) => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await?;
+        ensure!(
+            matches!(&ended, Err(error) if error.code == ErrorCode::InvalidArgument),
+            "a malformed request ID: {ended:?}"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
+
+/// A Pod's key store that would answer for any environment it was asked
+/// about: the host branch must never ask it.
+struct PodKeys;
+
+#[async_trait::async_trait]
+impl crate::api::host_key::HostKeyStore for PodKeys {
+    async fn current_host_key(
+        &self,
+        _environment_id: &str,
+    ) -> Result<Option<(i64, String)>, sqlx::Error> {
+        Ok(Some((99, OTHER_ACCESS_KEY.to_owned())))
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_host_environments_host_key_is_its_hosts_at_the_current_operation_generation()
+-> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        setup(&db).await?;
+        let (id, key) = host(&db, "access-lookup", 1).await?;
+        running_on_host(&db, &id, "running").await?;
+        let state = crate::api::test_state::offline(db.pool.clone()).await;
+        let user = codewire_server_core::auth::AuthUser {
+            user_id: OWNER.into(),
+            org_id: None,
+            is_admin: false,
+            via_api_key: false,
+        };
+        let lookup = || {
+            crate::api::host_key::get_environment_host_key_core(
+                &state,
+                &user,
+                ORG,
+                ENVIRONMENT,
+                &PodKeys,
+            )
+        };
+        // No key yet is not found, and the Pod store is never asked.
+        ensure!(matches!(
+            lookup().await,
+            Err(codewire_server_core::AppError::NotFound(_))
+        ));
+
+        let served = serve(&db, Timing::DEFAULT).await?;
+        let mut session = access_session(&served, &id, &key).await?;
+        session.send(record_key(1, ACCESS_KEY)).await?;
+        ensure!(matches!(
+            next_but_pongs(&mut session).await?,
+            attach_host_response::Output::HostKeyRecorded(_)
+        ));
+        let found = lookup().await?;
+        ensure!(
+            found.generation == 5 && found.public_key_openssh == ACCESS_KEY,
+            "{found:?}"
+        );
+
+        // A new operation generation has no key yet: not found, never the
+        // older generation's.
+        sqlx::query("UPDATE environments SET environment_operation_generation = 6 WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        ensure!(matches!(
+            lookup().await,
+            Err(codewire_server_core::AppError::NotFound(_))
+        ));
+        sqlx::query("UPDATE environments SET environment_operation_generation = 5 WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        ensure!(lookup().await?.public_key_openssh == ACCESS_KEY);
+
+        // A revoked host's key, and a host environment with no host, are not
+        // found; neither falls through to the Pod store (cw-security).
+        sqlx::query("UPDATE hosts SET revoked_at = now() WHERE id = $1")
+            .bind(&id)
+            .execute(&db.pool)
+            .await?;
+        ensure!(matches!(
+            lookup().await,
+            Err(codewire_server_core::AppError::NotFound(_))
+        ));
+        sqlx::query("UPDATE environments SET host_id = NULL WHERE id = $1")
+            .bind(ENVIRONMENT)
+            .execute(&db.pool)
+            .await?;
+        ensure!(matches!(
+            lookup().await,
+            Err(codewire_server_core::AppError::NotFound(_))
+        ));
+
+        // Placement decides: the same environment off its host is a Pod's.
+        sqlx::query(
+            "UPDATE environments SET runtime_backend = 'kubernetes', host_id = NULL WHERE id = $1",
+        )
+        .bind(ENVIRONMENT)
+        .execute(&db.pool)
+        .await?;
+        let pods = lookup().await?;
+        ensure!(pods.generation == 99 && pods.public_key_openssh == OTHER_ACCESS_KEY);
         Ok(())
     }
     .await;

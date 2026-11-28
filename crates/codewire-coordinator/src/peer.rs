@@ -92,14 +92,21 @@ impl DbPeerVerifier {
         }
     }
 
+    /// The environment's current operation generation, `None` when it is
+    /// gone or being destroyed, or when it runs on a host that is gone or
+    /// revoked (#3609, slice 3): revoking a host ends its peers' sessions at
+    /// the next re-check, not at their tokens' expiry.
     async fn current_generation(&self, env_id: Uuid) -> Result<Option<i64>, ProofError> {
         sqlx::query_scalar::<_, i64>(
-            r#"SELECT environment_operation_generation
-                 FROM environments
-                WHERE id = $1
-                  AND type = 'sandbox'
-                  AND state NOT IN ('destroyed', 'destroying')
-                  AND deletion_requested_at IS NULL"#,
+            r#"SELECT e.environment_operation_generation
+                 FROM environments e
+                WHERE e.id = $1
+                  AND e.type = 'sandbox'
+                  AND e.state NOT IN ('destroyed', 'destroying')
+                  AND e.deletion_requested_at IS NULL
+                  AND (e.runtime_backend <> 'host'
+                       OR EXISTS (SELECT 1 FROM hosts h
+                                   WHERE h.id = e.host_id AND h.revoked_at IS NULL))"#,
         )
         .bind(env_id.to_string())
         .fetch_optional(&self.pool)
@@ -210,5 +217,112 @@ mod tests {
         assert!(later.rank() > older.rank());
         assert!(older.lapsed(2_000 + PEER_TOKEN_LEEWAY_SECS + 1));
         assert!(!older.lapsed(2_000 + PEER_TOKEN_LEEWAY_SECS));
+    }
+
+    /// An environment on a host is current for its peer only while its host
+    /// isn't revoked; an environment the platform runs is unaffected
+    /// (#3609, slice 3).
+    #[tokio::test]
+    async fn production_a_host_environments_peer_is_current_only_while_its_host_stands() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            eprintln!("DATABASE_URL unset — skipping the host peer generation check");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&database_url).await.unwrap();
+        let tag = Uuid::new_v4().simple().to_string();
+        let (user, org, preset) = (format!("u-{tag}"), format!("o-{tag}"), format!("p-{tag}"));
+        let (on_host, on_platform) = (Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query("INSERT INTO users (id, email) VALUES ($1, $1 || '@example.test')")
+            .bind(&user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO organizations (id, name, slug, created_by) VALUES ($1, $1, $1, $2)",
+        )
+        .bind(&org)
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let host: String = sqlx::query_scalar(
+            "INSERT INTO hosts (org_id, owner_user_id, name, platform, capability_version, \
+             public_key) VALUES ($1, $2, $1, 'linux-x86_64-kvm', 3, \
+             decode(repeat('07', 32), 'hex')) RETURNING id",
+        )
+        .bind(&org)
+        .bind(&user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO environment_presets (id, org_id, name, build_status, project_spec) \
+             VALUES ($1, $2, 'Preset', 'ready', '{}'::jsonb)",
+        )
+        .bind(&preset)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (environment, backend, host_id) in [
+            (on_host, "host", Some(host.as_str())),
+            (on_platform, "kubernetes", None),
+        ] {
+            sqlx::query(
+                "INSERT INTO environments (id, org_id, created_by, type, preset_id, \
+                 project_spec, state, desired_state, environment_operation_generation, \
+                 runtime_backend, host_id) \
+                 VALUES ($1, $2, $3, 'sandbox', $4, '{}'::jsonb, 'running', 'started', 5, $5, $6)",
+            )
+            .bind(environment.to_string())
+            .bind(&org)
+            .bind(&user)
+            .bind(&preset)
+            .bind(backend)
+            .bind(host_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let verifier = DbPeerVerifier::new(pool.clone(), std::sync::Arc::from("unused"));
+        assert!(verifier.is_current(on_host, 5).await.unwrap());
+        assert!(verifier.is_current(on_platform, 5).await.unwrap());
+        sqlx::query("UPDATE hosts SET revoked_at = now() WHERE id = $1")
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !verifier.is_current(on_host, 5).await.unwrap(),
+            "a revoked host's peer"
+        );
+        assert!(verifier.is_current(on_platform, 5).await.unwrap());
+        // An environment on a host that no longer exists is no one's.
+        sqlx::query("UPDATE environments SET host_id = NULL WHERE id = $1")
+            .bind(on_host.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!verifier.is_current(on_host, 5).await.unwrap(), "no host");
+
+        for environment in [on_host, on_platform] {
+            sqlx::query("DELETE FROM environments WHERE id = $1")
+                .bind(environment.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (table, column, value) in [
+            ("hosts", "id", host.as_str()),
+            ("environment_presets", "id", preset.as_str()),
+            ("organizations", "id", org.as_str()),
+            ("users", "id", user.as_str()),
+        ] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE {column} = $1"))
+                .bind(value)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 }

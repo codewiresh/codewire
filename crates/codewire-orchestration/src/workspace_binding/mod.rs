@@ -37,7 +37,10 @@ use std::time::Duration;
 use codewire_server_core::bounded_http1::{BoundedHttp1Limits, ConnectionUpgrade};
 use codewire_tls::{ServerTlsFiles, ServerTlsStream};
 
-pub use access::{AccessSettings, HttpRelayAllocator, RelayAllocator, RelayAllocatorTls};
+pub use access::{
+    AccessSettings, HttpRelayAllocator, RelayAllocator, RelayAllocatorTls, public_coordinator_url,
+    valid_host_key,
+};
 pub(crate) use authorize::canonical_uid;
 pub use disco_admission::{
     AdmissionUnavailable, DiscoKeyAdmission, DiscoKeySeen, HttpDiscoKeyAdmission,
