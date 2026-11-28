@@ -378,7 +378,9 @@ guest shuts down cleanly.
     self-check has passed and it has stayed unbound past its settle grace
     (`5 s`), dropping its idle binding long-poll first so idle pool members
     consume near-zero CPU while staying `Ready`. When orchestration records
-    the Pod's workspace binding on claim, it opens one best-effort TCP
+    the Pod's workspace binding on claim — or reconciles an already-recorded
+    binding during create, start or resize (`pending`, `creating`, `starting`,
+    `resizing`), never on a `running` Sandbox — it opens one best-effort TCP
     connection to the Pod's port `7777` (the same wake trigger as any other
     suspended `standard` Pod), resuming the VM, delivering any renewed kubelet
     tokens while frozen, and thawing the daemon so it calls `BindWorkspace`

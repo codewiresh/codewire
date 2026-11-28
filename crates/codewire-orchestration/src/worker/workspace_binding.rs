@@ -1025,9 +1025,7 @@ pub(crate) async fn record_workspace_binding(
     .await?;
     guard.commit().await?;
     debug_assert_eq!(checked.pod, *chain.member());
-    if outcome == WriteOutcome::Recorded {
-        wake::wake_bound_standard_pod(&env.id, &env.runtime_profile, &checked.pod_ip);
-    }
+    wake::wake_bound_standard_pod(outcome, env, states, &checked.pod_ip);
     Ok((outcome, checked.path))
 }
 

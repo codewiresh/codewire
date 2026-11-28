@@ -3258,3 +3258,156 @@ async fn db_a_placement_without_pools_refuses_a_pool_born_first_bind() -> Result
     .await;
     db.finish(result).await
 }
+
+async fn seed_with_profiles(db: &TestDatabase, profiles: [(&str, &str); 2]) -> Result<()> {
+    db.user(CREATOR).await?;
+    db.organization(ORGANIZATION).await?;
+    sqlx::query(
+        "INSERT INTO environment_presets(id,org_id,name,slug,project_spec) \
+         VALUES ($1,$2,'Binding','binding', \
+         '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb)",
+    )
+    .bind(PRESET)
+    .bind(ORGANIZATION)
+    .execute(&db.pool)
+    .await?;
+    for (environment, runtime_profile) in profiles {
+        sqlx::query(
+            "INSERT INTO environments \
+             (id,org_id,created_by,preset_id,type,state,desired_state,project_spec, \
+              environment_operation_generation,runtime_profile) \
+             VALUES ($1,$2,$3,$4,'sandbox','running','started', \
+             '{\"schema_version\":1,\"working_directory\":\"/workspace\"}'::jsonb,$5,$6)",
+        )
+        .bind(environment)
+        .bind(ORGANIZATION)
+        .bind(CREATOR)
+        .bind(PRESET)
+        .bind(GENERATION)
+        .bind(runtime_profile)
+        .execute(&db.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO sandbox_environment_backend \
+             (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid) \
+             VALUES ($1,$2,$3,$4)",
+        )
+        .bind(environment)
+        .bind(NAMESPACE)
+        .bind(format!("sandbox-{environment}"))
+        .bind(claim_uid(environment))
+        .execute(&db.pool)
+        .await?;
+    }
+    Ok(())
+}
+
+/// #6718: when an adopted `standard` warm-pool Pod re-pauses after
+/// `WriteOutcome::Recorded` (for example during an orchestration rollout),
+/// retrying/reconciling the binding during create or start returns
+/// `WriteOutcome::Unchanged` and still dispatches the port 7777 wake knock.
+/// An unchanged reconcile on a `running` (potentially suspended) Sandbox or a
+/// `commodity` Sandbox never dispatches a wake knock.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_standard_warm_wake_fires_on_unchanged_create_and_start_but_not_running() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_with_profiles(&db, [(ENV_A, "standard"), (ENV_B, "commodity")]).await?;
+
+        let standard = FakeKube::runtime(ENV_A, POD_1, WorkspaceCredentialScope::Pod);
+        standard.update(&pod_path(ENV_A), |pod| {
+            pod["status"]["podIP"] = json!("10.244.0.15");
+        });
+        let expected_target = std::net::SocketAddr::from((std::net::Ipv4Addr::new(10, 244, 0, 15), 7777));
+
+        // 1. Initial bind on create records the binding and fires the wake knock.
+        set_state(&db.pool, ENV_A, "creating").await?;
+        let (outcome, knocks) = wake::capture_wake_knocks(enforced(
+            &db.pool,
+            &standard,
+            ENV_A,
+            POD_1,
+            &["creating"],
+        ))
+        .await;
+        ensure!(outcome? == WriteOutcome::Recorded);
+        ensure!(knocks == vec![(ENV_A.to_owned(), expected_target)]);
+
+        // 2. Retry/reconcile on create, pending and start returns Unchanged and
+        //    still fires the wake knock.
+        for (state, states) in [
+            ("creating", &["creating"][..]),
+            ("creating", &["pending", "creating", "starting"][..]),
+            ("pending", &["pending"][..]),
+            ("starting", &["starting"][..]),
+        ] {
+            set_state(&db.pool, ENV_A, state).await?;
+            let (outcome, knocks) = wake::capture_wake_knocks(enforced(
+                &db.pool,
+                &standard,
+                ENV_A,
+                POD_1,
+                states,
+            ))
+            .await;
+            ensure!(outcome? == WriteOutcome::Unchanged);
+            ensure!(
+                knocks == vec![(ENV_A.to_owned(), expected_target)],
+                "expected wake knock on Unchanged for state={state} states={states:?}, got {knocks:?}"
+            );
+        }
+
+        // 3. Reconciling an already-bound `running` Sandbox (including a
+        //    suspended one) returns Unchanged and never wakes it.
+        set_state(&db.pool, ENV_A, "running").await?;
+        sqlx::query("UPDATE environments SET suspended_at = NOW() WHERE id = $1")
+            .bind(ENV_A)
+            .execute(&db.pool)
+            .await?;
+        let (outcome, knocks) = wake::capture_wake_knocks(enforced(
+            &db.pool,
+            &standard,
+            ENV_A,
+            POD_1,
+            &["running"],
+        ))
+        .await;
+        ensure!(outcome? == WriteOutcome::Unchanged);
+        ensure!(
+            knocks.is_empty(),
+            "running suspended sandbox must not be woken on Unchanged: {knocks:?}"
+        );
+
+        // 4. A commodity Sandbox never receives a wake knock on Recorded or Unchanged.
+        let commodity = FakeKube::runtime(ENV_B, POD_2, WorkspaceCredentialScope::Pod);
+        commodity.update(&pod_path(ENV_B), |pod| {
+            pod["status"]["podIP"] = json!("10.244.0.16");
+        });
+        set_state(&db.pool, ENV_B, "creating").await?;
+        let (outcome, knocks) = wake::capture_wake_knocks(enforced(
+            &db.pool,
+            &commodity,
+            ENV_B,
+            POD_2,
+            &["creating"],
+        ))
+        .await;
+        ensure!(outcome? == WriteOutcome::Recorded);
+        ensure!(knocks.is_empty());
+        let (outcome, knocks) = wake::capture_wake_knocks(enforced(
+            &db.pool,
+            &commodity,
+            ENV_B,
+            POD_2,
+            &["creating"],
+        ))
+        .await;
+        ensure!(outcome? == WriteOutcome::Unchanged);
+        ensure!(knocks.is_empty());
+
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}
