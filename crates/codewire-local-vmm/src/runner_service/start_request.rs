@@ -3,6 +3,30 @@
 
 use super::*;
 
+/// The boot's bound names and seed placeholders, and its record of its
+/// bound secrets (#4003), whose hosts are bound beside the credentials'.
+pub(super) fn boot_interception(
+    request: &mut v1::StartVmRequest,
+    clients: codewire_access::ManagedCredentialClients,
+) -> Result<
+    (
+        codewire_egress_policy::intercept::InterceptSet,
+        codewire_vmm_guest_probe::SeedPlaceholders,
+        Option<Vec<codewire_access::FirstBindSecret>>,
+    ),
+    Status,
+> {
+    let record = crate::runner::records_from_proto(request.bound_secrets.take());
+    let (intercepts, placeholders) = crate::runner::boot_interception(
+        request.intercept,
+        clients,
+        std::mem::take(&mut request.credential_placeholders),
+        record.as_deref().unwrap_or_default(),
+    )
+    .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?;
+    Ok((intercepts, placeholders, record))
+}
+
 pub(super) fn parse_environment_id(value: &str) -> Result<Uuid, Status> {
     let id =
         Uuid::parse_str(value).map_err(|_| Status::invalid_argument("invalid environment ID"))?;

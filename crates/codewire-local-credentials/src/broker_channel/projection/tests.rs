@@ -103,6 +103,7 @@ fn binding(context: &ProjectionContext) -> LocalEnvironmentProjectionBinding {
             ..Default::default()
         },
         selection_sha256: context.selection_sha256,
+        bound_secrets: Some(Vec::new()),
     }
 }
 

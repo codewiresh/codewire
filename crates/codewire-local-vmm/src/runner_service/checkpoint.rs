@@ -110,6 +110,7 @@ impl RunnerRpc {
                         .unwrap_or_default(),
                     daemon_vsock_port: boot.daemon_vsock_port,
                     intercept: !boot.intercepts.is_empty(),
+                    bound_secrets: crate::runner::records_to_proto(boot.bound_secrets.clone()),
                 }),
                 resume_failed: capture.resume_failed,
             };
@@ -199,6 +200,7 @@ pub(super) fn parse_checkpoint_boot(
         daemon_vsock_port: bindings.daemon_vsock_port,
         intercept: bindings.intercept,
         image_disk: None,
+        bound_secrets: crate::runner::records_from_proto(bindings.bound_secrets.clone()),
         state_identity: boot.state_identity.as_ref().map(|identity| {
             crate::checkpoint_pin::StateIdentity {
                 device: identity.device,

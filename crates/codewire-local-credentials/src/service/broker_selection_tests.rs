@@ -133,6 +133,7 @@ impl Withheld {
             platform_delegated: false,
             network_policy_allows_github: true,
             network_policy_allowed_hosts: BTreeSet::new(),
+            serves_bound_secrets: false,
         };
         let (shutdown, mut stopping) = watch::channel(false);
         let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -258,6 +259,7 @@ async fn a_reconnected_credential_replaces_the_broker_of_a_projected_environment
                 ..Default::default()
             },
             selection_sha256: [2; 32],
+            bound_secrets: None,
         }),
         ..withheld.request()
     };

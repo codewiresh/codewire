@@ -210,8 +210,22 @@ async fn delegated_bound_secret_without_a_key_or_a_slot_is_refused_never_raw() -
         );
         ensure!(unwraps(&h) == 0, "a refused bound secret unwrapped a key");
 
-        // Made plain again with its value, the same composition projects it.
+        // Made plain since, with its value: a local VM's boot record never
+        // reaches the platform, so a secret that was ever bound is refused
+        // by name, never projected raw (condition A). Set again from
+        // nothing, it was never bound and projects.
         sqlx::query("UPDATE tenant_secrets SET binding=NULL")
+            .execute(&h.db.pool)
+            .await?;
+        put(&organization, "ORG_TOKEN", b"org-plain", &h.db.pool).await?;
+        ensure!(
+            composed(&composing, &platform_only, None).await.is_err(),
+            "a secret bound once was projected raw"
+        );
+        let (request, _, _) = projection_request(&platform_only, unix_millis()? + 15_000);
+        ensure!(composing.project_environment(request, None).await.is_err());
+        sqlx::query("DELETE FROM tenant_secrets WHERE path=$1 AND key='ORG_TOKEN'")
+            .bind(&organization)
             .execute(&h.db.pool)
             .await?;
         put(&organization, "ORG_TOKEN", b"org-plain", &h.db.pool).await?;

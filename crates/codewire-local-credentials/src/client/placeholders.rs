@@ -1,7 +1,8 @@
-//! A boot's credential placeholders, asked of the authority (#3999).
+//! A boot's credential placeholders, asked of the authority (#3999), and
+//! the bound secrets it records (#4003).
 
 use codewire_access::{
-    CapabilitySlot, CredentialPlaceholder, EnvironmentAccessBinding, EnvironmentId,
+    CapabilitySlot, CredentialPlaceholder, EnvironmentAccessBinding, EnvironmentId, FirstBindSecret,
 };
 use tonic::Status;
 
@@ -10,6 +11,33 @@ use crate::AuthorityFeature;
 use crate::control::v1;
 
 impl LocalCredentialControlClient {
+    /// What a boot of `projection`'s local sources records of its bound
+    /// secrets (#4003): each winner that is bound, without its value. An
+    /// authority older than the question is refused, as is a selection that
+    /// doesn't read; either fails the boot.
+    pub async fn record_boot_bound_secrets(
+        &mut self,
+        projection: &crate::LocalEnvironmentProjectionBinding,
+    ) -> Result<Vec<FirstBindSecret>, Status> {
+        if !AuthorityFeature::BootBoundSecrets.served_by(self.info.protocol_version) {
+            return Err(Status::unavailable(
+                "the running local credential service predates recording bound secrets",
+            ));
+        }
+        let response = self
+            .inner
+            .record_boot_bound_secrets(v1::RecordBootBoundSecretsRequest {
+                projection: Some(projection.clone().into_proto()),
+            })
+            .await?
+            .into_inner();
+        Ok(response
+            .secrets
+            .into_iter()
+            .map(crate::broker_channel::record_from_proto)
+            .collect())
+    }
+
     /// The placeholders for each of `slots` that `selected` grants this
     /// environment generation, for a seed that intercepts its agent hosts.
     /// The authority refuses a binding that is no longer the environment's.

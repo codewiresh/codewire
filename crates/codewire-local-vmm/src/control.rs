@@ -37,6 +37,7 @@ mod tests {
                 purpose: v1::BootSecretPurpose::FrontDoorPairing as i32,
                 value: b"boot-secret-canary".to_vec(),
             }],
+            bound_secrets: None,
         };
         let debug = format!("{response:?}");
         assert!(debug.contains("[REDACTED]"), "{debug}");

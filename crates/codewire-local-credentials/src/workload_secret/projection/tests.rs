@@ -117,7 +117,12 @@ fn only_winning_selected_values_are_read_and_response_is_recipient_bound() {
     let recipient = ProjectionRecipient::new();
     let expected = context();
     let encrypted = authority
-        .seal_workload_projection(&selection(project_id), &expected, recipient.public_key())
+        .seal_workload_projection(
+            &selection(project_id),
+            Some(&[]),
+            &expected,
+            recipient.public_key(),
+        )
         .unwrap();
     assert_eq!(
         *store.reads.lock().unwrap(),
@@ -142,7 +147,7 @@ fn no_selection_and_fully_shadowed_selection_read_no_material_even_when_store_de
         let recipient = ProjectionRecipient::new();
         let expected = context();
         let encrypted = authority
-            .seal_workload_projection(&selected, &expected, recipient.public_key())
+            .seal_workload_projection(&selected, Some(&[]), &expected, recipient.public_key())
             .unwrap();
         assert_eq!(
             recipient
@@ -170,6 +175,7 @@ fn denied_or_missing_winner_never_falls_back_to_project_material() {
             authority
                 .seal_workload_projection(
                     &selection(project_id),
+                    Some(&[]),
                     &context(),
                     recipient.public_key()
                 )
@@ -200,7 +206,7 @@ fn one_missing_winner_seals_nothing_for_the_others() {
     let recipient = ProjectionRecipient::new();
     assert_eq!(
         authority
-            .seal_workload_projection(&user_only, &context(), recipient.public_key())
+            .seal_workload_projection(&user_only, Some(&[]), &context(), recipient.public_key())
             .unwrap_err(),
         LocalCredentialError::WorkloadSecretMaterialMissing
     );
@@ -214,7 +220,12 @@ fn nonready_winner_does_not_disappear_into_a_lower_priority_source() {
     let recipient = ProjectionRecipient::new();
     assert_eq!(
         authority
-            .seal_workload_projection(&selection(project_id), &context(), recipient.public_key())
+            .seal_workload_projection(
+                &selection(project_id),
+                Some(&[]),
+                &context(),
+                recipient.public_key()
+            )
             .unwrap_err(),
         LocalCredentialError::WorkloadSecretMaterialMissing
     );
@@ -231,7 +242,12 @@ fn exact_project_id_never_falls_back_to_a_recreated_name() {
     let recipient = ProjectionRecipient::new();
     assert_eq!(
         authority
-            .seal_workload_projection(&selection(project_id), &context(), recipient.public_key())
+            .seal_workload_projection(
+                &selection(project_id),
+                Some(&[]),
+                &context(),
+                recipient.public_key()
+            )
             .unwrap_err(),
         LocalCredentialError::SecretProjectNotFound
     );
@@ -246,14 +262,19 @@ fn reserved_routing_key_collision_and_expired_context_fail_before_reads() {
     let recipient = ProjectionRecipient::new();
     assert!(
         authority
-            .seal_workload_projection(&selected, &context(), recipient.public_key())
+            .seal_workload_projection(&selected, Some(&[]), &context(), recipient.public_key())
             .is_err()
     );
     let mut expired = context();
     expired.deadline_unix_ms = 1;
     assert!(
         authority
-            .seal_workload_projection(&selection(project_id), &expired, recipient.public_key())
+            .seal_workload_projection(
+                &selection(project_id),
+                Some(&[]),
+                &expired,
+                recipient.public_key()
+            )
             .is_err()
     );
     assert!(store.reads.lock().unwrap().is_empty());
@@ -265,7 +286,12 @@ fn secret_rotation_is_seen_on_next_projection_not_in_an_existing_result() {
     let recipient = ProjectionRecipient::new();
     let expected = context();
     let first = authority
-        .seal_workload_projection(&selection(project_id), &expected, recipient.public_key())
+        .seal_workload_projection(
+            &selection(project_id),
+            Some(&[]),
+            &expected,
+            recipient.public_key(),
+        )
         .unwrap();
     authority
         .set_user_workload_secret(
@@ -283,7 +309,12 @@ fn secret_rotation_is_seen_on_next_projection_not_in_an_existing_result() {
     );
     let recipient = ProjectionRecipient::new();
     let second = authority
-        .seal_workload_projection(&selection(project_id), &expected, recipient.public_key())
+        .seal_workload_projection(
+            &selection(project_id),
+            Some(&[]),
+            &expected,
+            recipient.public_key(),
+        )
         .unwrap();
     assert_eq!(
         recipient
@@ -323,6 +354,7 @@ fn too_many_selected_keys_fail_before_any_protected_read() {
                     user: true,
                     ..Default::default()
                 },
+                Some(&[]),
                 &context(),
                 ProjectionRecipient::new().public_key()
             )
@@ -355,6 +387,7 @@ fn aggregate_size_limit_stops_further_material_reads() {
         authority
             .seal_workload_projection(
                 &selected,
+                Some(&[]),
                 &context(),
                 ProjectionRecipient::new().public_key()
             )
@@ -375,6 +408,7 @@ fn expired_blocking_read_cannot_publish_a_fresh_projection() {
         authority
             .seal_workload_projection(
                 &selection(project_id),
+                Some(&[]),
                 &expected,
                 ProjectionRecipient::new().public_key()
             )

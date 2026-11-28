@@ -63,6 +63,10 @@ pub(in crate::supervisor) struct BootBindings {
     /// start with the override. Absent or false flags the checkpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(in crate::supervisor) state_disk_cleared: Option<bool>,
+    /// The captured boot's record of its bound secrets (#4003), which a
+    /// restore keeps. A checkpoint taken before the record has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::supervisor) bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
 }
 
 impl BootBindings {
@@ -441,6 +445,9 @@ pub(super) fn attach_boot(
         .as_ref()
         .ok_or(SupervisorError::InvalidState)?;
     request.vsock_cid = checkpoint.vsock_cid;
+    // The restored guest holds the placeholders its captured boot's record
+    // derives, so that record is this boot's.
+    request.bound_secrets = crate::runner::records_to_proto(checkpoint.boot.bound_secrets.clone());
     request.checkpoint = Some(v1::CheckpointBoot {
         checkpoint_id: checkpoint_id.to_string(),
         source_environment_id: manifest.source.environment_id.to_string(),
@@ -469,6 +476,7 @@ pub(super) fn attach_boot(
                 .unwrap_or_default(),
             daemon_vsock_port: checkpoint.boot.daemon_vsock_port,
             intercept: checkpoint.boot.intercept,
+            bound_secrets: crate::runner::records_to_proto(checkpoint.boot.bound_secrets.clone()),
         }),
         source_generation: checkpoint.source_generation,
         state_identity: placed_state_identity(supervisor, &request.environment_id),

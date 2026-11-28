@@ -717,6 +717,9 @@ message CheckpointBootBindings {
   // boot's egress CA (#3999). A restore must match: the switch applies on a
   // stop and start, not a restore.
   bool intercept = 7;
+  // The captured boot's record of its bound secrets (#4003), which a
+  // restore keeps: its guest holds the placeholders that record derives.
+  BootBoundSecrets bound_secrets = 8;
 }
 
 message CheckpointVmResponse {
@@ -1512,6 +1515,26 @@ message StartVmRequest {
   // credential authority, as it recorded them: the only label an
   // intercepted host's refusal by the network policy takes (#5058).
   NetworkPolicyLabel credential_policy_label = 32;
+  // What the boot recorded of its bound secrets (#4003): the runner binds
+  // their hosts beside the credentials' and holds the record for the boot's
+  // life, for its brokers and its VM checkpoints. Absent from an older
+  // supervisor: the boot recorded nothing.
+  BootBoundSecrets bound_secrets = 33;
+}
+
+// One bound secret as a local VM's boot recorded it
+// (codewire_access::FirstBindSecret). No value, placeholder or presentation.
+message BootBoundSecret {
+  string path = 1;
+  string key = 2;
+  string binding_id = 3;
+  uint64 binding_generation = 4;
+  optional string prefix = 5;
+  repeated string hosts = 6;
+}
+
+message BootBoundSecrets {
+  repeated BootBoundSecret secrets = 1;
 }
 
 message SeedCredentialPlaceholder {
@@ -1631,6 +1654,8 @@ message GetBootSecretsRequest {
 
 message GetBootSecretsResponse {
   repeated BootSecret secrets = 1;
+  // The boot's record of its bound secrets (#4003), for each of its brokers.
+  BootBoundSecrets bound_secrets = 2;
 }
 
 // One per-boot secret (#3999): 32 random bytes the runner mints for an

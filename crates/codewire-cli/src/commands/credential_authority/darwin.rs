@@ -353,6 +353,9 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         for host in &config.network_policy_allowed_hosts {
             command.arg("--network-policy-allows-host").arg(host);
         }
+        if config.serves_bound_secrets {
+            command.arg("--serves-bound-secrets");
+        }
         command.args(lookup.arguments());
         if secrets_fd.is_some() {
             command
@@ -654,6 +657,7 @@ mod tests {
             platform_delegated: false,
             network_policy_allows_github: false,
             network_policy_allowed_hosts: Default::default(),
+            serves_bound_secrets: false,
         };
         let (_authority, peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut child = LocalBrokerProcessSpawner::spawn(
@@ -744,6 +748,7 @@ mod tests {
             platform_delegated: false,
             network_policy_allows_github: false,
             network_policy_allowed_hosts: Default::default(),
+            serves_bound_secrets: false,
         };
         let secrets = codewire_local_credentials::BrokerBootSecrets::new([(
             codewire_local_credentials::BootSecretPurpose::FrontDoorPairing,

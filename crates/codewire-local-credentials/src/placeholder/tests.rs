@@ -1122,6 +1122,20 @@ impl LocalCredentialBrokerLeaseService for FixedLeaseResponse {
     ) -> Result<Response<v1::BrokerCredentialRefreshRateLimitResponse>, Status> {
         Err(Status::unimplemented("not under test"))
     }
+
+    async fn get_bound_secret_grants(
+        &self,
+        _: Request<v1::BoundSecretGrantsRequest>,
+    ) -> Result<Response<v1::BoundSecretGrants>, Status> {
+        Err(Status::unimplemented("not under test"))
+    }
+
+    async fn lease_bound_secret(
+        &self,
+        _: Request<v1::BoundSecretLeaseRequest>,
+    ) -> Result<Response<v1::BoundSecretLeaseResponse>, Status> {
+        Err(Status::unimplemented("not under test"))
+    }
 }
 
 impl Fixture {

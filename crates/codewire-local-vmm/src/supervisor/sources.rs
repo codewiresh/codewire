@@ -142,6 +142,8 @@ pub(super) fn local_launch_projection(
                 reserved_keys,
             },
             selection_sha256: selection_sha256.as_bytes(),
+            // The boot's record, from its runner, for each broker it ensures.
+            bound_secrets: None,
         },
     ))
 }

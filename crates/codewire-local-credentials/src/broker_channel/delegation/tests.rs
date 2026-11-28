@@ -337,6 +337,7 @@ async fn fixture_with_projection(mode: ConnectorMode, local_projection: bool) ->
                 ..Default::default()
             },
             selection_sha256: [7; 32],
+            bound_secrets: Some(Vec::new()),
         }),
         BrokerLeaseChannelControl {
             local_profile: None,

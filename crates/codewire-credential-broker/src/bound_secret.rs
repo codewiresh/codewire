@@ -3,19 +3,10 @@
 //! epoch's grants, each a first-bind record and the placeholder it derives,
 //! a lease's reread of the secret's row, and the lease's failures.
 
-use codewire_access::{FirstBindSecret, HostBinding, SecretPlaceholder};
+pub use codewire_access::EpochBoundSecret;
+use codewire_access::HostBinding;
 
 pub use codewire_credential_bridge::{BOUND_SECRET_ROUTE, BOUND_SECRET_SLOT};
-
-/// One of an epoch's bound-secret grants: what the Pod's first bind recorded
-/// of a secret its selected sources hold, and the placeholder that record
-/// derives under the environment's application-secret key, which the Pod
-/// was projected.
-#[derive(Clone, Debug)]
-pub struct EpochBoundSecret {
-    pub record: FirstBindSecret,
-    pub placeholder: SecretPlaceholder,
-}
 
 /// A secret's row as a lease read it: its binding now, which matched the
 /// record's identity, generation and the request's host, and the version of

@@ -3,13 +3,15 @@
 
 use std::path::Path;
 
-use codewire_access::EnvironmentId;
+use codewire_access::{EnvironmentId, FirstBindSecret, ManagedCredentialClients};
 use codewire_local_credentials::{
     AuthorityFeature, BootSecretPurpose, BrokerBootSecrets, PlatformCredentialBinding,
 };
 use uuid::Uuid;
 
 use super::{Supervisor, SupervisorError, egress_intercept};
+
+mod bound_secrets;
 use crate::control::v1;
 use crate::network_policy_store::SelectedPolicy;
 use crate::runner_service::RunnerClient;
@@ -32,6 +34,30 @@ pub(super) struct BootEgress {
     /// The boot's platform selection when its credentials come from the
     /// platform (#4909), whose seed placeholders the platform gives (#4001).
     pub(super) platform: Option<PlatformCredentialBinding>,
+    /// What the boot records of its local sources' bound secrets (#4003),
+    /// already checked against its credentials' hosts; `None` when its
+    /// authority predates the record.
+    pub(super) bound_secrets: Option<Vec<FirstBindSecret>>,
+}
+
+impl BootEgress {
+    /// The fields of the boot's start request this decides: the policy it
+    /// enforces, what it intercepts, the seed's `credential_placeholders`,
+    /// and its record of its bound secrets, whose hosts its runner binds.
+    pub(super) fn start_request(
+        &self,
+        credential_placeholders: Vec<v1::SeedCredentialPlaceholder>,
+    ) -> v1::StartVmRequest {
+        v1::StartVmRequest {
+            network_policy_document: self.network_policy_document.clone(),
+            network_policy_label: Some(self.network_policy_label.clone()),
+            intercept: self.intercept,
+            interception: Some(self.interception),
+            credential_placeholders,
+            bound_secrets: crate::runner::records_to_proto(self.bound_secrets.clone()),
+            ..Default::default()
+        }
+    }
 }
 
 impl Supervisor {
@@ -64,6 +90,7 @@ impl Supervisor {
         &self,
         operation_id: Uuid,
         broker: &super::CredentialBrokerEnsureRequest,
+        clients: ManagedCredentialClients,
     ) -> Result<BootEgress, SupervisorError> {
         let environment_id = Uuid::parse_str(&broker.environment_id.to_string())
             .map_err(|_| SupervisorError::InvalidState)?;
@@ -87,13 +114,22 @@ impl Supervisor {
                 refusal.record(self.log.as_deref(), broker.environment_generation);
                 SupervisorError::PlatformPlaceholders(refusal)
             })?;
+        let intercept = interception.state == v1::InterceptionState::Intercepted as i32;
+        let bound_secrets = self.record_bound_secrets(broker).await?;
+        bound_secrets::admit(
+            bound_secrets.as_deref().unwrap_or_default(),
+            &interception,
+            &bound_secrets::credential_intercepts(intercept, clients),
+        )
+        .map_err(SupervisorError::BoundSecrets)?;
         let egress = BootEgress {
             network_policy_label: crate::runner_service::policy_label(&network_policy),
             network_policy,
             network_policy_document,
-            intercept: interception.state == v1::InterceptionState::Intercepted as i32,
+            intercept,
             interception,
             platform: broker.platform.clone(),
+            bound_secrets,
         };
         self.settle_state_disk_for_boot(operation_id, environment_id, &egress)
             .await?;
@@ -101,32 +137,34 @@ impl Supervisor {
     }
 }
 
-/// The boot's secrets for its credential brokers (#3999), asked of its
-/// runner on every ensure, so an authority restarted mid-generation gets them
-/// again from the runner's memory. A boot that does not intercept has none.
-/// The supervisor refuses a runner on another protocol before it gets here.
+/// The boot's secrets for its credential brokers (#3999), and its record of
+/// its bound secrets (#4003), asked of its runner on every ensure, so an
+/// authority restarted mid-generation gets them again from the runner's
+/// memory. A boot that does not intercept has neither. The supervisor
+/// refuses a runner on another protocol before it gets here.
 pub(super) async fn broker_boot_secrets(
     runner_socket: &Path,
     environment_id: &EnvironmentId,
     generation: u64,
-) -> Result<BrokerBootSecrets, SupervisorError> {
+) -> Result<(BrokerBootSecrets, Option<Vec<FirstBindSecret>>), SupervisorError> {
     let environment =
         Uuid::parse_str(&environment_id.to_string()).map_err(|_| SupervisorError::InvalidState)?;
     let mut runner = RunnerClient::connect(runner_socket)
         .await
         .map_err(|_| SupervisorError::RunnerUnavailable)?;
-    let secrets = match runner.boot_secrets(environment, generation).await {
-        Ok(secrets) => secrets,
+    let (secrets, record) = match runner.boot_secrets(environment, generation).await {
+        Ok(answer) => answer,
         Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-            return Ok(BrokerBootSecrets::default());
+            return Ok((BrokerBootSecrets::default(), None));
         }
         Err(_) => return Err(SupervisorError::RunnerUnavailable),
     };
     // The runner client admits only the front door's pairing purpose.
-    BrokerBootSecrets::new(
+    let secrets = BrokerBootSecrets::new(
         secrets
             .into_iter()
             .map(|secret| (BootSecretPurpose::FrontDoorPairing, secret.value)),
     )
-    .map_err(|_| SupervisorError::InvalidRunnerResponse)
+    .map_err(|_| SupervisorError::InvalidRunnerResponse)?;
+    Ok((secrets, record))
 }

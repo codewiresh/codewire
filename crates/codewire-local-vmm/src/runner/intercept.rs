@@ -6,13 +6,17 @@
 //! the boot's CA in its own memory, constrained to those names, and only the
 //! certificate reaches the guest, in the seed.
 
-use codewire_access::CredentialPlaceholder;
+use codewire_access::{CredentialPlaceholder, FirstBindSecret};
 use codewire_egress_front_door_bridge::RouteTable;
 use codewire_egress_policy::intercept::InterceptSet;
 use codewire_vmm_guest_probe::{EgressCaCertificate, PlaceholderSlot, SeedPlaceholders};
 
 use super::RunnerError;
 use super::front_door::{FrontDoorProcess, RunningFrontDoor};
+
+mod bound;
+use bound::with_bound_hosts;
+pub(crate) use bound::{BoundSecretsRefusal, bound_hosts, records_from_proto, records_to_proto};
 
 /// Where an intercepting boot's front door stopped before its VM reported
 /// started (#3999, #4916). The names are closed: each is part of a runner
@@ -341,11 +345,17 @@ pub(crate) fn boot_placeholders(
 /// placeholder (#4001): without one, `clients` binds no GitHub host, and Git
 /// and `gh` keep their loopback route; a GitHub placeholder for a boot that
 /// binds no GitHub host is refused, so no guest sends it to GitHub itself.
+/// The hosts of each secret the boot `record`ed bound are bound too
+/// (#4003), only for a boot that intercepts.
 pub(crate) fn boot_interception(
     intercept: bool,
     clients: codewire_access::ManagedCredentialClients,
     entries: Vec<crate::control::v1::SeedCredentialPlaceholder>,
+    record: &[FirstBindSecret],
 ) -> Result<(InterceptSet, SeedPlaceholders), RunnerError> {
+    if !intercept && !record.is_empty() {
+        return Err(RunnerError::InvalidRequest);
+    }
     let placeholders = boot_placeholders(intercept, entries)?;
     let github = placeholders
         .entries()
@@ -384,7 +394,7 @@ pub(crate) fn boot_interception(
     if gemini && !binds_gemini {
         return Err(RunnerError::InvalidRequest);
     }
-    Ok((intercepts, placeholders))
+    Ok((with_bound_hosts(intercepts, record)?, placeholders))
 }
 
 /// A restore across a change of the switch is refused: the restored
@@ -565,7 +575,7 @@ mod tests {
                 .any(|host| intercepts.binds(host, 443))
         };
         let (without, placeholders) =
-            boot_interception(true, selected, vec![entry(1, &placeholder())]).unwrap();
+            boot_interception(true, selected, vec![entry(1, &placeholder())], &[]).unwrap();
         assert!(!binds_github(&without));
         assert!(without.binds("api.anthropic.com", 443));
         assert_eq!(placeholders.entries().len(), 1);
@@ -573,6 +583,7 @@ mod tests {
             true,
             selected,
             vec![entry(1, &placeholder()), entry(3, &placeholder())],
+            &[],
         )
         .unwrap();
         assert!(
@@ -583,8 +594,13 @@ mod tests {
         assert_eq!(placeholders.entries().len(), 2);
         // A GitHub-only boot with its placeholder binds GitHub's hosts, so
         // it runs a front door and reports itself intercepted (#5670).
-        let (github_only, _) =
-            boot_interception(true, clients(&["github"]), vec![entry(3, &placeholder())]).unwrap();
+        let (github_only, _) = boot_interception(
+            true,
+            clients(&["github"]),
+            vec![entry(3, &placeholder())],
+            &[],
+        )
+        .unwrap();
         assert!(!github_only.is_empty());
         assert!(binds_github(&github_only));
         // Without the GitHub client its hosts are never bound.
@@ -592,11 +608,12 @@ mod tests {
             boot_interception(
                 true,
                 clients(&["anthropic"]),
-                vec![entry(3, &placeholder())]
+                vec![entry(3, &placeholder())],
+                &[]
             ),
             Err(RunnerError::InvalidRequest)
         ));
-        let (off, placeholders) = boot_interception(false, selected, Vec::new()).unwrap();
+        let (off, placeholders) = boot_interception(false, selected, Vec::new(), &[]).unwrap();
         assert!(off.is_empty() && placeholders.is_empty());
     }
 

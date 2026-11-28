@@ -95,10 +95,7 @@ use ssh_enrollment::{
     status_for_ssh_material_error, validate_ssh_expiry,
 };
 use status::{status_for_access_error, status_for_error};
-use workload_secrets::{
-    resolved_secret_to_proto, secret_project_to_proto, workload_secret_selection_from_proto,
-    workload_secret_to_proto,
-};
+use workload_secrets::{secret_project_to_proto, workload_secret_to_proto};
 
 struct AuthorityRpc<S: ProtectedStore> {
     authority: Arc<LocalCredentialAuthority<S>>,
@@ -662,10 +659,9 @@ impl<S: ProtectedStore + 'static> BrokerProcessManager<S> {
             platform_delegated,
             network_policy_allows_github: request.network_policy_allows_github,
             network_policy_allowed_hosts: request.network_policy_allowed_hosts,
+            serves_bound_secrets: broker_child::serves_bound_secrets(request.projection.as_ref()),
         };
-        config
-            .validate()
-            .map_err(|_| Status::invalid_argument("invalid local credential broker request"))?;
+        config.validate().map_err(broker_child::invalid_config)?;
         let spawner = self.spawner.as_ref().cloned().ok_or_else(|| {
             Status::unavailable("local credential broker launcher is unavailable")
         })?;
@@ -1385,16 +1381,14 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         &self,
         request: Request<v1::ResolveWorkloadSecretMetadataRequest>,
     ) -> Result<Response<v1::ResolveWorkloadSecretMetadataResponse>, Status> {
-        let selection =
-            workload_secret_selection_from_proto(request.into_inner().selection.ok_or_else(
-                || Status::invalid_argument("workload-secret selection is required"),
-            )?)?;
-        let authority = Arc::clone(&self.authority);
-        let secrets =
-            run_blocking(move || authority.resolve_workload_secret_metadata(&selection)).await?;
-        Ok(Response::new(v1::ResolveWorkloadSecretMetadataResponse {
-            secrets: secrets.into_iter().map(resolved_secret_to_proto).collect(),
-        }))
+        workload_secrets::resolve(Arc::clone(&self.authority), request.into_inner()).await
+    }
+
+    async fn record_boot_bound_secrets(
+        &self,
+        request: Request<v1::RecordBootBoundSecretsRequest>,
+    ) -> Result<Response<v1::BootBoundSecrets>, Status> {
+        workload_secrets::record_boot(Arc::clone(&self.authority), request.into_inner()).await
     }
 
     async fn create_access_profile(
@@ -2091,6 +2085,7 @@ mod drain_tests {
             platform_delegated: false,
             network_policy_allows_github: true,
             network_policy_allowed_hosts: Default::default(),
+            serves_bound_secrets: false,
         };
         manager.entries.lock().await.insert(
             environment_id.clone(),

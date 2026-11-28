@@ -41,6 +41,7 @@ use crate::{
 };
 
 mod audit;
+mod bound_secret;
 mod delegation;
 mod login;
 mod observed_stream;
@@ -70,6 +71,7 @@ async fn projection_permit(
         .map_err(|_| busy())?
         .map_err(|_| busy())
 }
+pub use crate::workload_secret::BoundSecretLeaseRefusal;
 pub use audit::{BrokerLeaseAuditDecision, BrokerLeaseAuditEvent};
 pub(crate) use audit::{BrokerLeaseAuditLog, MAX_BROKER_LEASE_AUDIT_LIST_LIMIT};
 pub use delegation::{
@@ -77,6 +79,7 @@ pub use delegation::{
     LocalFrontDoorDelegationOutput,
 };
 pub use projection::LocalEnvironmentProjectionBinding;
+pub(crate) use projection::{record_from_proto, record_to_proto};
 pub(crate) use ssh::LocalSshOperationRuntime;
 pub use ssh::{LocalSshSignError, LocalSshSignRequest, LocalSshSigner};
 
@@ -145,6 +148,7 @@ pub enum BrokerLeaseChannelError {
 /// path or general connector that another owner process can discover.
 pub struct LocalCredentialBrokerLeaseClient<S> {
     inner: LocalCredentialBrokerLeaseServiceClient<Channel>,
+    bound_secrets: Arc<bound_secret::Grants>,
     protected_store: S,
     protected_store_operations: Arc<Semaphore>,
     channel_binding: Uuid,
@@ -156,6 +160,7 @@ impl<S: Clone> Clone for LocalCredentialBrokerLeaseClient<S> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            bound_secrets: Arc::clone(&self.bound_secrets),
             protected_store: self.protected_store.clone(),
             protected_store_operations: Arc::clone(&self.protected_store_operations),
             channel_binding: self.channel_binding,
@@ -247,10 +252,11 @@ where
             }))
             .await
             .map_err(|_| BrokerLeaseChannelError::Unavailable)?;
-        Ok(Self {
+        let mut client = Self {
             inner: LocalCredentialBrokerLeaseServiceClient::new(channel)
                 .max_decoding_message_size(MAX_BROKER_LEASE_RPC_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_BROKER_LEASE_RPC_MESSAGE_BYTES),
+            bound_secrets: Arc::default(),
             protected_store,
             protected_store_operations: Arc::new(Semaphore::new(
                 MAX_BROKER_PROTECTED_STORE_OPERATIONS,
@@ -258,7 +264,9 @@ where
             channel_binding: Uuid::new_v4(),
             environment_id,
             environment_generation,
-        })
+        };
+        client.load_bound_secret_grants().await?;
+        Ok(client)
     }
 
     /// Admit and resolve one exact operation. The protected-store call runs on
@@ -1370,6 +1378,26 @@ where
         request: Request<v1::BrokerCredentialRefreshRateLimitRequest>,
     ) -> Result<Response<v1::BrokerCredentialRefreshRateLimitResponse>, Status> {
         self.rate_limit_refresh(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn get_bound_secret_grants(
+        &self,
+        _request: Request<v1::BoundSecretGrantsRequest>,
+    ) -> Result<Response<v1::BoundSecretGrants>, Status> {
+        if self.require_local_mode().is_err() {
+            return Ok(Response::new(v1::BoundSecretGrants::default()));
+        }
+        self.bound_secret_grants().await.map(Response::new)
+    }
+
+    async fn lease_bound_secret(
+        &self,
+        request: Request<v1::BoundSecretLeaseRequest>,
+    ) -> Result<Response<v1::BoundSecretLeaseResponse>, Status> {
+        self.require_local_mode()?;
+        self.lease_recorded_secret(request.into_inner())
             .await
             .map(Response::new)
     }

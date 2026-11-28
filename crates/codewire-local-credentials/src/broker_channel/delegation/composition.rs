@@ -277,6 +277,7 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
                     .authority
                     .seal_workload_projection_fragment(
                         &owner.local.selection,
+                        owner.local.bound_secrets.as_deref(),
                         &context,
                         pending.recipient,
                         *pending.request_id.as_bytes(),
@@ -287,7 +288,12 @@ impl<S: ProtectedStore + 'static> ProjectionComposer<S> {
             } else {
                 owner
                     .authority
-                    .seal_workload_projection(&owner.local.selection, &context, pending.recipient)
+                    .seal_workload_projection(
+                        &owner.local.selection,
+                        owner.local.bound_secrets.as_deref(),
+                        &context,
+                        pending.recipient,
+                    )
                     .map_err(|_| denied())?
             };
             owner.live(&context)?;

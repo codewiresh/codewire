@@ -43,8 +43,10 @@ pub(super) enum BoundSecretRefused {
     NoApplicationSecretKey { key: String },
     #[error("bound secret {key} can't be projected: its set's stored ID has no slot")]
     NoSlot { key: String },
-    /// Plain now and bound once, for a Pod whose first bind recorded nothing.
-    #[error("secret {key} can't be projected raw: this Pod's first bind recorded no bound secrets")]
+    /// Plain now and bound once, for a Pod whose first bind recorded
+    /// nothing, or for a local VM's delegated projection, whose boot record
+    /// never reaches the platform.
+    #[error("secret {key} can't be projected raw: this environment recorded no bound secrets")]
     FirstBindUnrecorded { key: String },
 }
 
@@ -196,8 +198,10 @@ pub(crate) enum FirstBind {
         environment_id: String,
         recorded: Option<Vec<FirstBindSecret>>,
     },
-    /// No hosted Pod: a local VM's delegated projection, whose boot record
-    /// is the local part of #4003 and isn't read yet.
+    /// No hosted Pod: a local VM's delegated projection. Its boot records
+    /// only its local sources' bound secrets, and that record never reaches
+    /// the platform, so this projects as a Pod that recorded nothing: a
+    /// secret ever bound is refused rather than projected raw.
     #[cfg(any(feature = "enrollment", test))]
     NotHosted,
 }
@@ -237,6 +241,12 @@ impl FirstBind {
                 .find(|secret| secret.is(path, key))
                 .map_or(Plain::Value, Plain::Recorded)),
             Self::Hosted { recorded: None, .. } if binding_id.is_some() => {
+                Err(BoundSecretRefused::FirstBindUnrecorded {
+                    key: key.to_owned(),
+                })
+            }
+            #[cfg(any(feature = "enrollment", test))]
+            Self::NotHosted if binding_id.is_some() => {
                 Err(BoundSecretRefused::FirstBindUnrecorded {
                     key: key.to_owned(),
                 })
@@ -367,8 +377,8 @@ mod tests {
 
     /// A plain winner the Pod recorded bound projects the placeholder its
     /// record derives, the same one the bound row gave; one it recorded
-    /// plain projects its value. With no record, only a secret never bound
-    /// projects its value.
+    /// plain projects its value. With no record, and in a local VM's
+    /// delegated projection, only a secret never bound projects its value.
     #[test]
     fn a_plain_winner_follows_what_the_first_bind_recorded() {
         let path = format!("/projects/{ORG}/{PROJECT}");
@@ -402,6 +412,12 @@ mod tests {
         );
         assert_eq!(
             FirstBind::NotHosted.plain(&path, "FANCY_TOKEN", Some(Uuid::from_u128(7))),
+            Err(BoundSecretRefused::FirstBindUnrecorded {
+                key: "FANCY_TOKEN".into()
+            })
+        );
+        assert_eq!(
+            FirstBind::NotHosted.plain(&path, "FANCY_TOKEN", None),
             Ok(Plain::Value)
         );
         let mut corrupt = record(&path);

@@ -640,6 +640,9 @@ impl LocalBrokerProcessSpawner for CwLocalCredentialProcessSpawner {
         for host in &config.network_policy_allowed_hosts {
             command.arg("--network-policy-allows-host").arg(host);
         }
+        if config.serves_bound_secrets {
+            command.arg("--serves-bound-secrets");
+        }
         command.args(lookup.arguments());
         if secrets_fd.is_some() {
             command

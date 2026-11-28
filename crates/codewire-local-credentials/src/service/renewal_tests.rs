@@ -309,6 +309,7 @@ impl Lifecycle {
             platform_delegated: false,
             network_policy_allows_github: true,
             network_policy_allowed_hosts: Default::default(),
+            serves_bound_secrets: false,
         };
         let (shutdown, shutdown_rx) = watch::channel(false);
         let (state, mut state_rx) = watch::channel(BrokerProcessState::Starting);

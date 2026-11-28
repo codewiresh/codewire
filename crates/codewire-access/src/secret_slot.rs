@@ -124,6 +124,29 @@ impl SecretSlot {
         Self::new(kind, collection, key)
     }
 
+    /// The slot of `key` in a local VM's set, as its boot records it
+    /// ([`local_user_path`], [`local_project_path`]): the owner's personal
+    /// secrets under the local authority's ID, or a local project's by its
+    /// UUID. Refused for any other path.
+    pub fn for_local_path(path: &str, key: &str) -> Result<Self, InvalidSecretSlot> {
+        let (kind, collection) = if let Some(authority) = path.strip_prefix(LOCAL_USER_PATH) {
+            (SecretKind::Local, authority)
+        } else if let Some(project) = path.strip_prefix(LOCAL_PROJECT_PATH) {
+            (SecretKind::Project, project)
+        } else {
+            return Err(InvalidSecretSlot);
+        };
+        Self::new(kind, collection, key)
+    }
+
+    /// The slot of `key` at a recorded path: a platform tenant-secret path
+    /// ([`Self::for_platform_path`]) or a local VM's set
+    /// ([`Self::for_local_path`]). The two spellings never overlap: one
+    /// starts with `/`, the other with `local:`.
+    pub fn for_record_path(path: &str, key: &str) -> Result<Self, InvalidSecretSlot> {
+        Self::for_platform_path(path, key).or_else(|_| Self::for_local_path(path, key))
+    }
+
     pub fn kind(&self) -> SecretKind {
         self.kind
     }
@@ -147,6 +170,24 @@ impl fmt::Display for SecretSlot {
             self.key
         )
     }
+}
+
+/// A local VM's personal set as its boot records it: this, then the local
+/// authority's ID.
+const LOCAL_USER_PATH: &str = "local:user:";
+/// A local project's set as a boot records it: this, then its UUID.
+const LOCAL_PROJECT_PATH: &str = "local:project:";
+
+/// The recorded path of a local VM owner's personal secrets, under the local
+/// authority's ID (#4003). A reset authority has another ID, so a record
+/// made before it names no set the authority holds, which fails closed.
+pub fn local_user_path(authority_id: &str) -> String {
+    format!("{LOCAL_USER_PATH}{authority_id}")
+}
+
+/// The recorded path of a local project's secrets, by its UUID.
+pub fn local_project_path(project: &str) -> String {
+    format!("{LOCAL_PROJECT_PATH}{project}")
 }
 
 /// The workload-secret key grammar both stores keep
@@ -209,6 +250,46 @@ mod tests {
                 format!("secret/{}/{}/FANCY_TOKEN", kind.as_str(), collection(kind))
             );
             assert_eq!(SecretSlot::parse(&text).unwrap(), slot);
+        }
+    }
+
+    /// A local set's recorded path reads back as its slot, and no platform
+    /// path reads as a local one or the other way round.
+    #[test]
+    fn a_local_path_reads_back_as_its_sets_slot() {
+        let user = SecretSlot::for_local_path(&local_user_path(HEX), "KEY").unwrap();
+        assert_eq!(
+            user,
+            SecretSlot::new(SecretKind::Local, HEX, "KEY").unwrap()
+        );
+        let project = SecretSlot::for_local_path(&local_project_path(PROJECT), "KEY").unwrap();
+        assert_eq!(
+            project,
+            SecretSlot::new(SecretKind::Project, PROJECT, "KEY").unwrap()
+        );
+        for path in [local_user_path(HEX), local_project_path(PROJECT)] {
+            assert!(
+                SecretSlot::for_platform_path(&path, "KEY").is_err(),
+                "{path}"
+            );
+            assert!(SecretSlot::for_record_path(&path, "KEY").is_ok(), "{path}");
+        }
+        let platform = format!("/projects/{HEX}/{PROJECT}");
+        assert!(SecretSlot::for_local_path(&platform, "KEY").is_err());
+        assert_eq!(
+            SecretSlot::for_record_path(&platform, "KEY").unwrap(),
+            project
+        );
+        for refused in [
+            local_user_path(PROJECT),
+            local_project_path(HEX),
+            "local:organization:0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".to_owned(),
+            format!("local:user:{HEX}/x"),
+        ] {
+            assert!(
+                SecretSlot::for_record_path(&refused, "KEY").is_err(),
+                "{refused}"
+            );
         }
     }
 

@@ -629,6 +629,7 @@ fn boot_request(
         udp_peers: settings.udp_peers.clone(),
         intercepts: InterceptSet::default(),
         credential_placeholders: Default::default(),
+        bound_secrets: None,
         checkpoint,
     })
 }

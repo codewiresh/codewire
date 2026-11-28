@@ -90,6 +90,7 @@ fn project_user_secrets(
             user: true,
             ..Default::default()
         },
+        Some(&[]),
         &context,
         recipient.public_key(),
     )?;

@@ -244,6 +244,7 @@ fn fixture(mode: Mode, mixed: bool) -> Fixture {
             ..Default::default()
         },
         selection_sha256: context.selection_sha256,
+        bound_secrets: Some(Vec::new()),
     });
     let observation = Arc::new(Observation::default());
     let connector = Arc::new(SyntheticConnector {

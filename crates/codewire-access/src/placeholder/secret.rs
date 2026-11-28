@@ -95,6 +95,26 @@ impl SecretPlaceholder {
         ))
     }
 
+    /// A placeholder as [`Self::as_str`] wrote it, read back where it is
+    /// handed on rather than derived (a local broker's grants): a prefix in
+    /// its grammar, or none, then the credential placeholder's exact form.
+    pub fn parse(value: &str) -> Result<Self, crate::AccessError> {
+        let invalid = crate::AccessError::InvalidField {
+            field: "secret placeholder",
+        };
+        let split = value
+            .len()
+            .checked_sub(crate::CREDENTIAL_PLACEHOLDER_LENGTH)
+            .filter(|split| value.is_char_boundary(*split))
+            .ok_or(invalid.clone())?;
+        let (prefix, body) = value.split_at(split);
+        if !prefix.is_empty() {
+            PlaceholderPrefix::parse(prefix).map_err(|_| invalid.clone())?;
+        }
+        super::CredentialPlaceholder::parse(body).map_err(|_| invalid)?;
+        Ok(Self(value.to_owned()))
+    }
+
     /// The wire form, prefix included.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -313,5 +333,28 @@ mod tests {
         let printed = format!("{placeholder:?} {:?}", key());
         assert!(!printed.contains(&placeholder.as_str()[5..]));
         assert!(!printed.contains("cwp1_"));
+    }
+
+    /// A derived placeholder reads back, with or without its prefix, and
+    /// nothing of another shape does.
+    #[test]
+    fn a_placeholder_reads_back_as_written() {
+        let key = ApplicationSecretKey::derive(&PlaceholderKey::from_slice(&[9; 32]).unwrap());
+        let environment = EnvironmentId::parse("a94ef1b4-bbbc-45dd-aa7f-143b8d1f8417").unwrap();
+        let slot = SecretSlot::new(SecretKind::Project, PROJECT, "FANCY_TOKEN").unwrap();
+        for prefix in [None, Some(PlaceholderPrefix::parse("ft_").unwrap())] {
+            let derived =
+                SecretPlaceholder::derive(&key, &environment, &slot, &BINDING, 1, prefix.as_ref());
+            assert!(SecretPlaceholder::parse(derived.as_str()).unwrap() == derived);
+        }
+        for refused in [
+            "",
+            "cwp1_short",
+            "has space cwp1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "cwp1_cwp1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "ft_cwp2_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(SecretPlaceholder::parse(refused).is_err(), "{refused}");
+        }
     }
 }

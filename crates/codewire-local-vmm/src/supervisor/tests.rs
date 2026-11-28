@@ -1091,6 +1091,7 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
             (TestRunnerProtocolReply::Failure(code), _) => Err(Status::new(*code, "refused")),
             (_, Some(secrets)) => Ok(Response::new(v1::GetBootSecretsResponse {
                 secrets: secrets.clone(),
+                bound_secrets: None,
             })),
             (_, None) => Err(Status::failed_precondition("no boot secrets")),
         }
@@ -1354,10 +1355,10 @@ async fn each_ensure_gets_the_boot_secrets_again_from_the_runner() {
     };
     let expected = BrokerBootSecrets::new([(BootSecretPurpose::FrontDoorPairing, secret)]).unwrap();
     for answer in ask(current, Some(vec![pairing])).await {
-        assert_eq!(answer.unwrap(), expected);
+        assert_eq!(answer.unwrap(), (expected.clone(), None));
     }
     for answer in ask(current, None).await {
-        assert!(answer.unwrap().is_empty());
+        assert!(answer.unwrap().0.is_empty());
     }
     for code in [
         tonic::Code::Unimplemented,
@@ -6042,6 +6043,7 @@ async fn an_intercepting_boot_with_a_withheld_claude_sign_in_seeds_its_placehold
             intercept: true,
             interception: Default::default(),
             platform: None,
+            bound_secrets: None,
         };
         let seed = core
             .seed_placeholders(&egress, &environment, 2, clients)

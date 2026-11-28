@@ -40,14 +40,21 @@ pub struct LocalBrokerProcessConfig {
     /// Where the child may forward a front-door request carrying no
     /// placeholder untouched (#5555).
     pub network_policy_allowed_hosts: BTreeSet<String>,
+    /// The boot recorded at least one bound secret (#4003), so the child may
+    /// swap one into a request to its host: it needs outbound HTTPS even with
+    /// no provider selected.
+    pub serves_bound_secrets: bool,
 }
 
 impl LocalBrokerProcessConfig {
     pub(crate) fn validate(&self) -> Result<(), LocalBrokerSpawnError> {
+        let count = self.network_policy_allowed_hosts.len();
+        if count > MAX_ALLOWED_HOSTS {
+            return Err(LocalBrokerSpawnError::TooManyAllowedHosts { count });
+        }
         if self.environment_generation == 0
             || (self.platform_delegated && !self.http_providers.is_empty())
             || !valid_environment_name(&self.environment_name)
-            || self.network_policy_allowed_hosts.len() > MAX_ALLOWED_HOSTS
             || !self
                 .network_policy_allowed_hosts
                 .iter()
@@ -112,8 +119,10 @@ impl ProviderLookup {
     }
 }
 
-/// More than any route table binds; the answer names only bound hosts.
-const MAX_ALLOWED_HOSTS: usize = 16;
+/// Every name a boot binds: at most 32 hosts, its credentials' and its bound
+/// secrets' (#4003), and a `*.` entry for each routed suffix. The answer
+/// names only bound hosts.
+pub const MAX_ALLOWED_HOSTS: usize = 40;
 
 /// A lowercase DNS name of letters, digits, hyphens and dots, or `*.` and a
 /// routed suffix: each becomes a broker argument, so it never starts with
@@ -158,6 +167,12 @@ pub struct EnvironmentBrokerRuntime {
 pub enum LocalBrokerSpawnError {
     #[error("local credential broker launch configuration is invalid")]
     InvalidConfiguration,
+    /// More hosts to forward to than any boot binds: refused rather than
+    /// launched with a list no route table could have made.
+    #[error(
+        "a local credential broker forwards to at most {MAX_ALLOWED_HOSTS} hosts, and this one was given {count}"
+    )]
+    TooManyAllowedHosts { count: usize },
     #[error("spawn local credential broker failed")]
     Spawn,
 }
@@ -199,6 +214,7 @@ mod tests {
             platform_delegated: false,
             network_policy_allows_github: true,
             network_policy_allowed_hosts: Default::default(),
+            serves_bound_secrets: false,
         }
     }
 
@@ -234,13 +250,26 @@ mod tests {
                 "{denied}"
             );
         }
-        let many: Vec<String> = (0..=MAX_ALLOWED_HOSTS)
-            .map(|index| format!("h{index}.com"))
-            .collect();
-        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    }
+
+    /// A broker given more forward hosts than any boot binds is refused by
+    /// name with the count, and the cap itself is launched.
+    #[test]
+    fn a_broker_given_more_than_forty_forward_hosts_is_refused_by_name() {
+        let hosts: Vec<String> = (0..=40).map(|index| format!("h{index}.com")).collect();
+        let with = |count: usize| LocalBrokerProcessConfig {
+            network_policy_allowed_hosts: hosts[..count].iter().cloned().collect(),
+            ..config("project")
+        };
+        assert_eq!(with(40).validate(), Ok(()));
+        let refused = with(41).validate().unwrap_err();
         assert_eq!(
-            with(&many).validate(),
-            Err(LocalBrokerSpawnError::InvalidConfiguration)
+            refused,
+            LocalBrokerSpawnError::TooManyAllowedHosts { count: 41 }
+        );
+        assert_eq!(
+            refused.to_string(),
+            "a local credential broker forwards to at most 40 hosts, and this one was given 41"
         );
     }
 

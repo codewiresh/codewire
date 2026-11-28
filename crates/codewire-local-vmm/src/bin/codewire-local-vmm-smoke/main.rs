@@ -1081,6 +1081,7 @@ mod linux {
             udp_peers: Vec::new(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             credential_placeholders: Default::default(),
+            bound_secrets: None,
             checkpoint: None,
             vm_id: arguments.vm_id,
             generation,
@@ -2436,9 +2437,8 @@ mod linux {
         format!("/workspace/.cw-mesh-{generation}")
     }
 
-    /// The host's fixture connects as soon as the port listens, and `nc -l`
-    /// stops listening once it accepts, so a connection already accepted or
-    /// served also counts as ready (#5748).
+    /// The host's fixture connects as soon as the port listens, and `nc -l` stops
+    /// listening once it accepts, so one accepted or served counts as ready (#5748).
     fn mesh_guest_script(generation: u64) -> String {
         let received_path = mesh_received_path(generation);
         let handler_path = format!("/workspace/.cw-mesh-handler-{generation}");

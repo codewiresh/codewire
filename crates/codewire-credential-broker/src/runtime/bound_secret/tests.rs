@@ -743,6 +743,122 @@ async fn a_request_without_a_placeholder_is_refused_hosted() {
     }
 }
 
+/// Parity's one difference (#4003): in a local VM, a request to a bound host
+/// that carries none of the environment's values follows the network
+/// policy, as for every intercepted host. A host the policy allows by rule
+/// is forwarded untouched, with nothing leased; one it doesn't allow, even
+/// beside one it does, is refused by the policy and nothing is sent; never
+/// `selected_credential_only`. Seatbelt can't filter by host on macOS, so
+/// this check is the only gate there.
+#[tokio::test]
+async fn a_request_without_a_placeholder_follows_the_policy_locally() {
+    for (allowed, forwarded) in [
+        (vec![HOST], true),
+        (vec!["api.other.com"], false),
+        (vec![], false),
+    ] {
+        let run = run_local(&allowed).await;
+        let sent = run.sent();
+        assert_eq!(run.leases.rows.load(Ordering::Relaxed), 0, "{allowed:?}");
+        assert_eq!(run.leases.values.load(Ordering::Relaxed), 0, "{allowed:?}");
+        if forwarded {
+            assert!(run.result.is_ok(), "{allowed:?}");
+            assert_eq!(sent.len(), 1);
+            assert_eq!(
+                sent_header(&sent[0], "authorization"),
+                ["Bearer users-own-key"]
+            );
+        } else {
+            assert!(
+                matches!(run.result, Err(BrokerRequestError::NameNotAllowed)),
+                "{allowed:?}"
+            );
+            assert!(sent.is_empty(), "{allowed:?}");
+        }
+    }
+}
+
+/// The request a policy-allowed bound host receives without a placeholder
+/// carries none of the secret's value, in any form, in any header, the
+/// query or the body: nothing was leased, so nothing could be swapped in.
+#[tokio::test]
+async fn an_uncarried_request_reaches_upstream_without_any_form_of_the_value() {
+    use base64::Engine as _;
+    let run = run_local(&[HOST]).await;
+    let sent = run.sent();
+    let [sent] = sent.as_slice() else {
+        panic!("one request is sent");
+    };
+    let text = String::from_utf8_lossy(VALUE).into_owned();
+    let forms = [
+        VALUE.to_vec(),
+        serde_json::to_string(&text)
+            .unwrap()
+            .trim_matches('"')
+            .as_bytes()
+            .to_vec(),
+        url::form_urlencoded::byte_serialize(VALUE)
+            .collect::<String>()
+            .into_bytes(),
+        base64::engine::general_purpose::STANDARD
+            .encode(VALUE)
+            .into_bytes(),
+    ];
+    let mut carried: Vec<Vec<u8>> = sent
+        .headers
+        .iter()
+        .map(|(name, value)| [name.as_str().as_bytes(), value.as_bytes()].concat())
+        .collect();
+    carried.push(sent.target.clone().into_bytes());
+    carried.push(sent.body.clone());
+    for form in &forms {
+        for part in &carried {
+            assert!(
+                !part
+                    .windows(form.len())
+                    .any(|window| window == form.as_slice()),
+                "a form of the value was sent"
+            );
+        }
+    }
+    assert!(sent.target.ends_with("?page=2"), "{}", sent.target);
+    assert_eq!(sent.body, b"{\"note\":\"no secret here\"}");
+}
+
+/// A local broker allowing untouched forwards to `allowed`, sent one
+/// request to [`HOST`] that carries a key of the user's own and no
+/// placeholder, with a query and a body.
+async fn run_local(allowed: &[&str]) -> Run {
+    let leases = Arc::new(Leases::new(
+        vec![fancy()],
+        header_presentation(&["Authorization"], "Bearer"),
+    ));
+    let upstream = Arc::new(Upstream::default());
+    let broker = OpenAiBroker::new(
+        ArcLeases(Arc::clone(&leases)),
+        ArcUpstream(Arc::clone(&upstream)),
+    )
+    .unwrap()
+    .with_network_policy_allowing_hosts(allowed);
+    let headers = vec![("authorization", "Bearer users-own-key".to_owned())];
+    let result = tokio::time::timeout(
+        WAIT,
+        broker.execute_front_door(request(
+            HOST,
+            &headers,
+            "page=2",
+            b"{\"note\":\"no secret here\"}",
+        )),
+    )
+    .await
+    .expect("bounded");
+    Run {
+        leases,
+        upstream,
+        result,
+    }
+}
+
 /// An epoch whose environment's key couldn't be read refuses rather than
 /// forwarding what it can't tell apart.
 #[tokio::test]

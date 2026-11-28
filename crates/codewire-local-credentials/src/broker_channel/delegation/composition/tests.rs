@@ -80,6 +80,7 @@ fn fixture(mixed: bool) -> Fixture {
             ..Default::default()
         },
         selection_sha256: context.selection_sha256,
+        bound_secrets: Some(Vec::new()),
     };
     let platform = PlatformCredentialBinding {
         config_directory: temp.path().join("platform"),

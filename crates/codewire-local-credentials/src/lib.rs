@@ -68,12 +68,12 @@ pub use boot_secrets::{
     MAX_BOOT_SECRET_RECORDS_BYTES,
 };
 pub use broker_channel::{
-    BrokerCredentialRefreshAdmission, BrokerCredentialRefreshReservation, BrokerLeaseAuditDecision,
-    BrokerLeaseAuditEvent, BrokerLeaseChannelError, LocalCredentialBrokerLeaseClient,
-    LocalCredentialDelegationClient, LocalCredentialDelegationOutput,
-    LocalEnvironmentProjectionBinding, LocalFrontDoorDelegationOutput, LocalSshSignError,
-    LocalSshSignRequest, LocalSshSigner, StartedBrokerCredentialRefresh, UnpublishedRefresh,
-    serve_broker_lease_channel,
+    BoundSecretLeaseRefusal, BrokerCredentialRefreshAdmission, BrokerCredentialRefreshReservation,
+    BrokerLeaseAuditDecision, BrokerLeaseAuditEvent, BrokerLeaseChannelError,
+    LocalCredentialBrokerLeaseClient, LocalCredentialDelegationClient,
+    LocalCredentialDelegationOutput, LocalEnvironmentProjectionBinding,
+    LocalFrontDoorDelegationOutput, LocalSshSignError, LocalSshSignRequest, LocalSshSigner,
+    StartedBrokerCredentialRefresh, UnpublishedRefresh, serve_broker_lease_channel,
 };
 pub use broker_log::{
     AGENT_LOGIN_REFUSAL_AGENTS, AGENT_LOGIN_REFUSAL_REASONS, AGENT_LOGIN_REFUSED_MARKER,

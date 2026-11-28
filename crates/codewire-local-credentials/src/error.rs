@@ -140,6 +140,10 @@ pub enum LocalCredentialError {
     /// is refused by name and never projected raw.
     #[error("bound secret {0} can't be projected without its placeholder")]
     BoundSecretUnprojectable(String),
+    /// A plain secret that was bound once, for a boot that recorded nothing
+    /// of its bound secrets (#4003): refused by name, never projected raw.
+    #[error("secret {0} can't be projected raw: this boot recorded no bound secrets")]
+    BoundSecretUnrecorded(String),
     #[error(transparent)]
     SecretBinding(#[from] BindingError),
     #[error(transparent)]

@@ -19,6 +19,27 @@ use crate::broker_channel::{
 use crate::broker_log::{BrokerLog, StderrTail, exit_status};
 use crate::broker_process::ProviderLookup;
 
+/// Whether the boot behind `projection` recorded a bound secret (#4003), so
+/// its broker child may need outbound HTTPS without any provider. A platform
+/// relay ignores it: it dials nothing.
+pub(super) fn serves_bound_secrets(
+    projection: Option<&crate::LocalEnvironmentProjectionBinding>,
+) -> bool {
+    projection
+        .and_then(|projection| projection.bound_secrets.as_ref())
+        .is_some_and(|record| !record.is_empty())
+}
+
+/// A launch configuration the authority refuses, by what is wrong with it.
+pub(super) fn invalid_config(error: crate::LocalBrokerSpawnError) -> tonic::Status {
+    match error {
+        crate::LocalBrokerSpawnError::TooManyAllowedHosts { .. } => {
+            tonic::Status::invalid_argument(error.to_string())
+        }
+        _ => tonic::Status::invalid_argument("invalid local credential broker request"),
+    }
+}
+
 pub(super) enum BrokerAttempt {
     Stopped,
     Failed,
@@ -344,4 +365,60 @@ pub(super) async fn record_broker_end<S: ProtectedStore>(
             ("error", &error),
         ],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use codewire_access::FirstBindSecret;
+
+    use super::*;
+
+    fn projection(
+        bound_secrets: Option<Vec<FirstBindSecret>>,
+    ) -> crate::LocalEnvironmentProjectionBinding {
+        crate::LocalEnvironmentProjectionBinding {
+            selection: crate::LocalLaunchSecretSelection {
+                user: true,
+                ..Default::default()
+            },
+            selection_sha256: [2; 32],
+            bound_secrets,
+        }
+    }
+
+    /// A broker child may dial without a provider only for a boot that
+    /// recorded at least one bound secret (#4003): one with no record, an
+    /// empty one, or no projection never gets that network.
+    #[test]
+    fn only_a_boot_with_a_recorded_bound_secret_serves_one() {
+        let secret = FirstBindSecret {
+            path: "local:user:0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+            key: "FANCY_TOKEN".into(),
+            binding_id: "00000000-0000-0000-0000-000000000007".into(),
+            binding_generation: 1,
+            prefix: None,
+            hosts: vec!["api.fancy.com".into()],
+        };
+        assert!(serves_bound_secrets(Some(&projection(Some(vec![secret])))));
+        assert!(!serves_bound_secrets(Some(&projection(Some(Vec::new())))));
+        assert!(!serves_bound_secrets(Some(&projection(None))));
+        assert!(!serves_bound_secrets(None));
+    }
+
+    /// Too many forward hosts is refused by name; any other invalid launch
+    /// says only that it is invalid.
+    #[test]
+    fn a_launch_with_too_many_forward_hosts_is_refused_by_name() {
+        let refused =
+            invalid_config(crate::LocalBrokerSpawnError::TooManyAllowedHosts { count: 41 });
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert!(
+            refused.message().contains("at most 40 hosts"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            invalid_config(crate::LocalBrokerSpawnError::InvalidConfiguration).message(),
+            "invalid local credential broker request"
+        );
+    }
 }

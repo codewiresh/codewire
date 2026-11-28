@@ -206,6 +206,10 @@ pub(crate) struct LocalCredentialBrokerArgs {
     /// placeholders is forwarded untouched only to one of these (#5555).
     #[arg(long = "network-policy-allows-host")]
     pub(crate) network_policy_allowed_hosts: Vec<String>,
+    /// The boot recorded a bound secret (#4003): on macOS the broker may dial
+    /// HTTPS without a provider, to the address the egress broker admitted.
+    #[arg(long)]
+    pub(crate) serves_bound_secrets: bool,
     /// No broker serves this generation: start whatever resolves, leaving a
     /// provider host with no address unserved (#5286).
     #[arg(long, conflicts_with = "may_not_resolve")]
@@ -236,8 +240,11 @@ async fn resolve_providers(
     Option<std::sync::Arc<codewire_credential_broker::GitHubAppAuthorizationOwner>>,
     BTreeSet<&'static str>,
 )> {
+    // A broker with no provider still swaps a boot's bound secrets (#4003).
     if http_providers.is_empty() {
-        return Ok((None, None, BTreeSet::new()));
+        let bound = ProviderHttpsTransport::bound_secrets_only()
+            .context("build the bound secrets' transport")?;
+        return Ok((Some(bound), None, BTreeSet::new()));
     }
     let app_refresh = BTreeSet::from([HttpProvider::GitHubAppAuthorization]);
     let mut selections = vec![http_providers];
@@ -517,7 +524,7 @@ async fn run_broker(args: LocalCredentialBrokerArgs, stage: &BrokerStage) -> any
         darwin::confine(
             &store,
             protected_store.selected(),
-            !http_providers.is_empty(),
+            !http_providers.is_empty() || args.serves_bound_secrets,
         )
         .context("confine credential broker")?;
         protected_store

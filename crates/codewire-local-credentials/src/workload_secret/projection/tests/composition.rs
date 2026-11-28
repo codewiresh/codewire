@@ -81,7 +81,14 @@ fn mixed_bundle(
     inventories: &[ProjectionSourceInventory],
 ) -> Vec<u8> {
     let local = authority
-        .seal_workload_projection_fragment(selected, context, recipient, REQUEST_ID, inventories)
+        .seal_workload_projection_fragment(
+            selected,
+            Some(&[]),
+            context,
+            recipient,
+            REQUEST_ID,
+            inventories,
+        )
         .unwrap();
     let platform = platform_fragment(selected, context, recipient, inventories);
     compose_environment_projection(&local, &platform).unwrap()
@@ -327,6 +334,7 @@ fn missing_extra_wrong_identity_role_or_reordered_local_inventory_denies_before_
             authority
                 .seal_workload_projection_fragment(
                     &selected,
+                    Some(&[]),
                     &context(),
                     ProjectionRecipient::new().public_key(),
                     REQUEST_ID,
@@ -377,6 +385,7 @@ fn added_deleted_or_reassigned_names_invalidate_inventory_before_get() {
             authority
                 .seal_workload_projection_fragment(
                     &selected,
+                    Some(&[]),
                     &context(),
                     ProjectionRecipient::new().public_key(),
                     REQUEST_ID,
@@ -407,6 +416,7 @@ fn missing_or_denied_winning_material_never_falls_back_to_lower_rank() {
             authority
                 .seal_workload_projection_fragment(
                     &selected,
+                    Some(&[]),
                     &context(),
                     ProjectionRecipient::new().public_key(),
                     REQUEST_ID,
@@ -459,6 +469,7 @@ fn empty_selected_local_scope_is_complete_and_cannot_be_omitted() {
         authority
             .seal_workload_projection_fragment(
                 &selected,
+                Some(&[]),
                 &context(),
                 ProjectionRecipient::new().public_key(),
                 REQUEST_ID,
@@ -542,6 +553,7 @@ fn malformed_context_request_recipient_and_reserved_names_deny_before_get() {
             authority
                 .seal_workload_projection_fragment(
                     &selected,
+                    Some(&[]),
                     &expected,
                     recipient,
                     request_id,
@@ -580,6 +592,7 @@ fn invalid_foreign_inventory_and_global_union_fail_before_local_material_read() 
             authority
                 .seal_workload_projection_fragment(
                     &selected,
+                    Some(&[]),
                     &context(),
                     ProjectionRecipient::new().public_key(),
                     REQUEST_ID,
@@ -609,6 +622,7 @@ fn blocking_winner_read_cannot_extend_the_mixed_original_deadline() {
         authority
             .seal_workload_projection_fragment(
                 &selected,
+                Some(&[]),
                 &expected,
                 ProjectionRecipient::new().public_key(),
                 REQUEST_ID,

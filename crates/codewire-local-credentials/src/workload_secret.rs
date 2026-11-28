@@ -12,6 +12,8 @@ mod projection;
 mod schema;
 pub use binding::BindingWrite;
 use binding::WrittenBinding;
+pub(crate) use projection::BoundSecretLease;
+pub use projection::BoundSecretLeaseRefusal;
 pub use projection::LocalLaunchSecretSelection;
 pub(crate) use schema::{
     WORKLOAD_SECRETS_SCHEMA, has_secret_binding_columns, upgrade_secret_bindings_schema,

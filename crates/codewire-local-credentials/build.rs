@@ -48,6 +48,7 @@ const SKIP_DEBUG: &[&str] = &[
     ".codewire.local.credentials.v1.BrokerCredentialRefreshCommitRequest",
     ".codewire.local.credentials.v1.RepositoryCredentialLeaseResponse",
     ".codewire.local.credentials.v1.RevocationCredentialLeaseResponse",
+    ".codewire.local.credentials.v1.BoundSecretLeaseResponse",
 ];
 
 /// Reports a missing `protoc` in one line; any other failure keeps its detail.

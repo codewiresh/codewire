@@ -1,7 +1,10 @@
 //! The local credential authority as the broker's lease provider: a local
 //! VM's operations, logins and refreshes, decided by the host's authority.
 
+use codewire_access::{EpochBoundSecret, FirstBindSecret};
+
 use super::*;
+use crate::bound_secret::{BoundSecretLeaseError, BoundSecretRow};
 
 #[async_trait]
 impl<S> BrokerLeaseProvider for codewire_local_credentials::LocalCredentialBrokerLeaseClient<S>
@@ -64,6 +67,39 @@ where
         )
         .await
         .map_err(map_local_unrefused_error)
+    }
+
+    /// The boot's recorded bound secrets its selection holds, as the
+    /// authority granted them when this broker started (#4003).
+    fn bound_secrets(&self) -> Result<&[EpochBoundSecret], BoundSecretLeaseError> {
+        self.bound_secret_grants()
+            .ok_or(BoundSecretLeaseError::Unavailable)
+    }
+
+    async fn lease_bound_secret_row(
+        &self,
+        secret: &FirstBindSecret,
+        host: &str,
+    ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
+        let leased = local_bound_lease(self, secret, host, false).await?;
+        Ok(BoundSecretRow {
+            binding: leased.0,
+            value_version: leased.1,
+        })
+    }
+
+    /// The value is read for this lease alone, under the same checks as its
+    /// row; nothing is kept past it.
+    async fn lease_bound_secret_value(
+        &self,
+        secret: &FirstBindSecret,
+        host: &str,
+        _row: &BoundSecretRow,
+    ) -> Result<Zeroizing<Vec<u8>>, BoundSecretLeaseError> {
+        local_bound_lease(self, secret, host, true)
+            .await?
+            .2
+            .ok_or(BoundSecretLeaseError::Denied)
     }
 
     async fn lease_operation(
@@ -274,6 +310,51 @@ where
         .await
         .map_err(map_local_refresh_error)
     }
+}
+
+/// One lease of a granted bound secret through the local authority: its
+/// binding now, its value's version, and with `value` the value. A refusal
+/// by name is the swap's refusal; any other failure denies or is
+/// unavailable, as every lease.
+async fn local_bound_lease<S>(
+    client: &codewire_local_credentials::LocalCredentialBrokerLeaseClient<S>,
+    secret: &FirstBindSecret,
+    host: &str,
+    value: bool,
+) -> Result<
+    (
+        codewire_access::HostBinding,
+        u64,
+        Option<Zeroizing<Vec<u8>>>,
+    ),
+    BoundSecretLeaseError,
+>
+where
+    S: codewire_protected_store::ProtectedStore + Clone + 'static,
+{
+    use codewire_local_credentials::BoundSecretLeaseRefusal as Refusal;
+    let leased = client
+        .lease_bound_secret(secret, host, value)
+        .await
+        .map_err(|error| match error {
+            codewire_local_credentials::BrokerLeaseChannelError::Unavailable => {
+                BoundSecretLeaseError::Unavailable
+            }
+            _ => BoundSecretLeaseError::Denied,
+        })?
+        .map_err(|refusal| match refusal {
+            Refusal::NotBoundToHost => BoundSecretLeaseError::NotBoundToHost,
+            Refusal::BindingChanged => BoundSecretLeaseError::BindingChanged,
+            Refusal::Deleted => BoundSecretLeaseError::Deleted,
+        })?;
+    let binding = leased
+        .binding
+        .parse(&codewire_access::ReservedHosts::default())
+        .map_err(|_| BoundSecretLeaseError::Denied)?;
+    if !binding.names(host) || !secret.names(host) {
+        return Err(BoundSecretLeaseError::NotBoundToHost);
+    }
+    Ok((binding, leased.value_version, leased.value))
 }
 
 /// The authority stages the bundle (#5539); an unpublished one hands its

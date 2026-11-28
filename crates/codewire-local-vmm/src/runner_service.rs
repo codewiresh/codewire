@@ -310,18 +310,18 @@ impl RunnerClient {
     }
 
     /// The boot secrets of `environment_id`'s current `generation`, for an
-    /// intercepting boot (#3999). Each is exactly one known purpose's 32
-    /// bytes, or the answer is refused.
+    /// intercepting boot (#3999), and its record of its bound secrets (#4003).
+    /// Each secret is exactly one known purpose's 32 bytes, or it is refused.
     pub async fn boot_secrets(
         &mut self,
         environment_id: Uuid,
         generation: u64,
-    ) -> Result<Vec<v1::BootSecret>, Status> {
+    ) -> Result<generation_access::BootSecretsAnswer, Status> {
         let mut client = self
             .inner
             .clone()
             .max_decoding_message_size(GENERATION_ACCESS_MAX_BYTES);
-        let secrets = tokio::time::timeout(
+        let response = tokio::time::timeout(
             GENERATION_ACCESS_TIMEOUT,
             client.get_boot_secrets(v1::GetBootSecretsRequest {
                 environment_id: environment_id.to_string(),
@@ -330,17 +330,17 @@ impl RunnerClient {
         )
         .await
         .map_err(|_| Status::deadline_exceeded("runner boot secrets timed out"))??
-        .into_inner()
-        .secrets;
-        let valid = !secrets.is_empty()
-            && secrets.iter().all(|secret| {
+        .into_inner();
+        let valid = !response.secrets.is_empty()
+            && response.secrets.iter().all(|secret| {
                 secret.value.len() == crate::runner::BOOT_SECRET_BYTES
                     && secret.purpose == v1::BootSecretPurpose::FrontDoorPairing as i32
             });
         if !valid {
             return Err(Status::internal("runner returned invalid boot secrets"));
         }
-        Ok(secrets)
+        let record = crate::runner::records_from_proto(response.bound_secrets);
+        Ok((response.secrets, record))
     }
 }
 
@@ -905,7 +905,7 @@ impl EnvironmentRunnerService for RunnerRpc {
         &self,
         request: Request<v1::StartVmRequest>,
     ) -> Result<Response<v1::RunnerInfo>, Status> {
-        let request = request.into_inner();
+        let mut request = request.into_inner();
         let environment_id = parse_environment_id(&request.environment_id)?;
         let vcpus = u8::try_from(request.vcpus)
             .map_err(|_| Status::invalid_argument("invalid vCPU count"))?;
@@ -945,12 +945,8 @@ impl EnvironmentRunnerService for RunnerRpc {
             state.cw_runtime_catalog_generation(),
         )?;
         let network_policy = start_network_policy(&request.network_policy_document)?;
-        let (intercepts, credential_placeholders) = crate::runner::boot_interception(
-            request.intercept,
-            managed_credential_clients,
-            request.credential_placeholders,
-        )
-        .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?;
+        let (intercepts, credential_placeholders, bound_secrets) =
+            start_request::boot_interception(&mut request, managed_credential_clients)?;
         let prepared = match state
             .runner
             .prepare(CreateVmRequest {
@@ -979,6 +975,7 @@ impl EnvironmentRunnerService for RunnerRpc {
                 udp_peers: Vec::new(),
                 intercepts,
                 credential_placeholders,
+                bound_secrets,
                 checkpoint,
             })
             .await
@@ -2131,6 +2128,7 @@ mod tests {
                 2,
                 access.clone(),
                 vec![(pairing, secret.clone())],
+                None,
                 current_process_liveness(),
             )
             .unwrap();

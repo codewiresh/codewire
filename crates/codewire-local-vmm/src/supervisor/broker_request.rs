@@ -21,6 +21,9 @@ pub(super) struct CredentialBrokerEnsureRequest {
     /// it: what the runner labels an intercepted host's `name_not_allowed`
     /// with, and never anything the front door says (#5058).
     pub(super) network_policy_label: v1::NetworkPolicyLabel,
+    /// That policy, which answers for the hosts of the bound secrets the
+    /// boot recorded (#4003) once its runner gives the record.
+    pub(super) network_policy: codewire_egress_policy::CompiledPolicy,
     pub(super) enabled: bool,
 }
 
@@ -85,6 +88,7 @@ impl SupervisorCore {
             network_policy_allows_github: policy.allows_managed_github(),
             network_policy_allowed_hosts: broker_ensure::allowed_bound_hosts(&policy),
             network_policy_label: crate::runner_service::policy_label(&selected),
+            network_policy: policy,
         })
     }
 }

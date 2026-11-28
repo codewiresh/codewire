@@ -1,7 +1,10 @@
 //! Source selection belongs to the authenticated channel creator, never to a
 //! guest request. The binding is immutable for the channel's entire lifetime.
 
-use codewire_workload_secrets::{MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES, ProjectionContext};
+use codewire_access::{FirstBindSecret, SecretSlot};
+use codewire_workload_secrets::{
+    MAX_SEALED_ENVIRONMENT_PROJECTION_BYTES, MAX_WORKLOAD_SECRETS, ProjectionContext,
+};
 
 use super::*;
 use crate::LocalLaunchSecretSelection;
@@ -10,12 +13,22 @@ use crate::LocalLaunchSecretSelection;
 pub struct LocalEnvironmentProjectionBinding {
     pub selection: LocalLaunchSecretSelection,
     pub selection_sha256: [u8; 32],
+    /// What the boot recorded of its bound secrets (#4003), from its runner:
+    /// `None` for a boot that recorded nothing.
+    pub bound_secrets: Option<Vec<FirstBindSecret>>,
 }
 
 impl LocalEnvironmentProjectionBinding {
     pub(crate) fn validate(&self) -> Result<(), LocalCredentialError> {
         self.selection.validate()?;
-        if self.selection_sha256 == [0; 32] {
+        if self.selection_sha256 == [0; 32]
+            || self.bound_secrets.as_ref().is_some_and(|record| {
+                record.len() > MAX_WORKLOAD_SECRETS
+                    || record.iter().any(|secret| {
+                        SecretSlot::for_local_path(&secret.path, &secret.key).is_err()
+                    })
+            })
+        {
             return Err(LocalCredentialError::InvalidWorkloadSecret);
         }
         Ok(())
@@ -28,6 +41,9 @@ impl LocalEnvironmentProjectionBinding {
             overridden_keys: self.selection.overridden_keys.into_iter().collect(),
             reserved_keys: self.selection.reserved_keys.into_iter().collect(),
             selection_sha256: self.selection_sha256.to_vec(),
+            bound_secrets: self.bound_secrets.map(|record| v1::BootBoundSecrets {
+                secrets: record.into_iter().map(record_to_proto).collect(),
+            }),
         }
     }
 
@@ -61,6 +77,9 @@ impl LocalEnvironmentProjectionBinding {
                 .selection_sha256
                 .try_into()
                 .map_err(|_| projection_denied())?,
+            bound_secrets: value
+                .bound_secrets
+                .map(|record| record.secrets.into_iter().map(record_from_proto).collect()),
         };
         result.validate().map_err(|_| projection_denied())?;
         Ok(result)
@@ -115,7 +134,12 @@ impl<S: ProtectedStore + 'static> BrokerLeaseRpc<S> {
                 return Err(projection_denied());
             }
             let sealed = authority
-                .seal_workload_projection(&binding.selection, &context, recipient)
+                .seal_workload_projection(
+                    &binding.selection,
+                    binding.bound_secrets.as_deref(),
+                    &context,
+                    recipient,
+                )
                 .map_err(|_| projection_denied())?;
             if lifetime.closed.load(Ordering::Acquire) {
                 return Err(projection_denied());
@@ -178,6 +202,31 @@ impl<S> LocalCredentialBrokerLeaseClient<S> {
             .validate_at(crate::unix_millis().map_err(|_| BrokerLeaseChannelError::Unavailable)?)
             .map_err(|_| BrokerLeaseChannelError::InvalidResponse)?;
         Ok(response)
+    }
+}
+
+/// A recorded bound secret on the wire, as `BootBoundSecret`.
+pub(crate) fn record_to_proto(secret: FirstBindSecret) -> v1::BootBoundSecret {
+    v1::BootBoundSecret {
+        path: secret.path,
+        key: secret.key,
+        binding_id: secret.binding_id,
+        binding_generation: secret.binding_generation,
+        prefix: secret.prefix,
+        hosts: secret.hosts,
+    }
+}
+
+/// A recorded bound secret read back. Whether it names a set this authority
+/// holds is checked where it is used.
+pub(crate) fn record_from_proto(secret: v1::BootBoundSecret) -> FirstBindSecret {
+    FirstBindSecret {
+        path: secret.path,
+        key: secret.key,
+        binding_id: secret.binding_id,
+        binding_generation: secret.binding_generation,
+        prefix: secret.prefix,
+        hosts: secret.hosts,
     }
 }
 

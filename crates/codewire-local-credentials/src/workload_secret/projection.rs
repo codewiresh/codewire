@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use codewire_access::FirstBindSecret;
 use codewire_protected_store::ProtectedStore;
 use codewire_workload_secrets::{
     EnvironmentProjection, MAX_ENVIRONMENT_PROJECTION_BYTES, MAX_WORKLOAD_SECRETS,
@@ -16,6 +17,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 mod bound;
+mod record;
+
+pub(crate) use record::BoundSecretLease;
+pub use record::BoundSecretLeaseRefusal;
 
 use super::{
     InternalWorkloadSecret, SecretScope, load_secret_by_id, require_project, snapshot,
@@ -83,9 +88,13 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     /// derives those winners from the complete ranked inventories. Same-name
     /// value rotation before this lock is allowed; names and current winning
     /// material cannot change during the locked read and seal.
+    ///
+    /// `record` is what the boot recorded of its bound secrets, `None` for one
+    /// that recorded nothing (#4003, [`Self::seal_workload_projection`]).
     pub fn seal_workload_projection_fragment(
         &self,
         selection: &LocalLaunchSecretSelection,
+        record: Option<&[FirstBindSecret]>,
         context: &ProjectionContext,
         recipient: [u8; 32],
         request_id: [u8; 16],
@@ -122,7 +131,8 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         if !capture.winners.keys().eq(winning_keys.iter()) {
             return Err(LocalCredentialError::InvalidWorkloadSecret);
         }
-        let projection = self.read_projection_values(&material, capture.winners, context)?;
+        let projection =
+            self.read_projection_values(&material, capture.winners, context, record)?;
         seal_environment_projection_fragment(
             projection,
             context,
@@ -146,9 +156,15 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     /// launch.
     /// Missing/denied winning material fails the whole projection; a lower
     /// precedence source is never a fallback. Provider entries are not queried.
+    ///
+    /// A plain winner is projected raw only when the boot's `record` didn't
+    /// record it bound (#4003; docs/dev/SECRETS-AND-CREDENTIALS.md,
+    /// "Projection"): one it recorded bound keeps the placeholder the record
+    /// derives, and with no record one that was ever bound is refused.
     pub fn seal_workload_projection(
         &self,
         selection: &LocalLaunchSecretSelection,
+        record: Option<&[FirstBindSecret]>,
         context: &ProjectionContext,
         recipient: [u8; 32],
     ) -> Result<Vec<u8>, LocalCredentialError> {
@@ -161,7 +177,7 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
         })?
         .winners;
         winners.retain(|key, _| !selection.overridden_keys.contains(key));
-        let projection = self.read_projection_values(&material, winners, context)?;
+        let projection = self.read_projection_values(&material, winners, context, record)?;
         // Protected-store I/O is blocking and may outlast the original request.
         // Re-read time; never turn an expired result into a fresh lifetime.
         seal_environment_projection(projection, context, recipient, unix_millis()?)
@@ -174,12 +190,14 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     /// final seal, outside any transaction. Any winner whose material can't
     /// be read fails the whole projection: it never seals a partial set. A
     /// bound winner's value is never read: its placeholder takes its place
-    /// (#4003), or it refuses the projection by name.
+    /// (#4003), or it refuses the projection by name. Nor is a plain one's
+    /// that `record` recorded bound, or that was ever bound with no record.
     fn read_projection_values(
         &self,
         material: &MaterialStore<'_, S>,
         winners: BTreeMap<String, Winner>,
         context: &ProjectionContext,
+        record: Option<&[FirstBindSecret]>,
     ) -> Result<EnvironmentProjection, LocalCredentialError> {
         let mut bound = bound::BoundValues::new(self, material.connection(), context);
         let mut values = Vec::with_capacity(winners.len());
@@ -190,7 +208,10 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 .map_err(|_| LocalCredentialError::InvalidWorkloadSecret)?;
             let value = match &secret.metadata.binding {
                 Some(_) => bound.placeholder(&key, set, &secret)?,
-                None => read_value(material, &secret)?,
+                None => match bound.recorded(&key, set, &secret, record)? {
+                    Some(placeholder) => placeholder,
+                    None => read_value(material, &secret)?,
+                },
             };
             encoded_bytes = encoded_bytes
                 .checked_add(8 + key.len() + value.len())

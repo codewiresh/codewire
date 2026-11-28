@@ -1926,6 +1926,7 @@ async fn publish_checkpoint_with_catalog(
             daemon_vsock_port: 7777,
             intercept: false,
             state_disk_cleared: None,
+            bound_secrets: None,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
     });
@@ -2242,6 +2243,7 @@ fn a_checkpoint_manifest_must_name_its_own_kind_and_memory() {
             daemon_vsock_port: 7777,
             intercept: false,
             state_disk_cleared: None,
+            bound_secrets: None,
         },
         timings: crate::supervisor::checkpoints::Timings::default(),
     };

@@ -95,7 +95,7 @@ fn placeholder_key_entry(
 
 /// This root's ID, giving the root one first if it has none, as
 /// [`placeholder_key_entry`] does.
-fn authority_id(connection: &Connection) -> Result<String, LocalCredentialError> {
+pub(crate) fn authority_id(connection: &Connection) -> Result<String, LocalCredentialError> {
     let recorded = connection
         .query_row(
             "SELECT value FROM authority_metadata WHERE key = ?1",

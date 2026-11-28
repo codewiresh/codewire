@@ -218,10 +218,10 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
                 ..Default::default()
             },
             selection_sha256: context.selection_sha256,
+            bound_secrets: Some(Vec::new()),
         }),
         network_policy_allows_github: true,
-        network_policy_allowed_hosts: Default::default(),
-        boot_secrets: Default::default(),
+        ..Default::default()
     };
     let socket = temp.path().join(format!("{environment_id}.sock"));
     let mut client = LocalCredentialControlClient::connect(&config)

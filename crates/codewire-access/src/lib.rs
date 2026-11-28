@@ -44,7 +44,7 @@ pub use credential_types::{
     AgentHolds, CREDENTIAL_TYPES, CredentialFlow, CredentialType, CredentialVerb, credential_type,
     credential_type_of, credential_types_docs_table, credential_types_for,
 };
-pub use first_bind::FirstBindSecret;
+pub use first_bind::{EpochBoundSecret, FirstBindSecret};
 pub use front_door::{
     ANTHROPIC_API_HOST, ANTIGRAVITY_API_HOSTS, ANTIGRAVITY_DAILY_HOST, ANTIGRAVITY_HOSTS,
     ANTIGRAVITY_OAUTH_HOST, ANTIGRAVITY_PROD_HOST, CHATGPT_HOST, CHATGPT_WILDCARD,
@@ -96,7 +96,9 @@ pub use refusal::{
     BoundSecretRefusal, OutsideBinding, REFUSAL_HEADER, Refusal, RefusalCode, RefusalProvider,
     Unforwarded, UpstreamFailure,
 };
-pub use secret_slot::{InvalidSecretSlot, SecretKind, SecretSlot};
+pub use secret_slot::{
+    InvalidSecretSlot, SecretKind, SecretSlot, local_project_path, local_user_path,
+};
 
 use thiserror::Error;
 

@@ -4481,7 +4481,9 @@ impl Supervisor {
             .credential_broker_request_for_environment(&projection_environment, generation)?;
         let environment_projection_sha256 =
             sources::projection_sha256_for_boot(&broker_request, &projection_environment)?;
-        let egress = self.boot_egress(operation_id, &broker_request).await?;
+        let egress = self
+            .boot_egress(operation_id, &broker_request, managed_credential_clients)
+            .await?;
         let credential_placeholders = self
             .seed_placeholders(
                 &egress,
@@ -4491,12 +4493,7 @@ impl Supervisor {
             )
             .await?;
         let start_request = v1::StartVmRequest {
-            network_policy_document: egress.network_policy_document,
-            network_policy_label: Some(egress.network_policy_label),
             credential_policy_label: Some(broker_request.network_policy_label.clone()),
-            intercept: egress.intercept,
-            interception: Some(egress.interception),
-            credential_placeholders,
             credential_broker: broker_request.enabled,
             cw_runtime_catalog_generation: expected_cw_runtime_generation.clone(),
             cw_runtime_moved_from_generation: self.cw_runtime_moved_from(&environment),
@@ -4520,6 +4517,7 @@ impl Supervisor {
             environment_projection_sha256,
             managed_credential_clients: managed_credential_clients.encode().to_owned(),
             checkpoint: None,
+            ..egress.start_request(credential_placeholders)
         };
         let mut start_request = checkpoints::attach_boot(self, operation_id, start_request)?;
         // Release any supervisor wake-stub listeners for this hibernated VM
@@ -4545,6 +4543,10 @@ impl Supervisor {
                     Ok(record) => {
                         hibernate_fallback_cold_request = Some(start_request.clone());
                         start_request.vsock_cid = record.vsock_cid;
+                        // The restored guest holds the placeholders its hibernated boot's
+                        // record derives, so that record is this boot's.
+                        start_request.bound_secrets =
+                            crate::runner::records_to_proto(record.bound_secrets.clone());
                         start_request.checkpoint = Some(record.to_checkpoint_boot());
                     }
                     Err(reason) => {
@@ -9935,6 +9937,9 @@ impl From<SupervisorError> for Status {
             | SupervisorError::EnvironmentAccessUnavailable
             | SupervisorError::PlatformPlaceholders(_)
             | SupervisorError::UnclearedDisk(_)
+            | SupervisorError::BoundSecrets(_)
+            | SupervisorError::RetireRefused(_)
+            | SupervisorError::NetworkPolicySelection(_)
             | SupervisorError::EnvironmentAccessBindingRejected(_)
             | SupervisorError::WorkloadSecretDeliveryUnavailable
             | SupervisorError::UnownedWorkspaceStaging(_) => {
@@ -9945,11 +9950,7 @@ impl From<SupervisorError> for Status {
             | SupervisorError::Store(SupervisorStoreError::Stopping) => {
                 Status::unavailable(error.to_string())
             }
-            SupervisorError::RetireRefused(_) => Status::failed_precondition(error.to_string()),
             SupervisorError::NetworkPolicyStore(_) => Status::internal(error.to_string()),
-            SupervisorError::NetworkPolicySelection(_) => {
-                Status::failed_precondition(error.to_string())
-            }
             SupervisorError::Workspace(workspace) => {
                 Status::failed_precondition(workspace.to_string())
             }
@@ -10080,6 +10081,8 @@ pub enum SupervisorError {
     PlatformPlaceholders(seed_placeholders::PlatformPlaceholdersRefusal),
     #[error("{0}")]
     UnclearedDisk(state_disk_clear::UnclearedDisk),
+    #[error("{0}")]
+    BoundSecrets(crate::runner::BoundSecretsRefusal),
     #[error("local credential profile binding was rejected ({0})")]
     EnvironmentAccessBindingRejected(tonic::Code),
     #[error("local environment {0:?} was not found")]

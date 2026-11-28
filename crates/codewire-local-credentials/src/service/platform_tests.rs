@@ -84,6 +84,7 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
         platform_delegated: true,
         network_policy_allows_github: true,
         network_policy_allowed_hosts: Default::default(),
+        serves_bound_secrets: false,
     };
     let selected = binding(directory.path().join("explicit-platform-config"));
     let (finish, completed) = tokio::sync::oneshot::channel();
@@ -162,6 +163,7 @@ async fn platform_generation_reuses_only_the_exact_owner_binding() {
             reserved_keys: BTreeSet::new(),
         },
         selection_sha256: selected.selection_sha256,
+        bound_secrets: Some(Vec::new()),
     });
     assert_eq!(
         manager.ensure(mixed).await.unwrap_err().code(),
@@ -233,6 +235,7 @@ impl RunningBroker {
             platform_delegated: true,
             network_policy_allows_github: true,
             network_policy_allowed_hosts: ["api.anthropic.com".to_owned()].into(),
+            serves_bound_secrets: false,
         };
         let selected = binding(directory.join("explicit-platform-config"));
         let (shutdown, mut stopping) = watch::channel(false);
@@ -617,6 +620,7 @@ async fn a_platform_boots_front_door_follows_its_pairing_secret() {
         platform_delegated: true,
         network_policy_allows_github: true,
         network_policy_allowed_hosts: Default::default(),
+        serves_bound_secrets: false,
     };
     let sent = binding(directory.path().join("explicit-platform-config"));
     let mut serving = sent.clone();

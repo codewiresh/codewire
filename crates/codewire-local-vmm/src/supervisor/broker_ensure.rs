@@ -31,7 +31,7 @@ fn authority_predates_bound_host_policy() -> String {
 }
 
 pub(super) async fn ensure_credential_broker(
-    request: CredentialBrokerEnsureRequest,
+    mut request: CredentialBrokerEnsureRequest,
 ) -> Result<AuthorityBrokerRuntime, SupervisorError> {
     if !request.enabled {
         return Ok(AuthorityBrokerRuntime {
@@ -40,12 +40,13 @@ pub(super) async fn ensure_credential_broker(
             running: false,
         });
     }
-    let boot_secrets = super::boot_egress::broker_boot_secrets(
+    let (boot_secrets, record) = super::boot_egress::broker_boot_secrets(
         &request.runner_socket,
         &request.environment_id,
         request.environment_generation,
     )
     .await?;
+    bind_boot_record(&mut request, record);
     let mut client = LocalCredentialControlClient::connect(&request.authority)
         .await
         .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?;
@@ -95,6 +96,39 @@ pub(super) async fn ensure_credential_broker(
         )
         .await
         .map_err(credential_control_error)
+}
+
+/// The boot's record of its bound secrets (#4003), from its runner: what
+/// its projection and its broker's leases are checked against, and each of
+/// its hosts the policy allows by rule, where a request that carries none of
+/// the environment's values is forwarded untouched. A local VM follows its
+/// network policy there, as for every intercepted host; it is never refused
+/// for carrying none.
+fn bind_boot_record(
+    request: &mut CredentialBrokerEnsureRequest,
+    record: Option<Vec<codewire_access::FirstBindSecret>>,
+) {
+    let allows = |host: &str| {
+        request
+            .network_policy
+            .allows_by_rule(
+                host,
+                codewire_egress_front_door_bridge::INTERCEPT_PORT,
+                None,
+            )
+            .unwrap_or(false)
+    };
+    let allowed: Vec<String> = record
+        .iter()
+        .flatten()
+        .flat_map(|secret| secret.hosts.iter())
+        .filter(|host| allows(host))
+        .cloned()
+        .collect();
+    request.network_policy_allowed_hosts.extend(allowed);
+    if let Some(projection) = request.projection.as_mut() {
+        projection.bound_secrets = record;
+    }
 }
 
 /// The bound hosts `policy` allows by rule on 443: where a front-door request
@@ -180,5 +214,62 @@ mod tests {
         assert!(authority_applies_network_policy(since, true));
         assert!(authority_applies_network_policy(since - 1, true));
         assert!(!authority_applies_network_policy(since - 1, false));
+    }
+
+    /// Parity's one difference (#4003): the hosts of the boot's recorded
+    /// bound secrets that its network policy allows by rule join the hosts
+    /// where a request carrying no Codewire value is forwarded; one the
+    /// policy doesn't allow is not. The record reaches the projection the
+    /// broker serves, and a boot that recorded nothing stays unrecorded.
+    #[test]
+    fn a_recorded_bound_host_follows_the_network_policy() {
+        use crate::network_policy_store::{PolicyBase, PolicySelection, PolicySelector};
+        use codewire_egress_policy::reference::PolicyName;
+        use codewire_egress_policy::typed::{AllowRule, AllowTarget};
+
+        let environment = super::super::tests::project_environment_with_access();
+        let (_parent, core) = super::super::tests::test_supervisor_core(environment.clone());
+        let name = PolicyName::parse("fancy-only").unwrap();
+        let rule = AllowRule::new(AllowTarget::parse("api.fancy.com").unwrap(), [443]).unwrap();
+        core.network_policies
+            .create(&name, &PolicyBase::Locked, vec![rule])
+            .unwrap();
+        core.network_policies
+            .select(
+                environment.id,
+                Some(&PolicySelection::Stored(PolicySelector::Name(name))),
+            )
+            .unwrap();
+        let record = vec![codewire_access::FirstBindSecret {
+            path: "local:user:0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+            key: "FANCY_TOKEN".into(),
+            binding_id: "00000000-0000-0000-0000-000000000007".into(),
+            binding_generation: 1,
+            prefix: None,
+            hosts: vec!["api.fancy.com".into(), "api.denied.com".into()],
+        }];
+        let mut request = core
+            .credential_broker_request_for_environment(&environment, 1)
+            .unwrap();
+        assert!(request.network_policy_allowed_hosts.is_empty());
+        bind_boot_record(&mut request, Some(record.clone()));
+        assert_eq!(
+            request.network_policy_allowed_hosts,
+            std::collections::BTreeSet::from(["api.fancy.com".to_owned()])
+        );
+        let projection = request.projection.as_ref().expect("a local projection");
+        assert_eq!(projection.bound_secrets.as_ref(), Some(&record));
+
+        let mut unrecorded = core
+            .credential_broker_request_for_environment(&environment, 1)
+            .unwrap();
+        bind_boot_record(&mut unrecorded, None);
+        assert!(unrecorded.network_policy_allowed_hosts.is_empty());
+        assert_eq!(
+            unrecorded
+                .projection
+                .map(|projection| projection.bound_secrets),
+            Some(None)
+        );
     }
 }

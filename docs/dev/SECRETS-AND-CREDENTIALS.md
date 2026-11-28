@@ -3019,6 +3019,57 @@ and the credential service refuses to start without that grant.
   when it binds.
 - A binding never widens the network policy. The policy must allow the host
   on 443 or nothing is sent, as for GitHub's hosts.
+- **In a local VM**, the local authority keeps the boot's record.
+  - **Recording.** At boot the supervisor asks the authority for the bound
+    secrets of the boot's local sources (`RecordBootBoundSecrets`, authority
+    protocol 38). The authority reads them in the same read as the boot's
+    projection, recording only the secret each key takes.
+    - If the selection can't be read, the boot fails.
+    - A boot that selects no local source records an empty list.
+    - An authority older than 38 is not asked: its boots record nothing, and
+      it projects as before.
+  - **What a record names.** A record names a local set as
+    `local:user:<authority id>` or `local:project:<project id>`. After the
+    authority is reset, an old record names no set it holds, so the secret
+    fails closed.
+  - **Keeping and binding.**
+    - The runner keeps the record for the boot's life and hands it to every
+      broker it ensures. A checkpoint keeps it, and a restore uses the
+      checkpoint's record.
+    - The runner binds the recorded hosts beside the credentials' hosts.
+    - A boot that can't bind them is refused before anything starts, with
+      the codes above.
+    - Locally, the reserved names are the provider hosts plus names under
+      `example`, `test` and `invalid`, which the egress policy never
+      intercepts.
+  - **Leasing.**
+    - The broker gets its grants from the authority when its channel
+      connects. A broker connected to an authority without that call gets
+      no grants.
+    - Each lease is a `LeaseBoundSecret` call on the broker's channel. It
+      rechecks the binding ID, generation, hosts and value version against
+      the boot's record, with the hosted refusal codes.
+    - The value comes back in the reply. Nothing caches it, it never prints
+      in Debug, and it is zeroized once the swap ends.
+  - **The broker's reach.**
+    - A recorded bound host that the network policy allows joins the
+      broker's allowed hosts.
+    - A broker forwards to at most 40 hosts (32 bindings plus routed
+      suffixes) and is refused by name over that.
+    - On macOS the broker's sandbox allows outbound 443 only when the boot
+      has a provider credential or a recorded bound secret. The sandbox
+      can't filter by host, so the broker's own host check is the gate.
+  - **Not yet built: a local VM's platform sources.** The platform will seal
+    the boot's record of its platform sources, and the boot will carry the
+    record back in its delegation. Until then:
+    - A local VM's delegated projection counts as recording nothing, so a
+      platform secret that was ever bound and is plain now is refused
+      `first_bind_unrecorded`.
+    - A platform secret that is bound now gets its placeholder. No local
+      route swaps it, so it fails closed.
+    - A platform-mode boot's local bound secrets fail closed the same way:
+      its front door relays to the platform, which holds no grant for them.
+    Host-bound secrets aren't turned on anywhere until this is built.
 
 **The swap**, on a bound host, after the network policy:
 

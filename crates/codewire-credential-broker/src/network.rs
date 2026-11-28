@@ -154,6 +154,20 @@ impl ProviderHttpsTransport {
         Self::resolve_with(selected, ConnectionReuse::Pooled, system_lookup)
     }
 
+    /// A transport that serves no provider, for a local broker whose boot
+    /// intercepts and so may swap a host-bound secret (#4003): each such
+    /// request is pinned to the address the egress broker admitted, so it
+    /// needs no lookup. Every provider request through it is refused.
+    pub fn bound_secrets_only() -> Result<Self, BrokerUpstreamError> {
+        Self::pinned(
+            &BTreeSet::new(),
+            ConnectionReuse::PerRequest,
+            &[],
+            &[],
+            BTreeSet::new(),
+        )
+    }
+
     /// Looks up every host `selections` name, each once and all at the same
     /// time, for a broker that starts whatever resolves (#5286,
     /// `docs/dev/SECRETS-AND-CREDENTIALS.md`, "A provider that can't be

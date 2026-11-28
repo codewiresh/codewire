@@ -222,6 +222,7 @@ fn build_hibernate_restore(
         daemon_vsock_port: request.daemon_vsock_port,
         intercept: !request.intercepts.is_empty(),
         image_disk: request.image_disk.as_ref().map(CheckpointImageDisk::from),
+        bound_secrets: request.bound_secrets.clone(),
         state_identity: None,
     })
 }
@@ -295,6 +296,7 @@ mod tests {
             udp_peers: Vec::new(),
             intercepts: Default::default(),
             credential_placeholders: Default::default(),
+            bound_secrets: None,
             checkpoint: None,
         };
         let restore = build_hibernate_restore(

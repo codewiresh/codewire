@@ -1,10 +1,11 @@
-//! What a hosted Pod's first bind records of each host-bound secret its
-//! selected sources hold (#4003; docs/dev/SECRETS-AND-CREDENTIALS.md, "Hosts
-//! and the front door"). Orchestration writes the list once, beside the
-//! Pod's interception decision, and it is never changed for the Pod's life.
-//! The credential service reads it to project a value raw only when the
-//! secret is plain now and the Pod recorded it plain ("Projection"), and the
-//! swap checks each lease against it.
+//! What a hosted Pod's first bind, or a local VM's boot, records of each
+//! host-bound secret its selected sources hold (#4003;
+//! docs/dev/SECRETS-AND-CREDENTIALS.md, "Hosts and the front door").
+//! Orchestration writes a Pod's list once, beside its interception decision;
+//! a local VM's runner holds its boot's list for the boot's life. Neither is
+//! ever changed. The projection reads it to project a value raw only when the
+//! secret is plain now and was recorded plain ("Projection"), and the swap
+//! checks each lease against it.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +22,9 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirstBindSecret {
-    /// The tenant-secret path of the set that stores it, such as
-    /// `/projects/<organization>/<project>`.
+    /// The set that stores it: a platform tenant-secret path, such as
+    /// `/projects/<organization>/<project>`, or a local VM's set
+    /// ([`crate::local_user_path`], [`crate::local_project_path`]).
     pub path: String,
     /// Its key, the variable name.
     pub key: String,
@@ -50,7 +52,7 @@ impl FirstBindSecret {
     /// The kind of set that stores it, from its path; `None` for a path no
     /// platform set has.
     pub fn kind(&self) -> Option<SecretKind> {
-        SecretSlot::for_platform_path(&self.path, &self.key)
+        SecretSlot::for_record_path(&self.path, &self.key)
             .ok()
             .map(|slot| slot.kind())
     }
@@ -66,7 +68,7 @@ impl FirstBindSecret {
         key: &ApplicationSecretKey,
         environment: &EnvironmentId,
     ) -> Option<SecretPlaceholder> {
-        let slot = SecretSlot::for_platform_path(&self.path, &self.key).ok()?;
+        let slot = SecretSlot::for_record_path(&self.path, &self.key).ok()?;
         let binding_id = canonical_uuid_bytes(&self.binding_id)?;
         let prefix = self
             .prefix
@@ -83,6 +85,16 @@ impl FirstBindSecret {
             prefix.as_ref(),
         ))
     }
+}
+
+/// One of an epoch's bound-secret grants: what the environment recorded of a
+/// secret its selected sources hold, and the placeholder that record derives
+/// under the environment's application-secret key, which the environment was
+/// projected. The front door's swap chooses a secret by it.
+#[derive(Clone, Debug)]
+pub struct EpochBoundSecret {
+    pub record: FirstBindSecret,
+    pub placeholder: SecretPlaceholder,
 }
 
 /// The 16 bytes of a canonical UUID: lowercase, hyphenated 8-4-4-4-12.
@@ -177,6 +189,46 @@ mod tests {
             change(&mut secret);
             assert_eq!(secret.placeholder(&key(9), &environment()), None);
         }
+    }
+
+    /// A local VM's record derives its placeholder from its own set: the
+    /// owner's personal set under the authority's ID, or a local project.
+    #[test]
+    fn a_local_record_derives_its_sets_placeholder() {
+        let authority = "0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b";
+        let project = "7d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6";
+        let mut binding_id = [0_u8; 16];
+        binding_id[15] = 7;
+        for (path, kind, collection) in [
+            (
+                crate::local_user_path(authority),
+                SecretKind::Local,
+                authority,
+            ),
+            (
+                crate::local_project_path(project),
+                SecretKind::Project,
+                project,
+            ),
+        ] {
+            let secret = FirstBindSecret { path, ..record() };
+            assert_eq!(secret.kind(), Some(kind));
+            let slot = SecretSlot::new(kind, collection, "FANCY_TOKEN").unwrap();
+            let expected = SecretPlaceholder::derive(
+                &key(9),
+                &environment(),
+                &slot,
+                &binding_id,
+                2,
+                Some(&PlaceholderPrefix::parse("ft_").unwrap()),
+            );
+            assert_eq!(secret.placeholder(&key(9), &environment()), Some(expected));
+        }
+        let reset = FirstBindSecret {
+            path: crate::local_user_path("not-the-authority's-id"),
+            ..record()
+        };
+        assert_eq!(reset.placeholder(&key(9), &environment()), None);
     }
 
     #[test]

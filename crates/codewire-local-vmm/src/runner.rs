@@ -114,9 +114,9 @@ mod intercept;
 mod mesh_processes;
 use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process};
 
-pub(crate) use intercept::boot_interception;
-pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets};
+pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets, BoundSecretsRefusal, bound_hosts};
 pub use intercept::{FrontDoorFailure, FrontDoorStop, InterceptRefusal};
+pub(crate) use intercept::{boot_interception, records_from_proto, records_to_proto};
 mod cw_runtime_disk;
 mod disk_admission;
 mod egress_spawn;
@@ -215,8 +215,7 @@ pub struct CreateVmRequest {
     pub cw_runtime_catalog_generation: Option<String>,
     /// The catalog a move boots this environment away from (#4980).
     pub cw_runtime_moved_from_generation: Option<String>,
-    /// The image disk this boot's overlay takes its lower from (#4646);
-    /// None boots on a combined root disk, as every VM does today.
+    /// The image disk this boot's overlay takes its lower from (#4646); None: a combined root.
     pub image_disk: Option<ImageDiskAttachment>,
     /// The network policy this boot's egress broker enforces (#2537).
     pub network_policy: CompiledPolicy,
@@ -225,6 +224,8 @@ pub struct CreateVmRequest {
     /// The names this boot intercepts through its TLS front door (#3999);
     /// empty, the default, intercepts nothing.
     pub intercepts: InterceptSet,
+    /// What the boot recorded of its bound secrets (#4003); None when it recorded nothing.
+    pub bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
     /// With `intercepts`, the seed's placeholders beside the front door's CA (#3999).
     pub credential_placeholders: codewire_vmm_guest_probe::SeedPlaceholders,
     /// Restore this boot from the VM checkpoint placed in
@@ -4971,6 +4972,7 @@ mod tests {
             udp_peers: Vec::new(),
             intercepts: InterceptSet::default(),
             credential_placeholders: Default::default(),
+            bound_secrets: None,
             vm_id: Uuid::new_v4(),
             generation: 1,
             vsock_cid: 7,

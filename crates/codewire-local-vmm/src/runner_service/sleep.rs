@@ -410,6 +410,7 @@ impl RunnerRpc {
                             .unwrap_or_default(),
                         daemon_vsock_port: boot.daemon_vsock_port,
                         intercept: !boot.intercepts.is_empty(),
+                        bound_secrets: crate::runner::records_to_proto(boot.bound_secrets.clone()),
                     }),
                 })
             })

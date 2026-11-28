@@ -3,12 +3,13 @@
 //! refused by name and never projected raw (#4003). Synthetic values only.
 
 use codewire_access::{
-    BindingWrite, EnvironmentId, PlaceholderPrefix, SecretKind, SecretPlaceholder, SecretSlot,
-    StoredBinding, StoredPresentation,
+    BindingWrite, EnvironmentId, FirstBindSecret, PlaceholderPrefix, SecretKind, SecretPlaceholder,
+    SecretSlot, StoredBinding, StoredPresentation,
 };
 use codewire_workload_secrets::compose_environment_projection;
 
 use super::*;
+use crate::BoundSecretLeaseRefusal;
 
 const CANARY: &str = "canary-local-bound-value-never-projected";
 
@@ -104,7 +105,12 @@ fn local_bound_secrets_project_their_placeholders_and_never_read_their_values() 
     let recipient = ProjectionRecipient::new();
     let launch = context();
     let sealed = authority
-        .seal_workload_projection(&selection(project_id), &launch, recipient.public_key())
+        .seal_workload_projection(
+            &selection(project_id),
+            Some(&[]),
+            &launch,
+            recipient.public_key(),
+        )
         .unwrap();
     let opened = recipient
         .open(&sealed, &launch, unix_millis().unwrap())
@@ -172,6 +178,7 @@ fn local_bound_secret_projects_its_placeholder_in_a_composed_projection() {
     let local = authority
         .seal_workload_projection_fragment(
             &selected,
+            Some(&[]),
             &launch,
             recipient.public_key(),
             [3; 16],
@@ -233,6 +240,7 @@ fn local_bound_secret_without_its_placeholder_is_refused_by_name_never_raw() {
         authority
             .seal_workload_projection(
                 &only_fancy,
+                Some(&[]),
                 &context(),
                 ProjectionRecipient::new().public_key()
             )
@@ -256,6 +264,7 @@ fn local_bound_secret_without_its_placeholder_is_refused_by_name_never_raw() {
         authority
             .seal_workload_projection(
                 &only_fancy,
+                Some(&[]),
                 &context(),
                 ProjectionRecipient::new().public_key()
             )
@@ -271,7 +280,7 @@ fn local_bound_secret_without_its_placeholder_is_refused_by_name_never_raw() {
     let recipient = ProjectionRecipient::new();
     let launch = context();
     let sealed = authority
-        .seal_workload_projection(&only_fancy, &launch, recipient.public_key())
+        .seal_workload_projection(&only_fancy, Some(&[]), &launch, recipient.public_key())
         .unwrap();
     assert_eq!(
         recipient
@@ -280,5 +289,190 @@ fn local_bound_secret_without_its_placeholder_is_refused_by_name_never_raw() {
             .entries()
             .collect::<Vec<_>>(),
         [("FANCY_TOKEN", CANARY)]
+    );
+}
+
+/// The boot's record names each bound winner of its local sources by its
+/// set and key, with its binding's identity, prefix and hosts, and no plain
+/// or overridden key, and nothing is read from the store to make it.
+#[test]
+fn a_boot_records_each_bound_winner_of_its_local_sources() {
+    let (_temp, authority, store, project_id) = bound_fixture();
+    authority
+        .write_user_workload_secret("OVERRIDDEN", canary(), binding(), true)
+        .unwrap();
+    store.reads.lock().unwrap().clear();
+    let record = authority
+        .record_boot_bound_secrets(&selection(project_id))
+        .unwrap();
+    let (_, personal_id, personal_generation) = entry(&authority, SecretScope::User, "FANCY_TOKEN");
+    let (_, project_binding, project_generation) = entry(
+        &authority,
+        SecretScope::Project(&project_id),
+        "PROJECT_TOKEN",
+    );
+    let recorded = |path: String, key: &str, binding_id: Uuid, generation: u64| FirstBindSecret {
+        path,
+        key: key.into(),
+        binding_id: binding_id.to_string(),
+        binding_generation: generation,
+        prefix: Some("ft_".into()),
+        hosts: vec!["api.fancy.example".into()],
+    };
+    assert_eq!(
+        record,
+        [
+            recorded(
+                codewire_access::local_user_path(&authority_id(&authority)),
+                "FANCY_TOKEN",
+                personal_id,
+                personal_generation,
+            ),
+            recorded(
+                codewire_access::local_project_path(&project_id.to_string()),
+                "PROJECT_TOKEN",
+                project_binding,
+                project_generation,
+            ),
+        ]
+    );
+    assert!(store.reads.lock().unwrap().is_empty(), "no value was read");
+}
+
+/// Condition A, local: a secret bound at boot and made plain since keeps
+/// the placeholder the boot's record derives, never its value; recorded
+/// plain it projects raw; and for a boot that recorded nothing, a secret
+/// that was ever bound is refused by name.
+#[test]
+fn a_secret_made_plain_since_boot_keeps_its_recorded_placeholder_never_its_value() {
+    let only_fancy = LocalLaunchSecretSelection {
+        user: true,
+        overridden_keys: BTreeSet::from(["SHARED".into(), "OVERRIDDEN".into()]),
+        ..Default::default()
+    };
+    let (_temp, authority, store, _) = bound_fixture();
+    let record = authority.record_boot_bound_secrets(&only_fancy).unwrap();
+    let launch = context();
+    let projected = |record: Option<&[FirstBindSecret]>| {
+        let recipient = ProjectionRecipient::new();
+        authority
+            .seal_workload_projection(&only_fancy, record, &launch, recipient.public_key())
+            .map(|sealed| {
+                recipient
+                    .open(&sealed, &launch, unix_millis().unwrap())
+                    .unwrap()
+                    .entries()
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+    };
+    let at_boot = projected(Some(&record)).unwrap();
+    let placeholder = expected(
+        &authority,
+        SecretKind::Local,
+        &authority_id(&authority),
+        SecretScope::User,
+        "FANCY_TOKEN",
+    );
+    assert_eq!(at_boot, [("FANCY_TOKEN".to_owned(), placeholder.clone())]);
+    authority
+        .write_user_workload_secret("FANCY_TOKEN", canary(), BindingWrite::Plain, true)
+        .unwrap();
+    store.reads.lock().unwrap().clear();
+    let (plain_entry, _, _) = entry(&authority, SecretScope::User, "FANCY_TOKEN");
+
+    assert_eq!(projected(Some(&record)).unwrap(), at_boot);
+    assert!(!store.reads.lock().unwrap().contains(&plain_entry));
+    assert_eq!(
+        projected(None).unwrap_err(),
+        LocalCredentialError::BoundSecretUnrecorded("FANCY_TOKEN".into())
+    );
+    assert!(!store.reads.lock().unwrap().contains(&plain_entry));
+    assert_eq!(
+        projected(Some(&[])).unwrap(),
+        [("FANCY_TOKEN".to_owned(), CANARY.to_owned())]
+    );
+}
+
+/// A lease rereads the recorded secret's row: it passes with the binding
+/// and value version, reads the value only when asked, and refuses by name
+/// a host the record or binding doesn't name, a moved binding, a secret
+/// made plain and one deleted. A set the selection doesn't hold is denied.
+#[test]
+fn a_lease_checks_the_recorded_secret_against_its_row() {
+    let only_fancy = LocalLaunchSecretSelection {
+        user: true,
+        ..Default::default()
+    };
+    let (_temp, authority, store, project_id) = bound_fixture();
+    let record = authority
+        .record_boot_bound_secrets(&selection(project_id))
+        .unwrap();
+    let personal = record
+        .iter()
+        .find(|secret| secret.key == "FANCY_TOKEN")
+        .unwrap()
+        .clone();
+    let project = record
+        .iter()
+        .find(|secret| secret.key == "PROJECT_TOKEN")
+        .unwrap();
+    let lease = |secret: &FirstBindSecret, host: &str, value: bool| {
+        authority.lease_bound_secret(&only_fancy, secret, host, value)
+    };
+    let (bound_entry, _, _) = entry(&authority, SecretScope::User, "FANCY_TOKEN");
+    let row = lease(&personal, "api.fancy.example", false)
+        .unwrap()
+        .unwrap();
+    assert!(row.value.is_none());
+    assert!(!store.reads.lock().unwrap().contains(&bound_entry));
+    let leased = lease(&personal, "api.fancy.example", true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        leased.value.as_deref().map(Vec::as_slice),
+        Some(CANARY.as_bytes())
+    );
+    assert_eq!(leased.value_version, row.value_version);
+    assert_eq!(leased.binding.hosts, ["api.fancy.example"]);
+    assert!(lease(project, "api.fancy.example", false).is_err());
+    assert_eq!(
+        lease(&personal, "api.other.example", false)
+            .unwrap()
+            .unwrap_err(),
+        BoundSecretLeaseRefusal::NotBoundToHost
+    );
+
+    let mut moved = match binding() {
+        BindingWrite::Bind(binding) => binding,
+        _ => unreachable!(),
+    };
+    moved.prefix = Some("mv_".into());
+    authority
+        .write_user_workload_secret("FANCY_TOKEN", None, BindingWrite::Bind(moved), true)
+        .unwrap();
+    assert_eq!(
+        lease(&personal, "api.fancy.example", true)
+            .unwrap()
+            .unwrap_err(),
+        BoundSecretLeaseRefusal::BindingChanged
+    );
+    authority
+        .write_user_workload_secret("FANCY_TOKEN", canary(), BindingWrite::Plain, true)
+        .unwrap();
+    assert_eq!(
+        lease(&personal, "api.fancy.example", true)
+            .unwrap()
+            .unwrap_err(),
+        BoundSecretLeaseRefusal::BindingChanged
+    );
+    authority
+        .delete_user_workload_secret("FANCY_TOKEN")
+        .unwrap();
+    assert_eq!(
+        lease(&personal, "api.fancy.example", true)
+            .unwrap()
+            .unwrap_err(),
+        BoundSecretLeaseRefusal::Deleted
     );
 }

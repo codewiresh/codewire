@@ -120,7 +120,46 @@ fn workload_secret_source_to_proto(source: WorkloadSecretSource) -> v1::Workload
     }
 }
 
-pub(super) fn resolved_secret_to_proto(
+pub(super) async fn resolve<S: ProtectedStore + 'static>(
+    authority: Arc<LocalCredentialAuthority<S>>,
+    request: v1::ResolveWorkloadSecretMetadataRequest,
+) -> Result<Response<v1::ResolveWorkloadSecretMetadataResponse>, Status> {
+    let selection = workload_secret_selection_from_proto(
+        request
+            .selection
+            .ok_or_else(|| Status::invalid_argument("workload-secret selection is required"))?,
+    )?;
+    let secrets =
+        run_blocking(move || authority.resolve_workload_secret_metadata(&selection)).await?;
+    Ok(Response::new(v1::ResolveWorkloadSecretMetadataResponse {
+        secrets: secrets.into_iter().map(resolved_secret_to_proto).collect(),
+    }))
+}
+
+/// What a local VM's boot records of its bound secrets (#4003), read from
+/// exactly the local sources its projection selects. A selection that
+/// doesn't read is refused, and the boot with it: recording none in its
+/// place would let a secret bound now be projected raw once made plain.
+pub(super) async fn record_boot<S: ProtectedStore + 'static>(
+    authority: Arc<LocalCredentialAuthority<S>>,
+    request: v1::RecordBootBoundSecretsRequest,
+) -> Result<Response<v1::BootBoundSecrets>, Status> {
+    let projection = crate::LocalEnvironmentProjectionBinding::from_proto(
+        request
+            .projection
+            .ok_or_else(|| Status::invalid_argument("a boot's projection is required"))?,
+    )?;
+    let record =
+        run_blocking(move || authority.record_boot_bound_secrets(&projection.selection)).await?;
+    Ok(Response::new(v1::BootBoundSecrets {
+        secrets: record
+            .into_iter()
+            .map(crate::broker_channel::record_to_proto)
+            .collect(),
+    }))
+}
+
+fn resolved_secret_to_proto(
     secret: ResolvedWorkloadSecretMetadata,
 ) -> v1::ResolvedWorkloadSecretMetadata {
     v1::ResolvedWorkloadSecretMetadata {
@@ -134,7 +173,7 @@ pub(super) fn resolved_secret_to_proto(
     }
 }
 
-pub(super) fn workload_secret_selection_from_proto(
+fn workload_secret_selection_from_proto(
     selection: v1::WorkloadSecretSelection,
 ) -> Result<WorkloadSecretSelection, Status> {
     let explicit_environment_keys = selection

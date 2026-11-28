@@ -90,6 +90,24 @@ impl Drop for v1::RepositoryCredentialLeaseResponse {
     }
 }
 
+impl std::fmt::Debug for v1::BoundSecretLeaseResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BoundSecretLeaseResponse")
+            .field("refusal", &self.refusal)
+            .field("binding", &self.binding)
+            .field("value_version", &self.value_version)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Drop for v1::BoundSecretLeaseResponse {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
 impl std::fmt::Debug for v1::RevocationCredentialLeaseResponse {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -169,6 +187,23 @@ mod tests {
         assert!(printed.contains("refresh"), "{printed}");
         assert!(!printed.contains("refreshed-bundle-canary"), "{printed}");
         assert!(!printed.contains("114, 101, 102"), "{printed}");
+    }
+
+    /// A bound secret's lease reply (#4003) prints everything but its value,
+    /// in neither its text nor its bytes, and zeroizes the value it drops.
+    #[test]
+    fn a_bound_secret_lease_debugs_without_its_value() {
+        let response = v1::BoundSecretLeaseResponse {
+            refusal: 0,
+            binding: "{}".into(),
+            value_version: 3,
+            value: b"bound-value-canary".to_vec(),
+        };
+        let printed = format!("{response:?}");
+        assert!(printed.contains("value_version: 3"), "{printed}");
+        assert!(printed.contains("[REDACTED]"), "{printed}");
+        assert!(!printed.contains("bound-value-canary"), "{printed}");
+        assert!(!printed.contains("98, 111, 117"), "{printed}");
     }
 
     #[test]
