@@ -2,17 +2,17 @@
 // the post-publish proposal rewrites this file and policy refuses other edits.
 
 /// Content digest of the published workspace image.
-pub const DIGEST: &str = "sha256:1190a67d4f32686ee504be2929750e5d6b7e593a10a3534070e525d4eada48b0";
+pub const DIGEST: &str = "sha256:60cbebbf2629c8bf12c6e70840146a2e1e589f5f0116bf047a530869c123912e";
 /// The image at the public GHCR mirror, pulled anonymously by local
 /// environments. A deployment pulls the same digest from its configured
 /// repository.
-pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:1190a67d4f32686ee504be2929750e5d6b7e593a10a3534070e525d4eada48b0";
+pub const PUBLIC_IMAGE: &str = "ghcr.io/codewiresh/workspace@sha256:60cbebbf2629c8bf12c6e70840146a2e1e589f5f0116bf047a530869c123912e";
 /// Platforms the published image index serves.
 pub const PLATFORMS: &[&str] = &["linux/amd64", "linux/arm64"];
 /// Commit the image was built from.
-pub const SOURCE_SHA: &str = "b2377b6db1562138d8bced436b17a0373d8ce7a0";
+pub const SOURCE_SHA: &str = "8ab3f9bbd6bfd8c91ceeb100a72c09a6bebc8cbf";
 /// Identity of the image definition at `SOURCE_SHA`; see the generator.
-pub const INPUTS_SHA256: &str = "04e7d25973e660ac2e0d87e8972fbeae0c2bc8d77a6ab441e64bfeebf0b0f1f2";
+pub const INPUTS_SHA256: &str = "1eac6d571fcfd2390d5d4e1d72ffe726bf97e8950e83ce8852aa1ecc5e828cb1";
 /// Agent CLI versions the image definition at `SOURCE_SHA` installs.
 pub const AGENT_VERSIONS: &[(&str, &str)] = &[
     ("claude", "2.1.308"),
@@ -23,6 +23,7 @@ pub const AGENT_VERSIONS: &[(&str, &str)] = &[
 ];
 /// Earlier published digests, newest first, that older clients may send.
 pub const PREVIOUS_DIGESTS: &[&str] = &[
+    "sha256:1190a67d4f32686ee504be2929750e5d6b7e593a10a3534070e525d4eada48b0",
     "sha256:1faec9fdbb0523c7f35fb85d3e03c3d9df2ee8ab8f72abaaf8d46c6273e34e36",
     "sha256:6ea688069b333fe0fcab4ff016f74a42b805e75ebf2a6d25d1045049310f4860",
     "sha256:57baf3379849a0bdcc20c749ad970c169d4a99f1fc1819b4203b01d56a923294",
@@ -54,5 +55,4 @@ pub const PREVIOUS_DIGESTS: &[&str] = &[
     "sha256:d8043d615c6b4adeb771f191f4cc57cee5ae4dfa5651b56b9cd09c69594e6641",
     "sha256:56b19805ceec01b33f21fe7bc9251944359c47f8df374d3c891ba8de0650cfa1",
     "sha256:428e3d48d0fd250edbf2ec6825b8d76dac52ae9909eea057b7d6bb60616002c7",
-    "sha256:0ce0c5eb4fe7aed222b4e3f4180757665b8ab8f227c0e4a9f7bf6f22c89e37f6",
 ];
