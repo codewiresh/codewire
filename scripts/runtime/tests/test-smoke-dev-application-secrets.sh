@@ -97,7 +97,7 @@ cw() {
       IFS= read -r input || [[ -n "$input" ]]
       [[ "$input" == cwdevall* ]] || fail 'all-scope protected stdin was not supplied'
       scope="$3"; scope="${scope#--}"; db="$TMPDIR_SMOKE/$scope.db"; key="$5"
-      jq --arg key "$key" 'map(select(.key != $key)) + [{key:$key,created_at:"now",updated_at:"now"}]' \
+      jq --arg key "$key" 'map(select(.key != $key)) + [{key:$key,created_at:"now",updated_at:"now",binding:null}]' \
         "$db" >"$TMPDIR_SMOKE/db.next"
       mv "$TMPDIR_SMOKE/db.next" "$db"
       [[ "$APP_FAILURE" != "lost-$scope-write" ]] || return 1 ;;
@@ -154,7 +154,7 @@ cw() {
         jq -n --arg value "${APP_SECRET_VALUES[0]}" '[{key:"DATABASE_URL",value:$value},{key:"CW_DEV_PRECEDENCE"}]'
       elif [[ "$APP_SECRET_ALL_SCOPES" == 1 ]]; then
         printf '%s\n' "${APP_SECRET_ALL_KEYS[@]:1:1}" "${APP_SECRET_ALL_KEYS[@]:3:3}" |
-          jq -Rsc 'split("\n")[:-1] | map({key:.,created_at:"now",updated_at:"now"})'
+          jq -Rsc 'split("\n")[:-1] | map({key:.,created_at:"now",updated_at:"now",binding:null})'
       else printf '[{"key":"DATABASE_URL"},{"key":"CW_DEV_PRECEDENCE"}]\n'; fi ;;
     '--cloud ls --output json') jq 'map(select(.state != "destroying" and .state != "destroyed"))' "$TMPDIR_SMOKE/environments.db" ;;
     'report '*' --output json')
@@ -376,6 +376,20 @@ for artifact in "$TMPDIR_SMOKE/nonexistent.out" "$TMPDIR_SMOKE"; do
   expect_failure artifact-read-error inspect_artifact_with_receipt "$artifact"
   assert_guard_failure_redacted
   grep -Fq 'application-secret artifact inspection failed' "$APP_TEST_ROOT/failure.err"
+done
+
+# Plain secret list metadata carries binding: null (#4003) and rejects non-null,
+# missing, or unknown fields.
+printf '[{"key":"DATABASE_URL","created_at":"now","updated_at":"now","binding":null}]\n' >"$TMPDIR_SMOKE/meta-ok.json"
+assert_application_scope_metadata "$TMPDIR_SMOKE/meta-ok.json" DATABASE_URL
+pass
+for bad_meta in \
+  '[{"key":"DATABASE_URL","created_at":"now","updated_at":"now"}]' \
+  '[{"key":"DATABASE_URL","created_at":"now","updated_at":"now","binding":{"hosts":["api.example.com"]}}]' \
+  '[{"key":"DATABASE_URL","created_at":"now","updated_at":"now","binding":"leaked"}]' \
+  '[{"key":"DATABASE_URL","created_at":"now","updated_at":"now","binding":null,"value":"leaked"}]'; do
+  printf '%s\n' "$bad_meta" >"$TMPDIR_SMOKE/meta-bad.json"
+  expect_failure "bad-secret-metadata" assert_application_scope_metadata "$TMPDIR_SMOKE/meta-bad.json" DATABASE_URL
 done
 
 # These exercise the unchanged production wait_until with deterministic time,
@@ -723,7 +737,7 @@ pass
 # fence immediately before environment creation.
 fixture
 APP_SECRET_ALL_SCOPES=1
-printf '[{"key":"FOREIGN","created_at":"now","updated_at":"now"}]\n' >"$TMPDIR_SMOKE/user.db"
+printf '[{"key":"FOREIGN","created_at":"now","updated_at":"now","binding":null}]\n' >"$TMPDIR_SMOKE/user.db"
 expect_failure shared-user-nonempty prepare_application_secrets
 [[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
 [[ "$(jq length "$TMPDIR_SMOKE/organization.db")" == 0 ]]
@@ -731,7 +745,7 @@ pass
 
 fixture
 APP_SECRET_ALL_SCOPES=1
-printf '[{"key":"FOREIGN","created_at":"now","updated_at":"now"}]\n[]\n' >"$TMPDIR_SMOKE/user.db"
+printf '[{"key":"FOREIGN","created_at":"now","updated_at":"now","binding":null}]\n[]\n' >"$TMPDIR_SMOKE/user.db"
 expect_failure multiple-shared-documents prepare_application_secrets
 [[ "$(jq -s length "$TMPDIR_SMOKE/user.db")" == 2 ]]
 [[ "$(jq length "$TMPDIR_SMOKE/projects.db")" == 0 ]]
@@ -740,7 +754,7 @@ pass
 fixture
 APP_SECRET_ALL_SCOPES=1
 prepare_application_secrets
-jq '. + [{key:"FOREIGN",created_at:"now",updated_at:"now"}]' "$TMPDIR_SMOKE/user.db" >"$TMPDIR_SMOKE/db.next"
+jq '. + [{key:"FOREIGN",created_at:"now",updated_at:"now",binding:null}]' "$TMPDIR_SMOKE/user.db" >"$TMPDIR_SMOKE/db.next"
 mv "$TMPDIR_SMOKE/db.next" "$TMPDIR_SMOKE/user.db"
 expect_failure extra-final-key create_environment
 if grep -Eq '^(--cloud )?create ' "$TMPDIR_SMOKE/calls"; then fail 'environment create ran after the final scope fence failed'; fi
@@ -1299,9 +1313,9 @@ old_nonce=0123456789abcdef0123456789abcdef
 old_prefix="CWAPP_${old_nonce^^}"
 fixture
 APP_SECRET_ALL_SCOPES=1
-jq -n --arg k "${old_prefix}_USER" '[{key:$k,created_at:"then",updated_at:"then"}]' >"$TMPDIR_SMOKE/user.db"
+jq -n --arg k "${old_prefix}_USER" '[{key:$k,created_at:"then",updated_at:"then",binding:null}]' >"$TMPDIR_SMOKE/user.db"
 jq -n --arg a "${old_prefix}_ORG" --arg b "${old_prefix}_PROJECT_USER" \
-  '[{key:$a,created_at:"then",updated_at:"then"},{key:$b,created_at:"then",updated_at:"then"}]' >"$TMPDIR_SMOKE/organization.db"
+  '[{key:$a,created_at:"then",updated_at:"then",binding:null},{key:$b,created_at:"then",updated_at:"then",binding:null}]' >"$TMPDIR_SMOKE/organization.db"
 jq -n --arg name "dev-app-${old_nonce}-0" '[{id:"00000000-0000-4000-8000-0000000000aa",name:$name}]' >"$TMPDIR_SMOKE/projects.db"
 prepare_application_secrets 2>"$TMPDIR_SMOKE/residue.err" || fail 'own synthetic residue still failed the start'
 if grep -Fq "$old_prefix" "$TMPDIR_SMOKE/user.db" "$TMPDIR_SMOKE/organization.db" ||
@@ -1322,7 +1336,7 @@ pass
 fixture
 APP_SECRET_ALL_SCOPES=1
 jq -n --arg synthetic "${old_prefix}_CONFIG" --arg lower "CWAPP_${old_nonce}_USER" --arg suffix "${old_prefix}_OTHER" '
-  [$synthetic, $lower, $suffix, "MY_KEY"] | map({key:.,created_at:"then",updated_at:"then"})' >"$TMPDIR_SMOKE/user.db"
+  [$synthetic, $lower, $suffix, "MY_KEY"] | map({key:.,created_at:"then",updated_at:"then",binding:null})' >"$TMPDIR_SMOKE/user.db"
 jq -n --arg name "dev-app-${old_nonce}-2" '[{id:"00000000-0000-4000-8000-0000000000ab",name:$name}]' >"$TMPDIR_SMOKE/projects.db"
 expect_failure foreign-start-item prepare_application_secrets
 jq -e --arg lower "CWAPP_${old_nonce}_USER" --arg suffix "${old_prefix}_OTHER" \

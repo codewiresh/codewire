@@ -1542,10 +1542,11 @@ assert_application_scope_metadata() {
       type == "array" and
       (map(.key) | sort) == $expected and
       all(.[]; type == "object" and
-        (keys | sort) == ["created_at", "key", "updated_at"] and
+        (keys | sort) == ["binding", "created_at", "key", "updated_at"] and
         (.key | type) == "string" and
         (.created_at | type) == "string" and
-        (.updated_at | type) == "string"))
+        (.updated_at | type) == "string" and
+        .binding == null))
   ' "$file" >/dev/null
 }
 
