@@ -820,8 +820,9 @@ impl EgressService for EgressConnectService {
             tracing::info!(?refusal, pod = %guest.name, "egress stream refused");
             denied()
         })?;
-        // What this cw-egress's front door serves (#6290), kept for the Pod's
-        // first bind; an unreadable report keeps nothing, so that bind waits.
+        // What this cw-egress's front door serves (#6290), and whether it
+        // serves bound-secret routes (#4003), kept for the Pod's first bind;
+        // an unreadable report keeps nothing, so that bind waits.
         match front_door_hosts::reported(
             request
                 .front_door_hosts
@@ -831,7 +832,13 @@ impl EgressService for EgressConnectService {
             Some(hosts) => self
                 .state
                 .bindings
-                .record_front_door_hosts(&guest.uid, &hosts)
+                .record_front_door_hosts(
+                    &guest.uid,
+                    &front_door_hosts::FrontDoorReport {
+                        hosts,
+                        bound_routes: request.bound_routes,
+                    },
+                )
                 .await
                 .map_err(|_| unavailable("record the front door's hosts", "the binding store"))?,
             None => {

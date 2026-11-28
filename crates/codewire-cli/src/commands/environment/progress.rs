@@ -1124,15 +1124,21 @@ pub(crate) fn terminal_text(text: &str) -> String {
     replaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// A container that could not start, or a front door that can't serve the
-/// selection, fails the sandbox's start, whichever wait was open when it was
-/// seen.
+/// A container that could not start, a front door that can't serve the
+/// selection, or bound secrets its first bind refused, fails the sandbox's
+/// start, whichever wait was open when it was seen.
 fn fails_sandbox_start(metadata: Option<&serde_json::Value>) -> bool {
     matches!(
         metadata
             .and_then(|metadata| metadata.get("kind"))
             .and_then(|kind| kind.as_str()),
-        Some("container_start_failed" | "front_door_hosts_unserved")
+        Some(
+            "container_start_failed"
+                | "front_door_hosts_unserved"
+                | "bound_host_reserved"
+                | "bound_host_conflict"
+                | "too_many_bound_hosts"
+        )
     )
 }
 #[cfg(test)]

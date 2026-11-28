@@ -1423,6 +1423,12 @@ database_lane_orchestration_admin() {
       'sandbox::standard_move::database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "first-bind bound secrets" first-bind-bound-secrets \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'workspace_binding::bound_secrets::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "sandbox identity issuer orgs matrix" sandbox-identity-issuer-orgs \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

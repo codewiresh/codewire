@@ -966,8 +966,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(relay_allocator(|name| std::env::var(name).ok())?),
         )
         .with_disco_admission(disco_admission()?)
-        .with_interception(egress_settings.interception)
-        .with_hosted_egress(egress_settings.enabled)
+        .with_egress(egress_settings)
+        .with_reserved_hosts(secrets.reserved_hosts().clone())
         .with_server_url(&api_state.frontend_url)
         .with_identity(identity_minting),
     );

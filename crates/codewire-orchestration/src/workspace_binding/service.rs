@@ -141,6 +141,10 @@ pub struct WorkspaceBindingState {
     identity: Option<Arc<IdentityMinting>>,
     /// The deployment's hosted egress switch (#4000).
     hosted_egress: bool,
+    /// The deployment's own names, which no bound secret is sent to (#4003):
+    /// the list the secret store checks a binding against when it is set,
+    /// checked again at a Pod's first bind for a name added since.
+    reserved: codewire_access::ReservedHosts,
 }
 
 /// A caller authenticated as a live workspace Pod, calling from that Pod's
@@ -183,7 +187,15 @@ impl WorkspaceBindingState {
             interception: false,
             identity: None,
             hosted_egress: false,
+            reserved: codewire_access::ReservedHosts::default(),
         }
+    }
+
+    /// The deployment's own names, as the secret store was built with them
+    /// (#4003): a first bind refuses a bound secret sent to one of them.
+    pub fn with_reserved_hosts(mut self, reserved: codewire_access::ReservedHosts) -> Self {
+        self.reserved = reserved;
+        self
     }
 
     /// Mints sandbox identity tokens with `minting`; without it every
@@ -198,6 +210,13 @@ impl WorkspaceBindingState {
     pub fn with_interception(mut self, interception: bool) -> Self {
         self.interception = interception;
         self
+    }
+
+    /// The deployment's hosted egress settings: [`Self::with_hosted_egress`]
+    /// and [`Self::with_interception`] from the one value read at startup.
+    pub fn with_egress(self, settings: crate::egress::settings::EgressSettings) -> Self {
+        self.with_hosted_egress(settings.enabled)
+            .with_interception(settings.interception)
     }
 
     /// With hosted egress on, a Pod on a VM runtime without broker mode is
@@ -482,17 +501,33 @@ impl WorkspaceBindingState {
             .record_trust(pod_uid, proposed)
             .await
             .map_err(|_| BindError::Unavailable)?;
+        // #4003: the first bind records each bound secret the selection
+        // holds, with the decision and never apart from it.
+        let first_bind = binding.interception.is_none();
+        let bound_secrets = if first_bind {
+            self.store
+                .first_bind_secrets(&binding)
+                .await
+                .map_err(|_| BindError::Unavailable)?
+        } else {
+            Vec::new()
+        };
         // #6290: a first bind that would intercept is refused unless the Pod's
         // own front door reported every name its selection binds. A name
         // handed to a door with no route for it fails silently, and
         // interception is never quietly off. Until an admission reports, the
         // bind waits.
-        if trusted && proposed && binding.interception.is_none() {
-            self.front_door_serves(pod_uid, &binding).await?;
+        if trusted && proposed && first_bind {
+            self.front_door_serves(pod_uid, &binding, &bound_secrets)
+                .await?;
         }
         let interception = self
             .store
-            .record_interception(caller.identity.pod_uid(), trusted && proposed)
+            .record_interception(
+                caller.identity.pod_uid(),
+                trusted && proposed,
+                &bound_secrets,
+            )
             .await
             .map_err(|_| BindError::Unavailable)?;
         let mut response = respond(
@@ -507,29 +542,43 @@ impl WorkspaceBindingState {
     }
 
     /// Whether `pod_uid`'s front door reported every name `binding`'s
-    /// selection would bind (#6290): UNAVAILABLE, so the daemon asks again,
-    /// until an admission has reported; FAILED_PRECONDITION, logged with the
-    /// missing names, counted and recorded for the Pod, when one is missing.
-    /// The create or start waiting for the Pod reads that record and ends
-    /// with the missing names.
+    /// selection would bind (#6290), its bound secrets' hosts included
+    /// (#4003): UNAVAILABLE, so the daemon asks again, until an admission has
+    /// reported; FAILED_PRECONDITION, logged with the missing names, counted
+    /// and recorded for the Pod, when one is missing, or when the bound
+    /// secrets' hosts don't hold together. The create or start waiting for
+    /// the Pod reads that record and ends with it.
     async fn front_door_serves(
         &self,
         pod_uid: &str,
         binding: &LiveBinding,
+        bound_secrets: &[codewire_access::FirstBindSecret],
     ) -> Result<(), BindError> {
         let clients =
             codewire_access::ManagedCredentialClients::decode(&binding.managed_credential_clients)
                 .map_err(|_| BindError::Unavailable)?;
-        let needed = crate::egress::assignment::interception_bindings(true, clients)
+        let intercepts = crate::egress::assignment::interception_bindings(true, clients)
             .map_err(|_| BindError::Unavailable)?;
-        let needed = crate::egress::front_door_hosts::needed(&needed);
+        let needed = crate::egress::front_door_hosts::needed(&intercepts);
         let reported = self
             .store
             .front_door_hosts(pod_uid)
             .await
             .map_err(|_| BindError::Unavailable)?
             .ok_or(BindError::Unavailable)?;
-        let missing = crate::egress::front_door_hosts::missing(&needed, &reported);
+        let bound_hosts =
+            match super::bound_secrets::bound_hosts(bound_secrets, &intercepts, &self.reserved) {
+                Ok(hosts) => hosts,
+                Err(refusal) => {
+                    return Err(self.refuse_bound_secrets(pod_uid, binding, &refusal).await);
+                }
+            };
+        let mut missing = crate::egress::front_door_hosts::missing(&needed, &reported.hosts);
+        // A bound secret's hosts are in no fixed table: the front door serves
+        // them only when it says it serves bound-secret routes at all.
+        if !reported.bound_routes {
+            missing.extend(bound_hosts);
+        }
         if missing.is_empty() {
             return Ok(());
         }
@@ -548,6 +597,34 @@ impl WorkspaceBindingState {
             "refused the first bind: the Pod's front door does not serve every host its selection binds"
         );
         Err(BindError::FailedPrecondition)
+    }
+
+    /// Refuses a first bind for its bound secrets (#4003), as
+    /// [`Self::front_door_serves`] refuses one for its front door: counted,
+    /// logged with the code and its sentence, which names hosts and keys and
+    /// never a value, and kept for the Pod's waiting create or start.
+    async fn refuse_bound_secrets(
+        &self,
+        pod_uid: &str,
+        binding: &LiveBinding,
+        refusal: &super::bound_secrets::BoundSecretsRefusal,
+    ) -> BindError {
+        metrics::observe_bound_secrets_refused(refusal.code());
+        let reason = refusal.to_string();
+        // The refusal stands whether or not this write lands; without it the
+        // waiting create ends at its readiness timeout instead of by name.
+        let _ = self
+            .store
+            .record_bound_secrets_refusal(pod_uid, refusal.code(), &reason)
+            .await;
+        tracing::warn!(
+            environment_id = %binding.environment_id,
+            pod_uid,
+            reason = refusal.code(),
+            refusal = %reason,
+            "refused the first bind: the hosts of its selected bound secrets don't hold together"
+        );
+        BindError::FailedPrecondition
     }
 
     /// A fresh access grant for an already-bound Pod.

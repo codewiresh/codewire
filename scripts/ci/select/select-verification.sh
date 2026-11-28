@@ -2137,6 +2137,8 @@ if [ "$event_selected" = false ]; then
       crates/codewire-orchestration/src/worker/setup/post_start.rs|\
       crates/codewire-orchestration/src/worker/setup/post_start_tests.rs|\
       crates/codewire-orchestration/src/workspace_binding/store.rs|\
+      crates/codewire-orchestration/src/workspace_binding/bound_secrets.rs|\
+      crates/codewire-orchestration/src/workspace_binding/bound_secrets/*|\
       crates/codewire-orchestration/src/worker/workspace_binding.rs|\
       crates/codewire-orchestration/src/sandbox/client.rs|\
       crates/codewire-orchestration/src/sandbox/warm_pool.rs|\

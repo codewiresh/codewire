@@ -9,6 +9,7 @@ use prometheus::{IntCounter, IntCounterVec, Opts, register_int_counter, register
 static REQUESTS: OnceLock<IntCounterVec> = OnceLock::new();
 static TOKEN_REVIEWS: OnceLock<IntCounter> = OnceLock::new();
 static UNSERVED: OnceLock<IntCounter> = OnceLock::new();
+static BOUND_SECRETS_REFUSED: OnceLock<IntCounterVec> = OnceLock::new();
 
 /// The closed set of `WorkspaceBindingService` methods.
 pub(super) const METHODS: [&str; 8] = [
@@ -77,5 +78,24 @@ pub(super) fn observe_front_door_hosts_unserved() {
             )
             .expect("workspace binding unserved metric registration must be unique")
         })
+        .inc();
+}
+
+/// First binds refused for their selected bound secrets (#4003), by the
+/// refusal's code: `bound_host_reserved`, `bound_host_conflict` or
+/// `too_many_bound_hosts`.
+pub(super) fn observe_bound_secrets_refused(code: &'static str) {
+    BOUND_SECRETS_REFUSED
+        .get_or_init(|| {
+            register_int_counter_vec!(
+                Opts::new(
+                    "codewire_workspace_binding_bound_secrets_refused_total",
+                    "First binds refused because the hosts of their selected bound secrets don't hold together.",
+                ),
+                &["code"]
+            )
+            .expect("workspace binding bound-secret refusal metric registration must be unique")
+        })
+        .with_label_values(&[code])
         .inc();
 }

@@ -54,7 +54,8 @@ pub fn reported<'a>(
 
 /// The names `intercepts` binds, as stored and compared: built-in names only.
 /// A host a binding names (`bound`, #5043; host-bound secrets, #4003) is not
-/// one of them, and isn't checked against the front door's report yet.
+/// one of them: a host-bound secret's hosts need the report's
+/// `bound_routes`, and the `bound` kind's aren't checked yet.
 pub fn needed(intercepts: &[Intercept]) -> BTreeSet<String> {
     intercepts
         .iter()
@@ -82,32 +83,54 @@ pub fn missing(needed: &BTreeSet<String>, reported: &BTreeSet<String>) -> Vec<St
         .collect()
 }
 
-/// Replaces `pod_uid`'s reported set.
+/// What one admission reported of the Pod's front door: the names it has a
+/// route for, and whether it serves bound-secret routes (#4003), the hosts a
+/// secret's binding names, which no fixed table holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FrontDoorReport {
+    pub hosts: BTreeSet<String>,
+    pub bound_routes: bool,
+}
+
+/// Replaces `pod_uid`'s reported set and capability.
 pub async fn record(
     pool: &PgPool,
     pod_uid: &str,
-    hosts: &BTreeSet<String>,
+    report: &FrontDoorReport,
 ) -> Result<(), sqlx::Error> {
-    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    let hosts: Vec<&str> = report.hosts.iter().map(String::as_str).collect();
     sqlx::query(
-        "INSERT INTO sandbox_pod_front_door_hosts (pod_uid, hosts) VALUES ($1, $2) \
-         ON CONFLICT (pod_uid) DO UPDATE SET hosts = EXCLUDED.hosts, reported_at = now()",
+        "INSERT INTO sandbox_pod_front_door_hosts (pod_uid, hosts, bound_routes) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (pod_uid) DO UPDATE SET hosts = EXCLUDED.hosts, \
+             bound_routes = EXCLUDED.bound_routes, reported_at = now()",
     )
     .bind(pod_uid)
     .bind(&hosts)
+    .bind(report.bound_routes)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// `pod_uid`'s reported set, or `None` before any admission reported one.
-pub async fn read(pool: &PgPool, pod_uid: &str) -> Result<Option<BTreeSet<String>>, sqlx::Error> {
-    let hosts: Option<Vec<String>> =
-        sqlx::query_scalar("SELECT hosts FROM sandbox_pod_front_door_hosts WHERE pod_uid = $1")
-            .bind(pod_uid)
-            .fetch_optional(pool)
-            .await?;
-    Ok(hosts.map(|hosts| hosts.into_iter().collect()))
+#[derive(sqlx::FromRow)]
+struct ReportRow {
+    hosts: Vec<String>,
+    bound_routes: bool,
+}
+
+/// `pod_uid`'s latest report, or `None` before any admission reported one.
+pub async fn read(pool: &PgPool, pod_uid: &str) -> Result<Option<FrontDoorReport>, sqlx::Error> {
+    let row: Option<ReportRow> = sqlx::query_as(
+        "SELECT hosts, bound_routes FROM sandbox_pod_front_door_hosts WHERE pod_uid = $1",
+    )
+    .bind(pod_uid)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| FrontDoorReport {
+        hosts: row.hosts.into_iter().collect(),
+        bound_routes: row.bound_routes,
+    }))
 }
 
 /// Keeps the names `pod_uid`'s first bind was refused for, on its reported
@@ -135,6 +158,47 @@ pub async fn unserved(pool: &PgPool, pod_uid: &str) -> Result<Option<Vec<String>
             .await?
             .flatten(),
     )
+}
+
+/// Keeps why `pod_uid`'s first bind was refused for its bound secrets
+/// (#4003): `code` and its sentence, on its reported row, which the refusal
+/// always follows. An admission never clears it.
+pub async fn record_refusal(
+    pool: &PgPool,
+    pod_uid: &str,
+    code: &str,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE sandbox_pod_front_door_hosts SET refusal_code = $2, refusal_reason = $3 \
+          WHERE pod_uid = $1",
+    )
+    .bind(pod_uid)
+    .bind(code)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// A first-bind refusal for bound secrets, as [`record_refusal`] kept it.
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct RecordedRefusal {
+    pub code: String,
+    pub reason: String,
+}
+
+/// The code and sentence `pod_uid`'s first bind was refused with for its
+/// bound secrets, or `None` while it wasn't.
+pub async fn refusal(pool: &PgPool, pod_uid: &str) -> Result<Option<RecordedRefusal>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT refusal_code AS code, refusal_reason AS reason \
+           FROM sandbox_pod_front_door_hosts \
+          WHERE pod_uid = $1 AND refusal_code IS NOT NULL AND refusal_reason IS NOT NULL",
+    )
+    .bind(pod_uid)
+    .fetch_optional(pool)
+    .await
 }
 
 /// One sweep: the database's time, then the complete list, then the delete

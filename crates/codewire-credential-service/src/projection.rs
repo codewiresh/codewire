@@ -155,6 +155,8 @@ pub(crate) struct Capture {
     inventories: Vec<(String, Vec<KeyRow>)>,
     winners: BTreeMap<String, Winner>,
     deks: BTreeMap<String, DekRow>,
+    /// What the plain winners were checked against.
+    first_bind: bound::FirstBind,
 }
 
 fn selected_winners(
@@ -263,21 +265,46 @@ async fn capture<'a>(
     if current_scope != *scope || current_metadata != *expected_metadata {
         return Err(Error::Denied);
     }
-    let captured = capture_in(&mut tx, selection).await?;
+    // The Pod's first-bind record, frozen for its life (#4003): a secret
+    // plain now is projected raw only when it was plain then, and keeps the
+    // recorded placeholder when it was bound.
+    let recorded: Option<String> = sqlx::query_scalar(FIRST_BIND_QUERY)
+        .bind(&scope.pod_uid)
+        .bind(&scope.environment_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| Error::Unavailable)?
+        .ok_or(Error::Denied)?;
+    let first_bind = bound::FirstBind::hosted(&scope.environment_id, recorded.as_deref())?;
+    let captured = capture_with(&mut tx, selection, first_bind).await?;
     Ok((tx, captured))
 }
+
+/// The live binding's first-bind record of its bound secrets, as text; the
+/// broker's login reads this one column of the binding beyond the scope's.
+const FIRST_BIND_QUERY: &str = "SELECT bound_secrets::text FROM public.sandbox_workspace_bindings \
+     WHERE pod_uid=$1 AND environment_id=$2 AND released_at IS NULL";
 
 /// Capture the exact selected tenant-secret metadata while the caller retains
 /// its own authority transaction. The caller must establish and retain its
 /// identity/owner/source locks before this function; these advisory locks then
 /// serialize the same tenant-secret scopes as their writers.
+#[cfg(feature = "enrollment")]
 pub(crate) async fn capture_in(
     tx: &mut Transaction<'_, Postgres>,
     selection: &PlatformProjectionSelection,
 ) -> Result<Capture, Error> {
+    capture_with(tx, selection, bound::FirstBind::NotHosted).await
+}
+
+async fn capture_with(
+    tx: &mut Transaction<'_, Postgres>,
+    selection: &PlatformProjectionSelection,
+    first_bind: bound::FirstBind,
+) -> Result<Capture, Error> {
     let inventories = capture_inventories_in(tx, selection).await?;
     let winner_paths = selected_winners(&inventories, selection)?;
-    capture_winners_in(tx, inventories, winner_paths).await
+    capture_winners_in(tx, inventories, winner_paths, first_bind).await
 }
 
 async fn capture_inventories_in(
@@ -322,11 +349,13 @@ async fn capture_winners_in(
     tx: &mut Transaction<'_, Postgres>,
     inventories: Vec<(String, Vec<KeyRow>)>,
     winner_paths: BTreeMap<String, String>,
+    first_bind: bound::FirstBind,
 ) -> Result<Capture, Error> {
     let mut captured = Capture {
         inventories,
         winners: BTreeMap::new(),
         deks: BTreeMap::new(),
+        first_bind,
     };
     let mut encoded_len = 4_usize;
     for (key, path) in winner_paths {
@@ -362,6 +391,20 @@ async fn capture_winners_in(
                 envelope.binding_id,
                 envelope.binding_generation,
             )?;
+            encoded_len = encoded_len
+                .checked_add(secret.encoded_len())
+                .filter(|len| *len <= MAX_ENVIRONMENT_PROJECTION_BYTES)
+                .ok_or(Error::Denied)?;
+            captured.winners.insert(key, Winner::Bound(secret));
+            continue;
+        }
+        // Plain now: a secret the Pod recorded bound keeps its recorded
+        // placeholder, and its row is never decrypted.
+        if let Some(secret) =
+            captured
+                .first_bind
+                .plain_or_refuse(&path, &key, envelope.binding_id)?
+        {
             encoded_len = encoded_len
                 .checked_add(secret.encoded_len())
                 .filter(|len| *len <= MAX_ENVIRONMENT_PROJECTION_BYTES)

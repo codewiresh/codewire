@@ -175,7 +175,7 @@ impl Fixture {
                 // As the deployed role: the creator's account must be enabled (#6406).
                 "SELECT (id,enabled) ON public.users",
                 "SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_name,pod_uid,bound_at) ON public.sandbox_environment_backend",
-                "SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at) ON public.sandbox_workspace_bindings",
+                "SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at,bound_secrets) ON public.sandbox_workspace_bindings",
                 "SELECT (id,user_id,organization_id) ON public.platform_access_profiles",
                 "SELECT (profile_id,revision) ON public.platform_access_profile_revisions",
                 "SELECT (profile_id,revision,capability_slot,credential_id) ON public.platform_access_profile_entries",

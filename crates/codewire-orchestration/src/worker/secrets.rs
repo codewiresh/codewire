@@ -119,6 +119,12 @@ impl SecretStore {
         }
     }
 
+    /// The deployment's own names this store refuses a binding for, which a
+    /// Pod's first bind checks again (#4003).
+    pub fn reserved_hosts(&self) -> &ReservedHosts {
+        &self.reserved
+    }
+
     pub async fn verify_readiness(&self) -> anyhow::Result<()> {
         // Initialization already verifies an existing canary; only one it
         // just created still needs its first verification.

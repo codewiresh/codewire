@@ -68,6 +68,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
     let result = async {
         config::assert_restricted_login(&pool).await?;
         binding_columns_granted(&pool).await?;
+        first_bind_column_granted(&pool).await?;
         let large = git::large::Config::from_env()
             .map_err(|_| RuntimeError::Configuration("Kind large Git fixture"))?;
         let git = git::Fixture::create_with_large(&config.runtime_directory, large).await

@@ -3,11 +3,13 @@
 //! place of its value. A bound row is never decrypted: its ciphertext isn't
 //! even selected. Without the environment's application-secret key, or for a
 //! set whose stored ID has no slot, it is refused by name and never projected
-//! raw.
+//! raw. A secret plain now is projected raw only when the Pod's first bind
+//! recorded it plain ([`FirstBind`]); one it recorded bound projects the
+//! placeholder the record derives, so a running Pod keeps it.
 
 use codewire_access::{
-    ApplicationSecretKey, EnvironmentId, PlaceholderPrefix, ReservedHosts, SecretPlaceholder,
-    SecretSlot, StoredBinding,
+    ApplicationSecretKey, EnvironmentId, FirstBindSecret, PlaceholderPrefix, ReservedHosts,
+    SecretPlaceholder, SecretSlot, StoredBinding,
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -41,12 +43,17 @@ pub(super) enum BoundSecretRefused {
     NoApplicationSecretKey { key: String },
     #[error("bound secret {key} can't be projected: its set's stored ID has no slot")]
     NoSlot { key: String },
+    /// Plain now and bound once, for a Pod whose first bind recorded nothing.
+    #[error("secret {key} can't be projected raw: this Pod's first bind recorded no bound secrets")]
+    FirstBindUnrecorded { key: String },
 }
 
 impl BoundSecretRefused {
     fn key(&self) -> &str {
         match self {
-            Self::NoApplicationSecretKey { key } | Self::NoSlot { key } => key,
+            Self::NoApplicationSecretKey { key }
+            | Self::NoSlot { key }
+            | Self::FirstBindUnrecorded { key } => key,
         }
     }
 
@@ -54,7 +61,19 @@ impl BoundSecretRefused {
         match self {
             Self::NoApplicationSecretKey { .. } => "no_application_secret_key",
             Self::NoSlot { .. } => "no_slot",
+            Self::FirstBindUnrecorded { .. } => "first_bind_unrecorded",
         }
+    }
+
+    /// Logs the refusal by key and reason, and refuses the projection.
+    fn refuse(self, environment: &str) -> Error {
+        tracing::warn!(
+            environment_id = environment,
+            key = self.key(),
+            reason = self.reason(),
+            "projection refused a bound secret by name"
+        );
+        Error::Denied
     }
 }
 
@@ -81,6 +100,24 @@ impl BoundSecret {
             binding_id: binding_id.ok_or(Error::Denied)?,
             generation: u64::try_from(generation).map_err(|_| Error::Denied)?,
             prefix: parsed.prefix().cloned(),
+        })
+    }
+
+    /// The secret as the Pod's first bind recorded it, for a secret plain
+    /// now: its placeholder from the record's binding, never its value. A
+    /// record that doesn't read back is a corrupt binding and refuses.
+    fn from_record(record: &FirstBindSecret) -> Result<Self, Error> {
+        Ok(Self {
+            key: record.key.clone(),
+            slot: SecretSlot::for_platform_path(&record.path, &record.key).ok(),
+            binding_id: Uuid::parse_str(&record.binding_id).map_err(|_| Error::Denied)?,
+            generation: record.binding_generation,
+            prefix: record
+                .prefix
+                .as_deref()
+                .map(PlaceholderPrefix::parse)
+                .transpose()
+                .map_err(|_| Error::Denied)?,
         })
     }
 
@@ -145,15 +182,99 @@ pub(super) fn placeholders_or_refuse<'a>(
     key: Option<&ApplicationSecretKey>,
     environment: &EnvironmentId,
 ) -> Result<Vec<ProjectedValue>, Error> {
-    placeholders(bound, key, environment).map_err(|refused| {
-        tracing::warn!(
-            environment_id = environment.as_str(),
-            key = refused.key(),
-            reason = refused.reason(),
-            "projection refused a bound secret by name"
-        );
-        Error::Denied
-    })
+    placeholders(bound, key, environment).map_err(|refused| refused.refuse(environment.as_str()))
+}
+
+/// What the projection's Pod recorded of its bound secrets at its first bind
+/// (#4003, migration 0070), which every plain winner is checked against.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FirstBind {
+    /// A hosted Pod of `environment_id`: its record, or `None` for one whose
+    /// first bind recorded nothing, bound before the record or by an
+    /// orchestration older than it.
+    Hosted {
+        environment_id: String,
+        recorded: Option<Vec<FirstBindSecret>>,
+    },
+    /// No hosted Pod: a local VM's delegated projection, whose boot record
+    /// is the local part of #4003 and isn't read yet.
+    #[cfg(any(feature = "enrollment", test))]
+    NotHosted,
+}
+
+impl FirstBind {
+    /// `stored`, the Pod binding's `bound_secrets` as text, read back; a
+    /// record that doesn't read back is a corrupt binding and refuses.
+    pub(super) fn hosted(environment_id: &str, stored: Option<&str>) -> Result<Self, Error> {
+        let recorded = stored
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| Error::Denied)?;
+        Ok(Self::Hosted {
+            environment_id: environment_id.to_owned(),
+            recorded,
+        })
+    }
+
+    /// What the plain secret stored at `path` under `key`, whose
+    /// `binding_id` is set once it has ever been bound, projects: its value
+    /// when the Pod recorded it plain, and the placeholder the record derives
+    /// when the Pod recorded it bound. With no record, only a secret that was
+    /// never bound projects its value; one that was has nothing to derive a
+    /// placeholder from and is refused.
+    pub(super) fn plain(
+        &self,
+        path: &str,
+        key: &str,
+        binding_id: Option<Uuid>,
+    ) -> Result<Plain<'_>, BoundSecretRefused> {
+        match self {
+            Self::Hosted {
+                recorded: Some(recorded),
+                ..
+            } => Ok(recorded
+                .iter()
+                .find(|secret| secret.is(path, key))
+                .map_or(Plain::Value, Plain::Recorded)),
+            Self::Hosted { recorded: None, .. } if binding_id.is_some() => {
+                Err(BoundSecretRefused::FirstBindUnrecorded {
+                    key: key.to_owned(),
+                })
+            }
+            Self::Hosted { .. } => Ok(Plain::Value),
+            #[cfg(any(feature = "enrollment", test))]
+            Self::NotHosted => Ok(Plain::Value),
+        }
+    }
+
+    /// [`Self::plain`] for a projection: a recorded secret is read back from
+    /// its record, and a refusal is logged by key and reason and refuses the
+    /// whole projection.
+    pub(super) fn plain_or_refuse(
+        &self,
+        path: &str,
+        key: &str,
+        binding_id: Option<Uuid>,
+    ) -> Result<Option<BoundSecret>, Error> {
+        match self.plain(path, key, binding_id) {
+            Ok(Plain::Value) => Ok(None),
+            Ok(Plain::Recorded(record)) => BoundSecret::from_record(record).map(Some),
+            Err(refused) => Err(refused.refuse(match self {
+                Self::Hosted { environment_id, .. } => environment_id.as_str(),
+                #[cfg(any(feature = "enrollment", test))]
+                Self::NotHosted => "",
+            })),
+        }
+    }
+}
+
+/// What a plain winner projects, by what the Pod's first bind recorded.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Plain<'a> {
+    /// Its value: plain then, or no hosted Pod's record applies.
+    Value,
+    /// The placeholder this record derives: bound then.
+    Recorded(&'a FirstBindSecret),
 }
 
 #[cfg(test)]
@@ -231,5 +352,60 @@ mod tests {
         ] {
             assert!(BoundSecret::from_row(&path, "KEY", binding, id, generation).is_err());
         }
+    }
+
+    fn record(path: &str) -> FirstBindSecret {
+        FirstBindSecret {
+            path: path.into(),
+            key: "FANCY_TOKEN".into(),
+            binding_id: Uuid::from_u128(7).to_string(),
+            binding_generation: 2,
+            prefix: Some("ft_".into()),
+            hosts: vec!["api.fancy.example".into()],
+        }
+    }
+
+    /// A plain winner the Pod recorded bound projects the placeholder its
+    /// record derives, the same one the bound row gave; one it recorded
+    /// plain projects its value. With no record, only a secret never bound
+    /// projects its value.
+    #[test]
+    fn a_plain_winner_follows_what_the_first_bind_recorded() {
+        let path = format!("/projects/{ORG}/{PROJECT}");
+        let hosted = |recorded| FirstBind::Hosted {
+            environment_id: environment().as_str().to_owned(),
+            recorded,
+        };
+        let recorded = hosted(Some(vec![record(&path)]));
+        let Ok(Plain::Recorded(found)) = recorded.plain(&path, "FANCY_TOKEN", None) else {
+            panic!("a secret recorded bound projects its record");
+        };
+        let from_record = BoundSecret::from_record(found).unwrap();
+        assert_eq!(from_record, bound(&path));
+        assert_eq!(
+            placeholders([&from_record], Some(&key()), &environment()),
+            placeholders([&bound(&path)], Some(&key()), &environment())
+        );
+        assert_eq!(
+            recorded.plain(&path, "OTHER_TOKEN", Some(Uuid::from_u128(8))),
+            Ok(Plain::Value)
+        );
+        assert_eq!(
+            hosted(None).plain(&path, "FANCY_TOKEN", Some(Uuid::from_u128(7))),
+            Err(BoundSecretRefused::FirstBindUnrecorded {
+                key: "FANCY_TOKEN".into()
+            })
+        );
+        assert_eq!(
+            hosted(None).plain(&path, "FANCY_TOKEN", None),
+            Ok(Plain::Value)
+        );
+        assert_eq!(
+            FirstBind::NotHosted.plain(&path, "FANCY_TOKEN", Some(Uuid::from_u128(7))),
+            Ok(Plain::Value)
+        );
+        let mut corrupt = record(&path);
+        corrupt.binding_id = "not-a-uuid".into();
+        assert!(BoundSecret::from_record(&corrupt).is_err());
     }
 }

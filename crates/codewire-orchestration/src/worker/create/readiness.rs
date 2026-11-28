@@ -76,8 +76,9 @@ pub(in crate::worker) async fn fail_create_for_container_start(
 }
 
 /// End a create that never ran, when its readiness wait ended for a cause
-/// that retrying can't fix: a container that can't start, or a front door
-/// that can't serve its selection. `Ok(true)` when it ended it.
+/// that retrying can't fix: a container that can't start, a front door that
+/// can't serve its selection, or bound secrets its first bind refused.
+/// `Ok(true)` when it ended it.
 pub(in crate::worker) async fn end_failed_create(
     ctx: &WorkerContext,
     svc: &Service<PgLifecycleStore>,
@@ -89,6 +90,9 @@ pub(in crate::worker) async fn end_failed_create(
         fail_create_for_container_start(ctx, svc, authority, env_id, failure).await?;
     } else if let Some(refusal) = front_door_hosts::front_door_hosts_unserved(error) {
         front_door_hosts::fail_create_for_front_door_hosts(ctx, svc, authority, env_id, refusal)
+            .await?;
+    } else if let Some(refusal) = front_door_hosts::bound_secrets_refused(error) {
+        front_door_hosts::fail_create_for_bound_secrets(ctx, svc, authority, env_id, refusal)
             .await?;
     } else {
         return Ok(false);

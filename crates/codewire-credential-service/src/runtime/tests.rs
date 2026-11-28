@@ -1041,3 +1041,49 @@ async fn startup_requires_select_on_the_three_binding_columns() -> Result<()> {
     .await;
     database.finish(result).await
 }
+
+/// Startup requires SELECT on the binding's first-bind record of bound
+/// secrets (#4003): a login without it is refused, so a rollout stalls rather
+/// than failing every hosted projection; one with it starts.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn startup_requires_select_on_the_first_bind_record() -> Result<()> {
+    use crate::platform_test_support::{TestDatabase, quote_ident};
+    let database = TestDatabase::create().await?;
+    let result = async {
+        let (pool, role) = database.broker_pool().await?;
+        let role = quote_ident(&role);
+        let refused = |result: std::result::Result<(), super::RuntimeError>| {
+            matches!(result, Err(super::RuntimeError::Configuration(message))
+                if message.contains("sandbox_workspace_bindings.bound_secrets"))
+        };
+        ensure!(
+            refused(super::first_bind_column_granted(&pool).await),
+            "a login without the column is refused"
+        );
+        sqlx::query(&format!(
+            "GRANT SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,\
+             projection_selection_sha256,credential_scope,released_at) \
+             ON public.sandbox_workspace_bindings TO {role}"
+        ))
+        .execute(&database.pool)
+        .await?;
+        ensure!(
+            refused(super::first_bind_column_granted(&pool).await),
+            "the scope's columns alone are refused"
+        );
+        sqlx::query(&format!(
+            "GRANT SELECT (bound_secrets) ON public.sandbox_workspace_bindings TO {role}"
+        ))
+        .execute(&database.pool)
+        .await?;
+        ensure!(
+            super::first_bind_column_granted(&pool).await.is_ok(),
+            "a login with the column starts"
+        );
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    database.finish(result).await
+}

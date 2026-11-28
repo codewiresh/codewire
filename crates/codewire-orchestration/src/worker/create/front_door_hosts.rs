@@ -1,7 +1,8 @@
 //! A create's or a start's readiness wait ends at once, naming the hosts,
 //! when its Pod's first bind was refused because the Pod's front door doesn't
-//! serve every host the environment's selection needs (#6290). More waiting
-//! can't make that door serve them, and the bind is never let through with
+//! serve every host the environment's selection needs (#6290), or because the
+//! hosts of its selected bound secrets don't hold together (#4003). More
+//! waiting can't change either, and the bind is never let through with
 //! interception quietly off.
 
 use super::*;
@@ -21,9 +22,18 @@ pub struct FrontDoorHostsUnserved {
     pub hosts: Vec<String>,
 }
 
+/// The Pod's first bind was refused for its selected bound secrets (#4003):
+/// `end` carries the code, and the sentence names the hosts and the keys.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{reason}")]
+pub struct BoundSecretsRefused {
+    pub end: crate::lifecycle::FailedCreate,
+    pub reason: String,
+}
+
 /// The runtime's readiness wait for `env_id`, which create and start run,
-/// ended early with [`FrontDoorHostsUnserved`] once the environment's current
-/// Pod has a recorded first-bind refusal.
+/// ended early with [`FrontDoorHostsUnserved`] or [`BoundSecretsRefused`] once
+/// the environment's current Pod has a recorded first-bind refusal.
 pub(in crate::worker) async fn wait_ready(
     ctx: &WorkerContext,
     placement: &Placement,
@@ -33,7 +43,7 @@ pub(in crate::worker) async fn wait_ready(
     let runtime = ctx.require_runtime()?;
     tokio::select! {
         result = runtime.wait_ready(placement, env_id, timeout) => result,
-        refusal = refused(runtime, &ctx.pool, placement, env_id) => Err(refusal.into()),
+        refusal = refused(runtime, &ctx.pool, placement, env_id) => Err(refusal),
     }
 }
 
@@ -45,15 +55,80 @@ async fn refused(
     pool: &PgPool,
     placement: &Placement,
     env_id: &str,
-) -> FrontDoorHostsUnserved {
+) -> anyhow::Error {
     loop {
-        if let Ok(Some(pod)) = runtime.current_member(placement, env_id).await
-            && let Ok(Some(hosts)) = crate::egress::front_door_hosts::unserved(pool, &pod.uid).await
-        {
-            return FrontDoorHostsUnserved { hosts };
+        if let Ok(Some(pod)) = runtime.current_member(placement, env_id).await {
+            if let Ok(Some(hosts)) = crate::egress::front_door_hosts::unserved(pool, &pod.uid).await
+            {
+                return FrontDoorHostsUnserved { hosts }.into();
+            }
+            if let Ok(Some(refusal)) =
+                crate::egress::front_door_hosts::refusal(pool, &pod.uid).await
+                && let Some(refused) = bound_secrets_refused_from(refusal)
+            {
+                return refused.into();
+            }
         }
         tokio::time::sleep(UNSERVED_POLL).await;
     }
+}
+
+/// The refusal a Pod's row keeps, by its code; `None` for a code this
+/// build doesn't know, which the wait then doesn't end for.
+fn bound_secrets_refused_from(
+    refusal: crate::egress::front_door_hosts::RecordedRefusal,
+) -> Option<BoundSecretsRefused> {
+    use crate::lifecycle::{
+        BOUND_HOST_CONFLICT_ERROR_CODE, BOUND_HOST_RESERVED_ERROR_CODE, FailedCreate,
+        TOO_MANY_BOUND_HOSTS_ERROR_CODE,
+    };
+    let end = match refusal.code.as_str() {
+        BOUND_HOST_RESERVED_ERROR_CODE => FailedCreate::BoundHostReserved,
+        BOUND_HOST_CONFLICT_ERROR_CODE => FailedCreate::BoundHostConflict,
+        TOO_MANY_BOUND_HOSTS_ERROR_CODE => FailedCreate::TooManyBoundHosts,
+        _ => return None,
+    };
+    Some(BoundSecretsRefused {
+        end,
+        reason: refusal.reason,
+    })
+}
+
+/// The bound-secret refusal, when a readiness wait ended for it.
+pub(in crate::worker) fn bound_secrets_refused(
+    error: &anyhow::Error,
+) -> Option<&BoundSecretsRefused> {
+    error.downcast_ref::<BoundSecretsRefused>().or_else(|| {
+        error
+            .downcast_ref::<ReadinessWaitFailed>()
+            .and_then(|failed| failed.0.downcast_ref::<BoundSecretsRefused>())
+    })
+}
+
+/// End a create whose Pod's first bind was refused for its bound secrets, as
+/// [`fail_create_for_front_door_hosts`] ends one for its front door.
+pub(in crate::worker) async fn fail_create_for_bound_secrets(
+    ctx: &WorkerContext,
+    svc: &Service<PgLifecycleStore>,
+    authority: &ActivityAuthority,
+    env_id: &str,
+    refusal: &BoundSecretsRefused,
+) -> anyhow::Result<()> {
+    authority.ensure().await?;
+    if !svc
+        .fail_create_for_bound_secrets(env_id, refusal.end, &refusal.reason, CREATE_MUTATION_STATES)
+        .await?
+    {
+        return Ok(());
+    }
+    tracing::warn!(
+        environment_id = env_id,
+        reason = refusal.end.code(),
+        "create ended: the Pod's selected bound secrets were refused at its first bind"
+    );
+    ctx.temporal_trigger
+        .trigger_environment(env_id, "reconcile")
+        .await
 }
 
 /// The refusal, when a readiness wait ended for it.
@@ -112,5 +187,37 @@ mod tests {
         let wrapped: anyhow::Error = ReadinessWaitFailed(refusal.clone().into()).into();
         assert_eq!(front_door_hosts_unserved(&wrapped), Some(&refusal));
         assert_eq!(front_door_hosts_unserved(&anyhow::anyhow!("timeout")), None);
+    }
+
+    /// A Pod's kept bound-secret refusal ends the wait with its code and its
+    /// sentence; a code this build doesn't know doesn't end it.
+    #[test]
+    fn a_kept_bound_secret_refusal_ends_the_wait_with_its_code() {
+        use crate::egress::front_door_hosts::RecordedRefusal;
+        use crate::lifecycle::FailedCreate;
+        for (code, end) in [
+            ("bound_host_reserved", FailedCreate::BoundHostReserved),
+            ("bound_host_conflict", FailedCreate::BoundHostConflict),
+            ("too_many_bound_hosts", FailedCreate::TooManyBoundHosts),
+        ] {
+            let refused = bound_secrets_refused_from(RecordedRefusal {
+                code: code.into(),
+                reason: "a sentence naming hosts and keys".into(),
+            })
+            .unwrap();
+            assert_eq!(refused.end, end);
+            assert_eq!(refused.end.code(), code);
+            assert_eq!(refused.to_string(), "a sentence naming hosts and keys");
+            let wrapped: anyhow::Error = ReadinessWaitFailed(refused.clone().into()).into();
+            assert_eq!(bound_secrets_refused(&wrapped), Some(&refused));
+        }
+        assert_eq!(
+            bound_secrets_refused_from(RecordedRefusal {
+                code: "front_door_hosts_unserved".into(),
+                reason: "a sentence".into(),
+            }),
+            None
+        );
+        assert_eq!(bound_secrets_refused(&anyhow::anyhow!("timeout")), None);
     }
 }

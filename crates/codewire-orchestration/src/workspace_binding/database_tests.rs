@@ -172,18 +172,18 @@ async fn db_interception_is_recorded_once_by_the_first_bind() -> Result<()> {
         let pod_name = format!("sandbox-{POD}");
         let live = || store.live_binding(POD, NAMESPACE, &pod_name);
         ensure!(live().await?.map(|binding| binding.interception) == Some(None));
-        ensure!(store.record_interception(POD, true).await?);
-        ensure!(store.record_interception(POD, false).await?);
+        ensure!(store.record_interception(POD, true, &[]).await?);
+        ensure!(store.record_interception(POD, false, &[]).await?);
         ensure!(live().await?.map(|binding| binding.interception) == Some(Some(true)));
 
         release(&db, POD).await?;
         bind(&db, NEXT_POD, 3).await?;
-        ensure!(!store.record_interception(NEXT_POD, false).await?);
-        ensure!(!store.record_interception(NEXT_POD, true).await?);
-        ensure!(store.record_interception(POD, false).await.is_err());
+        ensure!(!store.record_interception(NEXT_POD, false, &[]).await?);
+        ensure!(!store.record_interception(NEXT_POD, true, &[]).await?);
+        ensure!(store.record_interception(POD, false, &[]).await.is_err());
         ensure!(
             store
-                .record_interception("unknown-pod", false)
+                .record_interception("unknown-pod", false, &[])
                 .await
                 .is_err()
         );

@@ -25,6 +25,7 @@ mod access;
 pub(crate) mod authorize;
 #[cfg(test)]
 mod authorize_reference;
+mod bound_secrets;
 mod disco_admission;
 pub mod limits;
 mod metrics;

@@ -252,8 +252,17 @@ impl BindingStore for TwoPodStore {
         &self,
         _pod_uid: &str,
         decided: bool,
+        _bound_secrets: &[codewire_access::FirstBindSecret],
     ) -> Result<bool, BindingStoreUnavailable> {
         Ok(decided)
+    }
+
+    /// Neither binding's selection holds a bound secret.
+    async fn first_bind_secrets(
+        &self,
+        _binding: &LiveBinding,
+    ) -> Result<Vec<codewire_access::FirstBindSecret>, BindingStoreUnavailable> {
+        Ok(Vec::new())
     }
 
     async fn record_trust(

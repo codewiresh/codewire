@@ -11,7 +11,7 @@ comes with the CLI and dashboard designs. The format is in
 
 ## Where it stands
 
-Updated 2026-11-24. Written first; every step is not yet observed.
+Updated 2026-11-25. Written first; every step is not yet observed.
 
 | ID | Linux local VM | macOS local VM | Dev | Production |
 | --- | --- | --- | --- | --- |
@@ -91,7 +91,11 @@ Updated 2026-11-24. Written first; every step is not yet observed.
   - `cw secrets --cloud --project=walk list` shows `FIXTURE` beside
     `FANCY_TOKEN`, and `plain` beside `PLAIN_TOKEN`;
   - binding a host the deployment serves itself, such as its registry, is
-    refused with `bound_host_reserved`.
+    refused with `bound_host_reserved`;
+  - on a hosted Sandbox whose front door doesn't say it serves bound-secret
+    routes, as every `cw-egress` until the swap ships, `cw create` ends with
+    `front_door_hosts_unserved` and a sentence naming `FIXTURE`, and the
+    environment is removed; nothing is bound and no value is projected.
 - **Gotchas:** `OTHER` must be a host the walk reads, so its record proves
   what was sent. A request to `OTHER` isn't intercepted, so Codewire logs
   nothing for it.
@@ -160,12 +164,25 @@ Updated 2026-11-24. Written first; every step is not yet observed.
 
 ## `secret-host-conflict`: two values never name one host
 
+- **States to exercise:** two bound secrets on `FIXTURE`; a bound secret on
+  a host a selected credential binds; seventeen bound hosts; a host the
+  deployment adds to its own names after the secret was bound
+  (`CODEWIRE_BOUND_HOST_RESERVED_NAMES` on Dev).
 - **Driving it:** bind a second secret to `FIXTURE`, then
   `cw create --secrets walk walk-conflict`; then select both through a
-  source change on a running environment.
-- **Proof:** the create is refused with `bound_host_conflict`, naming
-  `FIXTURE` and both keys, and nothing is created; the source change is
-  refused the same way and the running environment is unchanged.
+  source change on a running environment. Repeat the create for each other
+  state.
+- **Proof:**
+  - on a hosted Sandbox, the create ends with `bound_host_conflict` and a
+    sentence naming `FIXTURE` and both keys (a selected credential is named
+    as one), and the environment is removed; a `cw start` of one that has
+    run ends at once with the same sentence and keeps its files;
+  - seventeen hosts end it with `too_many_bound_hosts`, naming the keys;
+    the newly reserved host with `bound_host_reserved`, naming the host and
+    the key;
+  - in a local VM the boot is refused with the same codes;
+  - the source change is refused the same way and the running environment
+    is unchanged.
 - **Observed:** not yet observed.
 
 ## `secret-preset`: a preset fills in the right fields

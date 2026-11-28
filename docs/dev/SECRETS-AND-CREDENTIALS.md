@@ -2813,10 +2813,12 @@ platform itself serves: the Sandbox gateway's names (such as
 registries, its forge, and every other name the deployment's configuration
 gives its own services. They are one list, built from that configuration
 and from `codewire_access::FRONT_DOOR_HOSTS`, in the module that validates
-bindings for both this and the `bound` credential kind. The credential
-service checks it when a binding is set and again at bind, so a name the
-deployment adds later refuses an existing binding at the next bind
-(`bound_host_reserved`, naming the host), never serving it. Orchestration
+bindings for both this and the `bound` credential kind. The secret store
+checks it when a binding is set and orchestration again at a hosted Pod's
+first bind, so a name the deployment adds later refuses an existing binding
+at the next bind (`bound_host_reserved`, naming the host and the key, which
+ends the waiting create as the other first-bind refusals do), never serving
+it. Orchestration
 builds the list from its own front-end and preview names and the setting
 `CODEWIRE_BOUND_HOST_RESERVED_NAMES` (exact names and `*.suffix` entries),
 which each deployment's configuration fills. A `*.suffix` entry reserves the
@@ -2956,7 +2958,17 @@ The raw value is projected only when the secret is plain now and the
 environment's boot or Pod recorded it plain. A secret that is bound now is
 never projected raw, whatever the environment recorded: until the
 environment selects its source again, a new process gets the placeholder,
-and the front door binds the secret's hosts only from then.
+and the front door binds the secret's hosts only from then. A secret that
+the boot or Pod recorded bound and that is plain now keeps the placeholder
+its record derives (its slot, `binding_id`, generation and prefix, under the
+same application-secret key) until the environment starts again, never its
+value; the front door's lease then finds it plain and refuses it
+(`secret_binding_changed`). Hosted, a Pod whose first bind recorded nothing
+(bound before the record, or by an older orchestration) has nothing to
+derive from, so it projects raw only a secret that was never bound and
+refuses the projection, by name, for one that was. The credential
+broker's login reads the record, `sandbox_workspace_bindings.bound_secrets`,
+and the credential service refuses to start without that grant.
 
 **Hosts and the front door.**
 
@@ -2964,7 +2976,10 @@ and the front door binds the secret's hosts only from then.
   `front_door_hosts(clients)` and the hosts of every bound secret its
   selected sources hold, as of the boot (local) or the first bind (hosted).
   The boot or Pod records, for each bound key, its `binding_id`,
-  `binding_generation` and hosts.
+  `binding_generation` and hosts. Hosted, the Pod's binding keeps them
+  (`bound_secrets`, with the set's path and the key) in the same write as
+  its interception decision, at its first bind whether it is intercepted or
+  not, and never changes them; a refused bind stores neither.
 - **When the set is decided** is the rule above: with the selection, fixed
   for a boot and for a Pod. An added host reaches an environment only at its
   next boot or Pod. Selecting the source again (`cw update --secrets`, a
@@ -2973,11 +2988,14 @@ and the front door binds the secret's hosts only from then.
   `bound_host_conflict`, naming the host and both keys or credentials, when
   two bound secrets, or a bound secret and a selected credential, name the
   same host. It is checked at create, at every rebind, and at every source
-  change that reaches a live environment. As a backstop the front door
+  change that reaches a live environment. Hosted, it is checked at the
+  Pod's first bind, the one bind that reads the selection, and a refused
+  first bind ends the waiting create with the code and a sentence naming
+  the host and both keys, as `front_door_hosts_unserved` does. As a backstop the front door
   refuses a request on a host that two of the epoch's bindings name
   (`credential_conflict`).
 - At most 16 bound-secret hosts per environment, refused over that with
-  `too_many_bound_hosts`. Together with the provider hosts this stays under
+  `too_many_bound_hosts`, naming the keys. Together with the provider hosts this stays under
   the 32 bindings `cw-egress` carries.
 - **The front door must serve them.** A front door that serves bound hosts
   says so in its admission's served-host report (#6290) as a capability,
@@ -3929,10 +3947,15 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   The refused names stay on the Pod's row, and the create or start waiting
   for that Pod ends with them: a create fails with code
   `front_door_hosts_unserved` and one sentence naming only the missing
-  hosts of the creator's own selection. Not covered yet: only the first bind
-  is checked, so a later admission that reports fewer names for an
-  already-intercepted Pod isn't handled (#6421); and a host a binding names
-  itself (#5043, #4003) isn't checked against the report.
+  hosts of the creator's own selection. A host-bound secret's hosts (#4003)
+  are in no table a report could list, so the report also says, as
+  `bound_routes`, whether the front door serves bound-secret routes at all;
+  a first bind whose selection binds a secret's host is refused
+  `front_door_hosts_unserved`, naming that host, unless it does. No
+  `cw-egress` says so until the swap ships. Not covered yet: only the first
+  bind is checked, so a later admission that reports fewer names for an
+  already-intercepted Pod isn't handled (#6421); and a host the `bound`
+  credential kind names (#5043) isn't checked against the report.
 - **Off is today.** With the switch off, every hosted path is exactly as
   before.
 

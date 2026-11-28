@@ -589,6 +589,22 @@ impl<S: LifecycleStore> Service<S> {
             .map_err(|e| anyhow::anyhow!("fail create for front-door hosts from {states:?}: {e:#}"))
     }
 
+    /// Ends a create whose Pod's first bind was refused for its bound secrets
+    /// (#4003), with `end`'s code and the refusal's sentence. Nothing retries
+    /// it: the same selection would be refused again.
+    pub async fn fail_create_for_bound_secrets(
+        &self,
+        env_id: &str,
+        end: FailedCreate,
+        message: &str,
+        states: &[&str],
+    ) -> anyhow::Result<bool> {
+        self.store
+            .fail_create(env_id, end, message, states)
+            .await
+            .map_err(|e| anyhow::anyhow!("fail create for bound secrets from {states:?}: {e:#}"))
+    }
+
     /// Mirrors `Protect`: Ok(true) → a live row was protected.
     pub async fn protect(&self, env_id: &str) -> anyhow::Result<bool> {
         self.store
@@ -770,10 +786,11 @@ pub use stop_reason::StopReason;
 
 mod outcomes;
 pub use outcomes::{
+    BOUND_HOST_CONFLICT_ERROR_CODE, BOUND_HOST_RESERVED_ERROR_CODE,
     CONTAINER_START_FAILED_ERROR_CODE, FRONT_DOOR_HOSTS_UNSERVED_ERROR_CODE, FailedCreate,
     NO_CAPACITY_ERROR_CODE, NoCapacityRefusal, SANDBOX_REPLACING_ERROR_CODE,
     SANDBOX_REPLACING_MESSAGE, SANDBOX_RESTARTED_ERROR_CODE, SANDBOX_STOPPED_ERROR_CODE,
-    SANDBOX_STOPPED_MESSAGE,
+    SANDBOX_STOPPED_MESSAGE, TOO_MANY_BOUND_HOSTS_ERROR_CODE,
 };
 
 #[derive(Clone)]

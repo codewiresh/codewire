@@ -31,8 +31,9 @@ use super::disco_admission::{AdmissionUnavailable, DiscoKeyAdmission, DiscoKeySe
 use super::limits::RequestLimits;
 use super::service::{BindError, WorkspaceBindingState};
 use super::store::{
-    BindDefaults, BindingNotifications, BindingStore, BindingStoreUnavailable, HostKeyRecord,
-    IdentityFileRow, LiveBinding, MeshAttachment, MeshAttachmentReport, MeshIssueOutcome,
+    BindDefaults, BindingNotifications, BindingStore, BindingStoreUnavailable, FrontDoorReport,
+    HostKeyRecord, IdentityFileRow, LiveBinding, MeshAttachment, MeshAttachmentReport,
+    MeshIssueOutcome,
 };
 use super::{app, workspace_binding_router};
 use crate::runtime_transport::{PeerRelayTransport, RuntimeTransportZone, TRANSPORT_ZONE_LABEL};
@@ -480,13 +481,22 @@ pub(super) struct FakeStore {
     interception: Mutex<HashMap<String, bool>>,
     /// Each Pod's interception trust, recorded once (#6200).
     trust: Mutex<HashMap<String, bool>>,
-    /// What the Pod's front door last reported it serves (#6290); `None`
-    /// before any admission reported. By default, every built-in name.
-    front_door_hosts: Mutex<Option<std::collections::BTreeSet<String>>>,
+    /// What the Pod's front door last reported (#6290, #4003); `None`
+    /// before any admission reported. By default, every built-in name and no
+    /// bound-secret routes.
+    front_door_hosts: Mutex<Option<FrontDoorReport>>,
     /// The names a refused first bind recorded for the Pod (#6290).
     unserved: Mutex<Option<Vec<String>>>,
     /// Environments whose suspended mark a wake report cleared (#5529).
     woken: Mutex<Vec<String>>,
+    /// The bound secrets the binding's selection holds (#4003), or a read
+    /// that fails.
+    first_bind_secrets:
+        Mutex<Result<Vec<codewire_access::FirstBindSecret>, BindingStoreUnavailable>>,
+    /// The bound secrets each Pod's first decision stored with it, set once.
+    bound_secrets: Mutex<HashMap<String, Vec<codewire_access::FirstBindSecret>>>,
+    /// The code and sentence a first bind refused for its bound secrets kept.
+    refusal: Mutex<Option<(String, String)>>,
 }
 
 impl FakeStore {
@@ -508,6 +518,9 @@ impl FakeStore {
             front_door_hosts: Mutex::new(Some(every_front_door_name())),
             unserved: Mutex::new(None),
             woken: Mutex::new(Vec::new()),
+            first_bind_secrets: Mutex::new(Ok(Vec::new())),
+            bound_secrets: Mutex::new(HashMap::new()),
+            refusal: Mutex::new(None),
         })
     }
 
@@ -530,8 +543,8 @@ impl FakeStore {
 }
 
 /// Every name a current cw-egress's front door reports: what the widest
-/// selection binds.
-fn every_front_door_name() -> std::collections::BTreeSet<String> {
+/// selection binds, with no bound-secret routes.
+fn every_front_door_name() -> FrontDoorReport {
     let widest = codewire_access::ManagedCredentialClients::from_profile_slots([
         "codex",
         "openai",
@@ -541,9 +554,12 @@ fn every_front_door_name() -> std::collections::BTreeSet<String> {
     ])
     .and_then(codewire_access::ManagedCredentialClients::with_anthropic_sign_in)
     .unwrap();
-    crate::egress::front_door_hosts::needed(
-        &crate::egress::assignment::interception_bindings(true, widest).unwrap(),
-    )
+    FrontDoorReport {
+        hosts: crate::egress::front_door_hosts::needed(
+            &crate::egress::assignment::interception_bindings(true, widest).unwrap(),
+        ),
+        bound_routes: false,
+    }
 }
 
 #[async_trait]
@@ -560,8 +576,25 @@ impl BindingStore for FakeStore {
     async fn front_door_hosts(
         &self,
         _pod_uid: &str,
-    ) -> Result<Option<std::collections::BTreeSet<String>>, BindingStoreUnavailable> {
+    ) -> Result<Option<FrontDoorReport>, BindingStoreUnavailable> {
         Ok(self.front_door_hosts.lock().unwrap().clone())
+    }
+
+    async fn record_bound_secrets_refusal(
+        &self,
+        _pod_uid: &str,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), BindingStoreUnavailable> {
+        *self.refusal.lock().unwrap() = Some((code.to_owned(), reason.to_owned()));
+        Ok(())
+    }
+
+    async fn first_bind_secrets(
+        &self,
+        _binding: &LiveBinding,
+    ) -> Result<Vec<codewire_access::FirstBindSecret>, BindingStoreUnavailable> {
+        self.first_bind_secrets.lock().unwrap().clone()
     }
 
     async fn record_trust(
@@ -581,13 +614,16 @@ impl BindingStore for FakeStore {
         &self,
         pod_uid: &str,
         decided: bool,
+        bound_secrets: &[codewire_access::FirstBindSecret],
     ) -> Result<bool, BindingStoreUnavailable> {
-        Ok(*self
-            .interception
-            .lock()
-            .unwrap()
-            .entry(pod_uid.to_owned())
-            .or_insert(decided))
+        let mut interception = self.interception.lock().unwrap();
+        if !interception.contains_key(pod_uid) {
+            self.bound_secrets
+                .lock()
+                .unwrap()
+                .insert(pod_uid.to_owned(), bound_secrets.to_vec());
+        }
+        Ok(*interception.entry(pod_uid.to_owned()).or_insert(decided))
     }
 
     async fn live_binding(
@@ -1221,6 +1257,7 @@ async fn an_intercepted_first_bind_needs_every_name_from_the_pods_own_front_door
         .unwrap()
         .as_mut()
         .unwrap()
+        .hosts
         .retain(|name| !name.contains("github.com"));
     assert_eq!(
         bind(without_github.clone(), true).await,
@@ -1253,6 +1290,203 @@ async fn an_intercepted_first_bind_needs_every_name_from_the_pods_own_front_door
         bind(FakeStore::bound(WorkspaceCredentialScope::Pod), true).await,
         Ok(true)
     );
+}
+
+/// A bound secret as the selection's store reads it at the first bind.
+fn first_bind_secret(key: &str, hosts: &[&str]) -> codewire_access::FirstBindSecret {
+    codewire_access::FirstBindSecret {
+        path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+        key: key.into(),
+        binding_id: "7d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6".into(),
+        binding_generation: 1,
+        prefix: None,
+        hosts: hosts.iter().map(|host| (*host).to_owned()).collect(),
+    }
+}
+
+// #4003: an intercepted first bind whose selection holds bound secrets is
+// refused by name when their hosts don't hold together (one the deployment
+// now reserves, one named twice, too many) or the Pod's front door doesn't
+// serve bound-secret routes; a refused bind stores no decision and no bound
+// secrets. Otherwise the bound secrets are stored with the decision,
+// intercepted or not. The tests below share these helpers.
+
+/// A store whose binding's selection holds `secrets`, read as the first
+/// bind reads them, behind a front door that serves every built-in name and,
+/// by `bound_routes`, bound-secret routes.
+fn store_with(
+    secrets: Result<Vec<codewire_access::FirstBindSecret>, BindingStoreUnavailable>,
+    bound_routes: bool,
+) -> Arc<FakeStore> {
+    let store = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    *store.first_bind_secrets.lock().unwrap() = secrets;
+    store
+        .front_door_hosts
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .bound_routes = bound_routes;
+    store
+}
+
+/// The first bind of a broker-mode Pod over `store`, under a deployment that
+/// reserves `api.reserved.example`, and with interception on or off.
+async fn first_bind(store: Arc<FakeStore>, interception: bool) -> Result<bool, BindError> {
+    let mut pod = workspace_pod();
+    pod.metadata.labels.as_mut().unwrap().insert(
+        crate::egress::admission::EGRESS_MODE_LABEL.into(),
+        crate::egress::admission::EGRESS_MODE_BROKER.into(),
+    );
+    let cluster = FakeCluster::new(valid_review(), vec![Some(pod)], vec![Some(sandbox())]);
+    fixture_with(cluster, store, |state| {
+        state.with_interception(interception).with_reserved_hosts(
+            codewire_access::ReservedHosts::new(["api.reserved.example"]).unwrap(),
+        )
+    })
+    .bind(20)
+    .await
+    .map(|response| response.interception)
+}
+
+/// The bind was refused and stored neither a decision nor bound secrets.
+fn refused_without_a_decision(store: &FakeStore) -> bool {
+    store.interception.lock().unwrap().is_empty() && store.bound_secrets.lock().unwrap().is_empty()
+}
+
+/// Refused FAILED_PRECONDITION, storing nothing, with this kept refusal.
+async fn assert_refused(store: Arc<FakeStore>, code: &str, reason: Option<&str>) {
+    assert_eq!(
+        first_bind(store.clone(), true).await,
+        Err(BindError::FailedPrecondition)
+    );
+    assert!(refused_without_a_decision(&store));
+    let kept = store.refusal.lock().unwrap().clone().unwrap();
+    assert_eq!(kept.0, code);
+    if let Some(reason) = reason {
+        assert_eq!(kept.1, reason);
+    }
+}
+
+/// A front door without bound-secret routes, as every cw-egress before the
+/// swap, refuses the bind, naming the host.
+#[tokio::test]
+async fn a_first_bind_whose_front_door_serves_no_bound_routes_is_refused_unserved() {
+    let store = store_with(
+        Ok(vec![first_bind_secret(
+            "FANCY_TOKEN",
+            &["api.fancy.example"],
+        )]),
+        false,
+    );
+    assert_eq!(
+        first_bind(store.clone(), true).await,
+        Err(BindError::FailedPrecondition)
+    );
+    assert!(refused_without_a_decision(&store));
+    assert_eq!(
+        *store.unserved.lock().unwrap(),
+        Some(vec!["api.fancy.example".to_owned()])
+    );
+}
+
+/// A host the deployment has reserved since the secret was bound.
+#[tokio::test]
+async fn a_first_bind_on_a_host_the_deployment_now_reserves_is_refused() {
+    let store = store_with(
+        Ok(vec![first_bind_secret(
+            "FANCY_TOKEN",
+            &["api.reserved.example"],
+        )]),
+        true,
+    );
+    assert_refused(
+        store,
+        "bound_host_reserved",
+        Some(
+            "api.reserved.example, which FANCY_TOKEN is sent to, is one of this \
+             deployment's own names",
+        ),
+    )
+    .await;
+}
+
+/// Two bound secrets on one host, or a bound secret on a host the
+/// selection's credentials bind.
+#[tokio::test]
+async fn a_first_bind_whose_values_share_a_host_is_refused_as_a_conflict() {
+    let two = store_with(
+        Ok(vec![
+            first_bind_secret("FANCY_TOKEN", &["api.fancy.example"]),
+            first_bind_secret("OTHER_TOKEN", &["api.fancy.example"]),
+        ]),
+        true,
+    );
+    assert_refused(
+        two,
+        "bound_host_conflict",
+        Some(
+            "api.fancy.example is named by both FANCY_TOKEN and OTHER_TOKEN; \
+             one host carries only one of them",
+        ),
+    )
+    .await;
+    // The binding selects GitHub.
+    let credential = store_with(
+        Ok(vec![first_bind_secret("FANCY_TOKEN", &["github.com"])]),
+        true,
+    );
+    assert_refused(credential, "bound_host_conflict", None).await;
+}
+
+/// Seventeen bound-secret hosts.
+#[tokio::test]
+async fn a_first_bind_with_more_than_sixteen_bound_hosts_is_refused() {
+    let hosts: Vec<String> = (0..17)
+        .map(|index| format!("h{index}.fancy.example"))
+        .collect();
+    let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+    assert_refused(
+        store_with(Ok(vec![first_bind_secret("FANCY_TOKEN", &hosts)]), true),
+        "too_many_bound_hosts",
+        Some("the bound secrets FANCY_TOKEN name 17 hosts; an environment carries at most 16"),
+    )
+    .await;
+}
+
+/// A selection whose bound secrets can't be read waits, UNAVAILABLE, and
+/// stores nothing: it never records an empty set in their place.
+#[tokio::test]
+async fn a_first_bind_whose_bound_secrets_cant_be_read_stores_nothing() {
+    for interception in [true, false] {
+        let store = store_with(Err(BindingStoreUnavailable), true);
+        assert_eq!(
+            first_bind(store.clone(), interception).await,
+            Err(BindError::Unavailable),
+            "interception {interception}"
+        );
+        assert!(refused_without_a_decision(&store));
+    }
+}
+
+/// Served and holding together: intercepted, and recorded with the
+/// decision. Not intercepted, nothing is refused and the record is still
+/// kept, so the Pod's projection knows what was bound at its first bind.
+#[tokio::test]
+async fn a_first_bind_records_its_bound_secrets_with_the_decision() {
+    let secrets = vec![
+        first_bind_secret("FANCY_TOKEN", &["api.fancy.example"]),
+        first_bind_secret("OTHER_TOKEN", &["api.other.example"]),
+    ];
+    let served = store_with(Ok(secrets.clone()), true);
+    assert_eq!(first_bind(served.clone(), true).await, Ok(true));
+    assert_eq!(served.bound_secrets.lock().unwrap()[POD_UID], secrets);
+    assert_eq!(*served.refusal.lock().unwrap(), None);
+    assert_eq!(*served.unserved.lock().unwrap(), None);
+
+    let off = store_with(Ok(secrets.clone()), false);
+    assert_eq!(first_bind(off.clone(), false).await, Ok(false));
+    assert_eq!(off.bound_secrets.lock().unwrap()[POD_UID], secrets);
 }
 
 #[tokio::test]
@@ -1645,6 +1879,9 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         front_door_hosts: Mutex::new(Some(every_front_door_name())),
         unserved: Mutex::new(None),
         woken: Mutex::new(Vec::new()),
+        first_bind_secrets: Mutex::new(Ok(Vec::new())),
+        bound_secrets: Mutex::new(HashMap::new()),
+        refusal: Mutex::new(None),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {
         state.with_timing(Duration::from_secs(5), Duration::from_millis(100))

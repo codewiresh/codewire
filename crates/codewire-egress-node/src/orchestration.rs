@@ -233,6 +233,7 @@ impl Orchestration {
                     guest_token: guest_token.to_owned(),
                     peer_ip: peer.to_string(),
                     front_door_hosts: front_door_hosts(),
+                    bound_routes: BOUND_ROUTES,
                     ..Default::default()
                 },
                 self.options()?,
@@ -344,6 +345,12 @@ impl crate::leaves::LeafSigner for Orchestration {
 }
 
 pub use report::{Enforcement, RECORDS_PER_CALL, wire_record};
+
+/// Whether this build's front door serves bound-secret routes, as the
+/// admission reports it. False until its route table can carry a host a
+/// secret's binding names (#4003, the swap): a Pod whose selection binds one
+/// is refused at its first bind rather than handed to a door with no route.
+const BOUND_ROUTES: bool = false;
 
 /// Every name this build's front door has a route for, on its port, as the
 /// admission reports it (#6290): its own built-in route table, each exact

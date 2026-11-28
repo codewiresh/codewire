@@ -485,3 +485,65 @@ async fn db_a_create_its_front_door_cannot_serve_ends_naming_the_hosts() -> Resu
     .await;
     db.finish(result).await
 }
+
+/// #4003: a create whose Pod's first bind was refused for its bound secrets
+/// ends with that refusal's code and sentence, once, and is destroyed.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_create_refused_for_its_bound_secrets_ends_with_the_code() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_parents(&db).await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        for (index, (end, code, phase)) in [
+            (
+                crate::lifecycle::FailedCreate::BoundHostReserved,
+                "bound_host_reserved",
+                "lifecycle_bound_host_reserved",
+            ),
+            (
+                crate::lifecycle::FailedCreate::BoundHostConflict,
+                "bound_host_conflict",
+                "lifecycle_bound_host_conflict",
+            ),
+            (
+                crate::lifecycle::FailedCreate::TooManyBoundHosts,
+                "too_many_bound_hosts",
+                "lifecycle_too_many_bound_hosts",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = format!("5b2d9c41-7f36-4a1e-8d53-6c9f0a1b31{index:02}");
+            seed(pool, &id, &FIRST_ATTEMPT).await?;
+            let message = "api.fancy.example is named by both FANCY_TOKEN and OTHER_TOKEN";
+            ensure!(
+                svc.fail_create_for_bound_secrets(&id, end, message, CREATE_MUTATION_STATES)
+                    .await?,
+                "{code}: not ended"
+            );
+            let (now, desired, stored, reason) = outcome(pool, &id).await?;
+            ensure!((now.as_str(), desired.as_str()) == ("error", "destroyed"));
+            ensure!(stored == code, "{stored}");
+            ensure!(reason == message, "{reason}");
+            let logged: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM environment_logs WHERE environment_id = $1 AND phase = $2",
+            )
+            .bind(&id)
+            .bind(phase)
+            .fetch_one(pool)
+            .await?;
+            ensure!(logged == 1, "{code}: logged {logged} times");
+            ensure!(
+                !svc.fail_create_for_bound_secrets(&id, end, message, CREATE_MUTATION_STATES)
+                    .await?,
+                "{code}: ended twice"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

@@ -198,7 +198,14 @@ impl Environment {
             && self.stopped_at.is_none()
             && matches!(
                 self.error_code.as_deref(),
-                Some("no_capacity" | "container_start_failed" | "front_door_hosts_unserved")
+                Some(
+                    "no_capacity"
+                        | "container_start_failed"
+                        | "front_door_hosts_unserved"
+                        | "bound_host_reserved"
+                        | "bound_host_conflict"
+                        | "too_many_bound_hosts"
+                )
             )
             && chrono::DateTime::parse_from_rfc3339(self.failed_create_time()).is_ok_and(|at| {
                 now.signed_duration_since(at).num_hours() < FAILED_CREATE_LISTED_HOURS

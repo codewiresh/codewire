@@ -156,6 +156,36 @@ pub(crate) async fn binding_columns_privileges(pool: &PgPool) -> Result<bool, sq
     .await
 }
 
+/// Every hosted projection reads its Pod's first-bind record of bound secrets
+/// (#4003, migration 0070), so the service refuses to start without SELECT
+/// on that column, as it does for the binding columns above.
+async fn first_bind_column_granted(pool: &PgPool) -> Result<(), RuntimeError> {
+    if first_bind_column_privileges(pool)
+        .await
+        .map_err(|_| RuntimeError::Database)?
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::Configuration(
+            "application-secret projection needs SELECT on sandbox_workspace_bindings.bound_secrets",
+        ))
+    }
+}
+
+/// Whether this login can SELECT `sandbox_workspace_bindings.bound_secrets`;
+/// false when the table or the column does not exist.
+pub(crate) async fn first_bind_column_privileges(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) = 1 FROM pg_catalog.pg_attribute a \
+         WHERE a.attrelid = pg_catalog.to_regclass('public.sandbox_workspace_bindings') \
+         AND a.attname = 'bound_secrets' \
+         AND a.attnum > 0 AND NOT a.attisdropped \
+         AND pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'SELECT')",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Run the production service using only explicit restricted dependencies.
 /// The caller retains the runtime until this returns: dropping this future
 /// cannot prove provider or database cleanup after an issued mutation.
@@ -178,7 +208,11 @@ pub async fn run(
     .await
     .map_err(|_| RuntimeError::Database)?
     .map_err(|_| RuntimeError::Database)?;
-    let result = match binding_columns_granted(&pool).await {
+    let granted = match binding_columns_granted(&pool).await {
+        Ok(()) => first_bind_column_granted(&pool).await,
+        Err(error) => Err(error),
+    };
+    let result = match granted {
         Ok(()) => run_connected(config, pool.clone(), shutdown).await,
         Err(error) => Err(error),
     };

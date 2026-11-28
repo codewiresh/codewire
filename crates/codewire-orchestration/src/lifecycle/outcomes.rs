@@ -30,14 +30,37 @@ pub const CONTAINER_START_FAILED_ERROR_CODE: &str = "container_start_failed";
 /// every host its selection needs (#6290). Its `error_reason` names them.
 pub const FRONT_DOOR_HOSTS_UNSERVED_ERROR_CODE: &str = "front_door_hosts_unserved";
 
+/// `environments.error_code` of a create whose selection holds a host-bound
+/// secret sent to a host the deployment has reserved since it was bound
+/// (#4003). Its `error_reason` names the host and the key.
+pub const BOUND_HOST_RESERVED_ERROR_CODE: &str = "bound_host_reserved";
+
+/// `environments.error_code` of a create whose selection has two values naming
+/// one host: two host-bound secrets, or one and a selected credential (#4003).
+/// Its `error_reason` names the host and both.
+pub const BOUND_HOST_CONFLICT_ERROR_CODE: &str = "bound_host_conflict";
+
+/// `environments.error_code` of a create whose selected bound secrets name
+/// more hosts than one environment carries (#4003). Its `error_reason` names
+/// the keys.
+pub const TOO_MANY_BOUND_HOSTS_ERROR_CODE: &str = "too_many_bound_hosts";
+
 /// Why the platform ended a create that never ran, which nothing retries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailedCreate {
     ContainerStart,
     FrontDoorHostsUnserved,
+    BoundHostReserved,
+    BoundHostConflict,
+    TooManyBoundHosts,
 }
 
 impl FailedCreate {
+    /// Its `environments.error_code`.
+    pub fn code(self) -> &'static str {
+        self.code_and_phase().0
+    }
+
     pub(super) fn code_and_phase(self) -> (&'static str, &'static str) {
         match self {
             Self::ContainerStart => (
@@ -47,6 +70,18 @@ impl FailedCreate {
             Self::FrontDoorHostsUnserved => (
                 FRONT_DOOR_HOSTS_UNSERVED_ERROR_CODE,
                 "lifecycle_front_door_hosts_unserved",
+            ),
+            Self::BoundHostReserved => (
+                BOUND_HOST_RESERVED_ERROR_CODE,
+                "lifecycle_bound_host_reserved",
+            ),
+            Self::BoundHostConflict => (
+                BOUND_HOST_CONFLICT_ERROR_CODE,
+                "lifecycle_bound_host_conflict",
+            ),
+            Self::TooManyBoundHosts => (
+                TOO_MANY_BOUND_HOSTS_ERROR_CODE,
+                "lifecycle_too_many_bound_hosts",
             ),
         }
     }

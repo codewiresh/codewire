@@ -56,7 +56,13 @@ pub(crate) async fn capture_in(
         &inventories,
         plan.winning_keys(ProjectionContributor::Platform),
     )?;
-    let captured = capture_winners_in(tx, inventories, winner_paths).await?;
+    let captured = capture_winners_in(
+        tx,
+        inventories,
+        winner_paths,
+        super::bound::FirstBind::NotHosted,
+    )
+    .await?;
     Ok(CompositionCapture {
         captured,
         platform_inventories,

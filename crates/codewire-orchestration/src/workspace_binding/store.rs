@@ -17,6 +17,9 @@ use sqlx::PgPool;
 use sqlx::postgres::PgListener;
 use tokio::sync::Notify;
 
+use codewire_access::FirstBindSecret;
+
+pub use crate::egress::front_door_hosts::FrontDoorReport;
 use crate::worker::environment_auth::WorkspaceCredentialScope;
 
 /// Notification channel the binding recorder publishes Pod UIDs on.
@@ -125,11 +128,27 @@ pub trait BindingStore: Send + Sync {
     /// intercepted, `decided`, if nothing is stored yet, and answers what is
     /// stored: one decision per Pod life, which the bind, every rebind and
     /// every credential relay epoch read (#4001, cw-security 2026-11-19).
+    ///
+    /// The first decision stores `bound_secrets` with it, in one write, and
+    /// neither ever changes (#4003, migration 0070); a later call's are
+    /// ignored.
     async fn record_interception(
         &self,
         _pod_uid: &str,
         _decided: bool,
+        _bound_secrets: &[FirstBindSecret],
     ) -> Result<bool, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+
+    /// Each host-bound secret `binding`'s selected sources hold, as its Pod's
+    /// first bind records it (#4003). A store that can't read them answers
+    /// unavailable, never none: an empty record would let a secret bound now
+    /// be projected raw once it is made plain.
+    async fn first_bind_secrets(
+        &self,
+        _binding: &LiveBinding,
+    ) -> Result<Vec<FirstBindSecret>, BindingStoreUnavailable> {
         Err(BindingStoreUnavailable)
     }
 
@@ -146,13 +165,26 @@ pub trait BindingStore: Send + Sync {
         Err(BindingStoreUnavailable)
     }
 
-    /// Replaces the names `pod_uid`'s front door reports it serves, at an
-    /// egress admission (#6290). A store that keeps none drops it, and the
-    /// Pod's first bind then waits: it fails closed.
+    /// Replaces the names `pod_uid`'s front door reports it serves, and
+    /// whether it serves bound-secret routes, at an egress admission (#6290,
+    /// #4003). A store that keeps none drops it, and the Pod's first bind
+    /// then waits: it fails closed.
     async fn record_front_door_hosts(
         &self,
         _pod_uid: &str,
-        _hosts: &std::collections::BTreeSet<String>,
+        _report: &FrontDoorReport,
+    ) -> Result<(), BindingStoreUnavailable> {
+        Ok(())
+    }
+
+    /// Keeps why `pod_uid`'s first bind was refused for its bound secrets
+    /// (#4003), which the create or start waiting for the Pod reads to end
+    /// with the code and the sentence.
+    async fn record_bound_secrets_refusal(
+        &self,
+        _pod_uid: &str,
+        _code: &str,
+        _reason: &str,
     ) -> Result<(), BindingStoreUnavailable> {
         Ok(())
     }
@@ -167,12 +199,12 @@ pub trait BindingStore: Send + Sync {
         Ok(())
     }
 
-    /// The names `pod_uid`'s front door last reported it serves at an egress
-    /// admission (#6290, migration 0069), or `None` before any did.
+    /// What `pod_uid`'s front door last reported at an egress admission
+    /// (#6290, #4003; migrations 0069 and 0070), or `None` before any did.
     async fn front_door_hosts(
         &self,
         _pod_uid: &str,
-    ) -> Result<Option<std::collections::BTreeSet<String>>, BindingStoreUnavailable> {
+    ) -> Result<Option<FrontDoorReport>, BindingStoreUnavailable> {
         Err(BindingStoreUnavailable)
     }
 
@@ -357,9 +389,9 @@ impl BindingStore for PgBindingStore {
     async fn record_front_door_hosts(
         &self,
         pod_uid: &str,
-        hosts: &std::collections::BTreeSet<String>,
+        report: &FrontDoorReport,
     ) -> Result<(), BindingStoreUnavailable> {
-        crate::egress::front_door_hosts::record(&self.pool, pod_uid, hosts)
+        crate::egress::front_door_hosts::record(&self.pool, pod_uid, report)
             .await
             .map_err(|error| {
                 tracing::warn!(error = %error, "front-door host report write failed");
@@ -383,13 +415,39 @@ impl BindingStore for PgBindingStore {
     async fn front_door_hosts(
         &self,
         pod_uid: &str,
-    ) -> Result<Option<std::collections::BTreeSet<String>>, BindingStoreUnavailable> {
+    ) -> Result<Option<FrontDoorReport>, BindingStoreUnavailable> {
         crate::egress::front_door_hosts::read(&self.pool, pod_uid)
             .await
             .map_err(|error| {
                 tracing::warn!(error = %error, "front-door host report read failed");
                 BindingStoreUnavailable
             })
+    }
+
+    async fn record_bound_secrets_refusal(
+        &self,
+        pod_uid: &str,
+        code: &str,
+        reason: &str,
+    ) -> Result<(), BindingStoreUnavailable> {
+        crate::egress::front_door_hosts::record_refusal(&self.pool, pod_uid, code, reason)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "first-bind bound-secret refusal write failed");
+                BindingStoreUnavailable
+            })
+    }
+
+    async fn first_bind_secrets(
+        &self,
+        binding: &LiveBinding,
+    ) -> Result<Vec<FirstBindSecret>, BindingStoreUnavailable> {
+        super::bound_secrets::selected(
+            &self.pool,
+            &binding.environment_id,
+            binding.projection_selection_sha256.as_deref(),
+        )
+        .await
     }
 
     async fn record_trust(
@@ -409,20 +467,24 @@ impl BindingStore for PgBindingStore {
         &self,
         pod_uid: &str,
         decided: bool,
+        bound_secrets: &[FirstBindSecret],
     ) -> Result<bool, BindingStoreUnavailable> {
         let unavailable = |error: sqlx::Error| {
             tracing::warn!(error = %error, "workspace binding interception record failed");
             BindingStoreUnavailable
         };
-        // Set once: of two concurrent first binds, one sets it and the other
-        // reads what it set.
+        let bound_secrets =
+            serde_json::to_value(bound_secrets).map_err(|_| BindingStoreUnavailable)?;
+        // Set once, with the bound secrets: of two concurrent first binds, one
+        // sets both and the other reads what it set.
         let set: Option<bool> = sqlx::query_scalar(
-            "UPDATE sandbox_workspace_bindings SET interception = $2 \
+            "UPDATE sandbox_workspace_bindings SET interception = $2, bound_secrets = $3 \
               WHERE pod_uid = $1 AND released_at IS NULL AND interception IS NULL \
               RETURNING interception",
         )
         .bind(pod_uid)
         .bind(decided)
+        .bind(bound_secrets)
         .fetch_optional(&self.pool)
         .await
         .map_err(unavailable)?;

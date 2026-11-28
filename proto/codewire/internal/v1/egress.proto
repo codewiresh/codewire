@@ -96,6 +96,12 @@ message AdmitRequest {
   // Orchestration binds an intercepted Pod only to names in its admission's
   // set; a cw-egress older than this field sends none.
   repeated InterceptionBinding front_door_hosts = 3;
+  // Whether the calling cw-egress's front door serves bound-secret routes:
+  // the hosts a host-bound secret names, which no fixed table holds (#4003).
+  // A capability, never a list of names. Orchestration refuses the first
+  // bind of a Pod whose selection binds a secret's host unless its latest
+  // admission said true; a cw-egress older than this field sends false.
+  bool bound_routes = 4;
 }
 
 message AdmitResponse {

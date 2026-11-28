@@ -576,11 +576,15 @@ pub(crate) const FAILED_CREATE_LISTED_HOURS: i32 = 24;
 /// It never ran, so the only thing that set these codes was the create's end.
 fn failed_create_filter() -> String {
     format!(
-        "(e.error_code IN ('{}', '{}', '{}') AND e.started_at IS NULL AND e.stopped_at IS NULL \
+        "(e.error_code IN ('{}', '{}', '{}', '{}', '{}', '{}') AND e.started_at IS NULL \
+          AND e.stopped_at IS NULL \
           AND COALESCE(e.destroyed_at, e.state_changed_at) > NOW() - make_interval(hours => {}))",
         crate::lifecycle::NO_CAPACITY_ERROR_CODE,
         crate::lifecycle::CONTAINER_START_FAILED_ERROR_CODE,
         crate::lifecycle::FRONT_DOOR_HOSTS_UNSERVED_ERROR_CODE,
+        crate::lifecycle::BOUND_HOST_RESERVED_ERROR_CODE,
+        crate::lifecycle::BOUND_HOST_CONFLICT_ERROR_CODE,
+        crate::lifecycle::TOO_MANY_BOUND_HOSTS_ERROR_CODE,
         FAILED_CREATE_LISTED_HOURS,
     )
 }

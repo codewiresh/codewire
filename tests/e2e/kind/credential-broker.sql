@@ -19,8 +19,10 @@ GRANT SELECT (environment_id,namespace,sandbox_claim_name,sandbox_claim_uid,pod_
 -- by the recorded Pod UID and reads managed clients from the live binding,
 -- and the selection digest that binding captured, so a running Sandbox keeps
 -- projecting under the reserved names it was bound with (Codewire #6005).
--- Only the columns it reads; never the PVC UID or the generation.
-GRANT SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at)
+-- Only the columns it reads; never the PVC UID or the generation. A hosted
+-- projection also reads the Pod's first-bind record of its bound secrets, so
+-- a secret bound then is never projected raw to it (Codewire #4003).
+GRANT SELECT (environment_id,pod_uid,claim_uid,sandbox_uid,managed_credential_clients,projection_selection_sha256,credential_scope,released_at,bound_secrets)
     ON public.sandbox_workspace_bindings TO codewire_credential_broker;
 GRANT SELECT (id,user_id,organization_id,name,current_revision)
     ON public.platform_access_profiles TO codewire_credential_broker;

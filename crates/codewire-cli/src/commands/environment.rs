@@ -1230,7 +1230,7 @@ impl EnvDaemonCommand {
 /// Why and when a create the platform ended failed.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub(crate) struct FailedCreate {
-    /// `no_capacity`, `container_start_failed` or `front_door_hosts_unserved`.
+    /// `no_capacity`, `container_start_failed` or a first-bind refusal's code.
     pub(crate) code: String,
     pub(crate) reason: String,
     /// RFC 3339, when the platform removed it.

@@ -518,7 +518,7 @@ async fn a_broker_mode_guest_on_the_callers_node_is_admitted_with_its_assignment
 
 /// An unbound store that keeps each Pod's reported front-door hosts.
 #[derive(Default)]
-struct Reports(std::sync::Mutex<Vec<(String, std::collections::BTreeSet<String>)>>);
+struct Reports(std::sync::Mutex<Vec<(String, crate::egress::front_door_hosts::FrontDoorReport)>>);
 
 #[async_trait]
 impl BindingStore for Reports {
@@ -542,12 +542,12 @@ impl BindingStore for Reports {
     async fn record_front_door_hosts(
         &self,
         pod_uid: &str,
-        hosts: &std::collections::BTreeSet<String>,
+        report: &crate::egress::front_door_hosts::FrontDoorReport,
     ) -> Result<(), BindingStoreUnavailable> {
         self.0
             .lock()
             .unwrap()
-            .push((pod_uid.to_owned(), hosts.clone()));
+            .push((pod_uid.to_owned(), report.clone()));
         Ok(())
     }
 }
@@ -575,14 +575,26 @@ async fn an_admission_keeps_the_front_doors_reported_hosts() {
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].0, GUEST_UID);
     assert_eq!(
-        kept[0].1.iter().map(String::as_str).collect::<Vec<_>>(),
+        kept[0]
+            .1
+            .hosts
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
         ["*.chatgpt.com:443", "api.anthropic.com:443"]
+    );
+    assert!(
+        !kept[0].1.bound_routes,
+        "a report that doesn't say serves none"
     );
     let (status, kept) = admit(json!([])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         kept,
-        [(GUEST_UID.to_owned(), std::collections::BTreeSet::new())]
+        [(
+            GUEST_UID.to_owned(),
+            crate::egress::front_door_hosts::FrontDoorReport::default()
+        )]
     );
     let (status, kept) = admit(json!([{"host": "API.Anthropic.com", "port": 443}])).await;
     assert_eq!(
@@ -591,6 +603,28 @@ async fn an_admission_keeps_the_front_doors_reported_hosts() {
         "an unreadable report doesn't refuse the stream"
     );
     assert!(kept.is_empty(), "an unreadable report is not kept");
+}
+
+/// #4003: an admission keeps whether the calling cw-egress's front door
+/// serves bound-secret routes beside its hosts; one that doesn't say, as
+/// every cw-egress before the swap, serves none.
+#[tokio::test]
+async fn an_admission_keeps_whether_the_front_door_serves_bound_routes() {
+    for (said, kept_as) in [(Some(true), true), (Some(false), false), (None, false)] {
+        let cluster = Cluster::healthy();
+        let reports = Arc::new(Reports::default());
+        let mut body = admit_body();
+        body["frontDoorHosts"] = json!([{"host": "api.anthropic.com", "port": 443}]);
+        if let Some(said) = said {
+            body["boundRoutes"] = json!(said);
+        }
+        let (status, _) = call_app(app_with(&cluster, reports.clone(), None), "Admit", body).await;
+        assert_eq!(status, StatusCode::OK);
+        let kept = reports.0.lock().unwrap().clone();
+        assert_eq!(kept.len(), 1, "{said:?}");
+        assert_eq!(kept[0].1.bound_routes, kept_as, "{said:?}");
+        assert_eq!(kept[0].1.hosts.len(), 1, "{said:?}");
+    }
 }
 
 /// An interception CA source that answers as told and counts its asks.
