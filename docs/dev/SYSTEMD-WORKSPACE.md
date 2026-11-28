@@ -378,13 +378,15 @@ accidents away from guest init's own pieces, on these conditions:
    `CAP_SYS_ADMIN` outside the delegated subtree. It has no device beyond the
    workspace's own.
 2. **No vsock from the container.** Its seccomp filter refuses `AF_VSOCK`
-   sockets (`socket` and `socketpair`, plus 32-bit `socketcall` on `x86_64`),
-   so root in it cannot speak to the host's control port or the ingress ports
-   as guest init would; sleep control (`7784`) goes through guest init's
-   fixed-request Unix-socket relay (`/run/codewire-hosted/sleep/control.sock`).
-   The same filter refuses `io_uring_setup`, `io_uring_enter` and
-   `io_uring_register`, since io_uring can make a socket without the socket
-   call. The default `standard` container gets the same filter.
+   sockets (`socket` and `socketpair`, plus 32-bit `socketcall` on `x86_64`)
+   as lightweight accident defense in depth, so processes in it cannot open
+   the host's control port or ingress ports directly; sleep control (`7784`)
+   goes through guest init's fixed-request Unix-socket relay
+   (`/run/codewire-hosted/sleep/control.sock`). `io_uring` (`io_uring_setup`,
+   `io_uring_enter`, `io_uring_register`) stays allowed in the workspace
+   container: the VM is the boundary, `docker run --privileged` inside the VM
+   already reaches vsock, and host-side sandboxes continue to refuse
+   `io_uring`. The default `standard` container gets the same filter.
 3. **What the held listener protects.** The listener and the daemon's
    non-dumpable state protect it from unprivileged processes only, not from
    root in the container. The listener still means no other process binds

@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 readonly ROOT
 readonly REQUIRED_CH_SHA256='4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b'
 readonly REQUIRED_CH_SIZE='7365360'
-readonly REQUIRED_KERNEL_RELEASE='6.18.48-codewire3'
+readonly REQUIRED_KERNEL_RELEASE='6.18.48-codewire4'
 readonly REQUIRED_KERNEL_PATH="vmlinuz-$REQUIRED_KERNEL_RELEASE"
 # The x86_64 kernel the release publishes for this kernel release, from the
 # pinned kernel builder, as the released runtime's artifacts.lock records it.

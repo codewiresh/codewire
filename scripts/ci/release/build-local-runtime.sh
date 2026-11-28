@@ -414,7 +414,7 @@ linux() {
   # archive above: the same pinned commit. The macOS side packs without it.
   [ "$linux_target" = true ] || return 0
   python3 "$root/scripts/dev/linux-local-runtime.py" pack \
-    --kernel "$work/kernel-x86_64/vmlinuz-$(pin sources linux version)-codewire3" \
+    --kernel "$work/kernel-x86_64/vmlinuz-$(pin sources linux version)-codewire4" \
     --initramfs "$work/initramfs-x86_64.cpio" \
     --cloud-hypervisor "$work/cloud-hypervisor" --virtiofsd-zip "$work/virtiofsd.zip" \
     --cw-runtime "$work/cw-runtime-x86_64" \
@@ -498,7 +498,7 @@ for name in parts.PARTS[sys.argv[2]]["outputs"]:
   local cw_runtime=()
   [ ! -d "$linux_dir/cw-runtime-aarch64" ] || cw_runtime=(--cw-runtime "$linux_dir/cw-runtime-aarch64")
   python3 "$root/scripts/dev/macos-local-runtime.py" \
-    --kernel "$linux_dir/kernel/Image-$(pin sources linux version)-codewire3" \
+    --kernel "$linux_dir/kernel/Image-$(pin sources linux version)-codewire4" \
     --initramfs "$linux_dir/initramfs.cpio" \
     --e2fsprogs "$output/e2fsprogs-macos" --git "$output/git-macos" \
     --helper "$output/vz-runner-macos/codewire-vz-runner" \

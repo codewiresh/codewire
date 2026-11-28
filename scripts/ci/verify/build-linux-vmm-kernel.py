@@ -4,8 +4,10 @@
 Each architecture's baseline configuration came from its qualified codewire1
 build: x86_64 for Cloud Hypervisor, arm64 for Virtualization.framework. The
 admitted configuration changes are PROC_CHILDREN, required by managed-agent
-custody, and FS_VERITY (with the CRYPTO_HASH_INFO it selects), which the cw
-runtime publisher's verity-measured cache needs (codewire#3694).
+custody, FS_VERITY (with the CRYPTO_HASH_INFO it selects), which the cw
+runtime publisher's verity-measured cache needs (codewire#3694), and on x86_64
+only, IA32_EMULATION and COMPAT_32BIT_TIME (with the compat symbols olddefconfig
+selects, keeping X86_X32_ABI and arm64 COMPAT off; codewire#5602, #5638).
 Both architectures share the pinned source, DAX compatibility patch, bc and
 build identity. Recorded build metadata is reconstructed; this command does not
 claim to reproduce the original kernel or verify its historical signing
@@ -126,18 +128,45 @@ def architecture_pins(document, architecture):
 def configuration(raw, pins):
     require(hashlib.sha256(raw).hexdigest() == pins["config_sha256"], "kernel config differs from its pin")
     # Each admitted change, as olddefconfig writes it, against the baseline.
-    admitted = (
+    admitted = [
         (b"CONFIG_PROC_CHILDREN=y\n", b"# CONFIG_PROC_CHILDREN is not set\n"),
         (b"CONFIG_FS_VERITY=y\n# CONFIG_FS_VERITY_BUILTIN_SIGNATURES is not set\n",
          b"# CONFIG_FS_VERITY is not set\n"),
         (b"CONFIG_CRYPTO_HASH_INFO=y\n", b""),
-    )
+    ]
+    if pins["architecture"] == "x86_64":
+        admitted.extend((
+            (b"CONFIG_SYSVIPC_COMPAT=y\n", b""),
+            (b"CONFIG_HAVE_UID16=y\n", b""),
+            (b"CONFIG_UID16=y\n", b""),
+            (b"# CONFIG_COMPAT_VDSO is not set\n", b""),
+            (b"CONFIG_IA32_EMULATION=y\n"
+             b"# CONFIG_IA32_EMULATION_DEFAULT_DISABLED is not set\n"
+             b"# CONFIG_X86_X32_ABI is not set\n"
+             b"CONFIG_COMPAT_32=y\n"
+             b"CONFIG_COMPAT=y\n"
+             b"CONFIG_COMPAT_FOR_U64_ALIGNMENT=y\n",
+             b"# CONFIG_IA32_EMULATION is not set\n"
+             b"# CONFIG_X86_X32_ABI is not set\n"),
+            (b"CONFIG_ARCH_WANT_COMPAT_IPC_PARSE_VERSION=y\n"
+             b"CONFIG_ARCH_WANT_OLD_COMPAT_IPC=y\n", b""),
+            (b"CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS=y\n"
+             b"CONFIG_ARCH_MMAP_RND_COMPAT_BITS=8\n"
+             b"CONFIG_HAVE_ARCH_COMPAT_MMAP_BASES=y\n", b""),
+            (b"CONFIG_OLD_SIGSUSPEND3=y\n"
+             b"CONFIG_COMPAT_OLD_SIGACTION=y\n"
+             b"CONFIG_COMPAT_32BIT_TIME=y\n",
+             b"# CONFIG_COMPAT_32BIT_TIME is not set\n"),
+            (b"CONFIG_COMPAT_BINFMT_ELF=y\n", b""),
+            (b"# CONFIG_XFRM_USER_COMPAT is not set\n", b""),
+            (b"# CONFIG_NETFILTER_XTABLES_COMPAT is not set\n", b""),
+        ))
     before = raw
     for change, baseline in admitted:
         require(raw.count(change) == 1, "kernel config lacks an admitted change")
         before = before.replace(change, baseline)
     require(hashlib.sha256(before).hexdigest() == pins["baseline_config_sha256"],
-            "kernel config has more than the admitted child-listing and fs-verity changes")
+            "kernel config has more than the admitted changes")
     require(b"CONFIG_PROC_FS=y\n" in raw and b"# CONFIG_CHECKPOINT_RESTORE is not set\n" in raw,
             "kernel process-listing prerequisites differ")
     # pahole only reports its version to Kconfig: no BTF is generated.
@@ -432,7 +461,7 @@ def build(args):
     environment.update({"PATH": str(tools) + ":/usr/bin:/bin", "KBUILD_BUILD_USER": "codewire",
                         "KBUILD_BUILD_HOST": "codewire", "KBUILD_BUILD_VERSION": "1",
                         "KBUILD_BUILD_TIMESTAMP": pins["build_timestamp"]})
-    make = ["make", *shape["make"], "LOCALVERSION=-codewire3", pahole_setting]
+    make = ["make", *shape["make"], "LOCALVERSION=-codewire4", pahole_setting]
     run([*make, "olddefconfig"], "configure", tree)
     require(regular(tree / ".config") == config, "processed kernel config drifted")
     run([*make, "-j" + str(args.jobs), shape["target"]], "compile", tree)

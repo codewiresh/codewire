@@ -8,11 +8,11 @@
   "patched_dax_sha256": "54ecbd2961f1f8e1c8d51ff9df43414350f68410389fa0f72d6ae34b1f5faeee",
   "bc_sha256": "36cb337928452e9379f349f11a3095e36a9b3aed8cefc50e2ae060bf9c6cf70f",
   "build_timestamp": "2026-08-28 06:22:54 +0000",
-  "release": "6.18.48-codewire3",
+  "release": "6.18.48-codewire4",
   "architectures": {
     "x86_64": {
       "baseline_config_sha256": "f4c7056b7b1622e3939179521280db1bbc5ce21355685dc9e455fd83add9a4f3",
-      "config_sha256": "49eec5ec520088e3a969b490e9c422e2c03956ccb2a4e2c6df13c3e4c6e3435d",
+      "config_sha256": "4d1059816af7209b56f01e041535a44f1bf5de2e29b303dba6ec76d8bcdc0d30",
       "config_origin": "qualified codewire1 configuration generated from Kata 894e1956bb340752b30f7ad49879972234a0098c",
       "gcc_version": "gcc (GCC) 16.1.1 20260728",
       "ld_version": "GNU ld (GNU Binutils) 2.47",

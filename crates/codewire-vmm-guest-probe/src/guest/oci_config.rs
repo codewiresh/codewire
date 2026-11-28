@@ -10,9 +10,10 @@ pub(super) fn workspace_oci_config(plan: &WorkspacePlan) -> Result<Vec<u8>> {
 
 /// Defense-in-depth seccomp policy for `standard` hosted workspace containers
 /// (`docs/dev/SYSTEMD-WORKSPACE.md`, "The container is defense in depth"):
-/// denies `AF_VSOCK` sockets (`socket` and `socketpair`), 32-bit `socketcall`,
-/// and `io_uring` syscalls so even root inside the container cannot open
-/// guest-host vsock channels directly.
+/// denies `AF_VSOCK` sockets (`socket` and `socketpair`) and 32-bit
+/// `socketcall` on `x86_64` as lightweight accident defense in depth.
+/// `io_uring` stays allowed here because the VM is the boundary and
+/// `docker run --privileged` inside the VM already reaches vsock.
 fn hosted_seccomp_policy() -> serde_json::Value {
     #[cfg(target_arch = "x86_64")]
     let architectures = ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"];
@@ -21,25 +22,18 @@ fn hosted_seccomp_policy() -> serde_json::Value {
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let architectures: [&str; 0] = [];
 
-    let mut syscalls = vec![
-        serde_json::json!({
-            "names": ["socket", "socketpair"],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": libc::EAFNOSUPPORT,
-            "args": [
-                {
-                    "index": 0,
-                    "value": u64::try_from(libc::AF_VSOCK).unwrap_or(40),
-                    "op": "SCMP_CMP_EQ"
-                }
-            ]
-        }),
-        serde_json::json!({
-            "names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],
-            "action": "SCMP_ACT_ERRNO",
-            "errnoRet": libc::EPERM
-        }),
-    ];
+    let mut syscalls = vec![serde_json::json!({
+        "names": ["socket", "socketpair"],
+        "action": "SCMP_ACT_ERRNO",
+        "errnoRet": libc::EAFNOSUPPORT,
+        "args": [
+            {
+                "index": 0,
+                "value": u64::try_from(libc::AF_VSOCK).unwrap_or(40),
+                "op": "SCMP_CMP_EQ"
+            }
+        ]
+    })];
     #[cfg(target_arch = "x86_64")]
     syscalls.push(serde_json::json!({
         "names": ["socketcall"],
@@ -298,7 +292,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hosted_container_gets_vsock_and_io_uring_seccomp_filter() {
+    fn hosted_container_gets_vsock_seccomp_filter_and_allows_io_uring() {
         let plan = super::super::tests::test_workspace_plan();
         let hosted: serde_json::Value = serde_json::from_slice(
             &workspace_oci_config_with_options(&plan, true, true, true, false).unwrap(),
@@ -318,10 +312,16 @@ mod tests {
             rule["names"] == serde_json::json!(["socketcall"])
                 && rule["errnoRet"] == serde_json::json!(libc::EPERM)
         }));
-        assert!(syscalls.iter().any(|rule| {
-            rule["names"]
-                == serde_json::json!(["io_uring_setup", "io_uring_enter", "io_uring_register"])
-        }));
+        for name in ["io_uring_setup", "io_uring_enter", "io_uring_register"] {
+            assert!(
+                !syscalls.iter().any(|rule| {
+                    rule["names"]
+                        .as_array()
+                        .is_some_and(|names| names.contains(&serde_json::json!(name)))
+                }),
+                "{name} must not be denied in the workspace container seccomp policy"
+            );
+        }
         let local: serde_json::Value = serde_json::from_slice(
             &workspace_oci_config_with_options(&plan, true, false, false, false).unwrap(),
         )

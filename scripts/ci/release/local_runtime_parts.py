@@ -54,7 +54,7 @@ PARTS = {
         "files": KERNEL_FILES + ("scripts/ci/verify/linux-vmm-kernel/arm64.config",),
         "pins": KERNEL_PINS,
         "arch": "arm64",
-        "outputs": ("Image-6.18.48-codewire3", "linux-source.tar.xz"),
+        "outputs": ("Image-6.18.48-codewire4", "linux-source.tar.xz"),
         "executables": (),
         "host": False,
     },
@@ -65,7 +65,7 @@ PARTS = {
         # The kernel's GPL source is the arm64 part's archive of the same
         # pinned commit, which every target lists; a record names only blobs
         # a release publishes.
-        "outputs": ("vmlinuz-6.18.48-codewire3",),
+        "outputs": ("vmlinuz-6.18.48-codewire4",),
         "executables": (),
         "host": False,
     },

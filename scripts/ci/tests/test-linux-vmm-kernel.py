@@ -35,6 +35,15 @@ class Configuration(unittest.TestCase):
                 self.assertIn(b"# CONFIG_FS_VERITY is not set\n", baseline)
                 self.assertNotIn(b"CONFIG_CRYPTO_HASH_INFO", baseline)
                 self.assertEqual(len(config.split(b"CONFIG_FS_VERITY=y\n")), 2)
+                if arch == "x86_64":
+                    self.assertIn(b"# CONFIG_IA32_EMULATION is not set\n", baseline)
+                    self.assertIn(b"# CONFIG_COMPAT_32BIT_TIME is not set\n", baseline)
+                    self.assertEqual(len(config.split(b"CONFIG_IA32_EMULATION=y\n")), 2)
+                    self.assertEqual(len(config.split(b"CONFIG_COMPAT_32BIT_TIME=y\n")), 2)
+                    self.assertIn(b"# CONFIG_X86_X32_ABI is not set\n", config)
+                else:
+                    self.assertIn(b"# CONFIG_COMPAT is not set\n", config)
+                    self.assertIn(b"# CONFIG_COMPAT_32BIT_TIME is not set\n", config)
 
     def test_exact_old_qualified_config_is_refused(self):
         for arch, config in self.configs.items():
@@ -50,15 +59,51 @@ class Configuration(unittest.TestCase):
             with self.subTest(arch=arch), self.assertRaisesRegex(ValueError, "config differs"):
                 kernel.configuration(codewire2, self.pins[arch])
 
+    def test_the_previous_codewire3_x86_64_config_without_ia32_emulation_is_refused(self):
+        x86 = self.configs["x86_64"]
+        codewire3 = x86.replace(
+            b"CONFIG_IA32_EMULATION=y\n# CONFIG_IA32_EMULATION_DEFAULT_DISABLED is not set\n"
+            b"# CONFIG_X86_X32_ABI is not set\nCONFIG_COMPAT_32=y\nCONFIG_COMPAT=y\n"
+            b"CONFIG_COMPAT_FOR_U64_ALIGNMENT=y\n",
+            b"# CONFIG_IA32_EMULATION is not set\n# CONFIG_X86_X32_ABI is not set\n",
+        ).replace(
+            b"CONFIG_OLD_SIGSUSPEND3=y\nCONFIG_COMPAT_OLD_SIGACTION=y\nCONFIG_COMPAT_32BIT_TIME=y\n",
+            b"# CONFIG_COMPAT_32BIT_TIME is not set\n",
+        )
+        for added in (
+            b"CONFIG_SYSVIPC_COMPAT=y\n",
+            b"CONFIG_HAVE_UID16=y\n",
+            b"CONFIG_UID16=y\n",
+            b"# CONFIG_COMPAT_VDSO is not set\n",
+            b"CONFIG_ARCH_WANT_COMPAT_IPC_PARSE_VERSION=y\nCONFIG_ARCH_WANT_OLD_COMPAT_IPC=y\n",
+            b"CONFIG_HAVE_ARCH_MMAP_RND_COMPAT_BITS=y\nCONFIG_ARCH_MMAP_RND_COMPAT_BITS=8\n"
+            b"CONFIG_HAVE_ARCH_COMPAT_MMAP_BASES=y\n",
+            b"CONFIG_COMPAT_BINFMT_ELF=y\n",
+            b"# CONFIG_XFRM_USER_COMPAT is not set\n",
+            b"# CONFIG_NETFILTER_XTABLES_COMPAT is not set\n",
+        ):
+            codewire3 = codewire3.replace(added, b"")
+        self.assertEqual(hashlib.sha256(codewire3).hexdigest(),
+                         "49eec5ec520088e3a969b490e9c422e2c03956ccb2a4e2c6df13c3e4c6e3435d")
+        with self.assertRaisesRegex(ValueError, "config differs"):
+            kernel.configuration(codewire3, self.pins["x86_64"])
+
     def test_unadmitted_kernel_surface_and_duplicate_flag_are_refused(self):
         for arch, config in self.configs.items():
-            for changed in [config + b"CONFIG_PROC_CHILDREN=y\n",
-                            config.replace(b"# CONFIG_CHECKPOINT_RESTORE is not set\n", b"CONFIG_CHECKPOINT_RESTORE=y\n"),
-                            config.replace(b"CONFIG_PROC_FS=y\n", b"# CONFIG_PROC_FS is not set\n"),
-                            config.replace(b"# CONFIG_FS_VERITY_BUILTIN_SIGNATURES is not set\n",
-                                           b"CONFIG_FS_VERITY_BUILTIN_SIGNATURES=y\n"),
-                            config.replace(b"CONFIG_CRYPTO_HASH_INFO=y\n", b""),
-                            config + b"CONFIG_FS_VERITY=y\n"]:
+            variants = [
+                config + b"CONFIG_PROC_CHILDREN=y\n",
+                config.replace(b"# CONFIG_CHECKPOINT_RESTORE is not set\n", b"CONFIG_CHECKPOINT_RESTORE=y\n"),
+                config.replace(b"CONFIG_PROC_FS=y\n", b"# CONFIG_PROC_FS is not set\n"),
+                config.replace(b"# CONFIG_FS_VERITY_BUILTIN_SIGNATURES is not set\n",
+                               b"CONFIG_FS_VERITY_BUILTIN_SIGNATURES=y\n"),
+                config.replace(b"CONFIG_CRYPTO_HASH_INFO=y\n", b""),
+                config + b"CONFIG_FS_VERITY=y\n",
+            ]
+            if arch == "x86_64":
+                variants.append(config.replace(b"# CONFIG_X86_X32_ABI is not set\n", b"CONFIG_X86_X32_ABI=y\n"))
+            else:
+                variants.append(config.replace(b"# CONFIG_COMPAT is not set\n", b"CONFIG_COMPAT=y\n"))
+            for changed in variants:
                 with self.subTest(arch=arch, size=len(changed)), self.assertRaises(ValueError):
                     kernel.configuration(changed, self.pins[arch])
 
@@ -78,7 +123,7 @@ class Configuration(unittest.TestCase):
 
     def test_x86_64_pins_are_unchanged(self):
         x86 = self.pins["x86_64"]
-        self.assertEqual(x86["config_sha256"], "49eec5ec520088e3a969b490e9c422e2c03956ccb2a4e2c6df13c3e4c6e3435d")
+        self.assertEqual(x86["config_sha256"], "4d1059816af7209b56f01e041535a44f1bf5de2e29b303dba6ec76d8bcdc0d30")
         self.assertEqual(x86["baseline_config_sha256"], "f4c7056b7b1622e3939179521280db1bbc5ce21355685dc9e455fd83add9a4f3")
         self.assertEqual((x86["gcc_version"], x86["ld_version"], x86["pahole_version"]),
                          ("gcc (GCC) 16.1.1 20260728", "GNU ld (GNU Binutils) 2.47", None))
@@ -108,18 +153,18 @@ class Configuration(unittest.TestCase):
         for arch, pins in self.pins.items():
             with self.subTest(arch=arch):
                 self.assertEqual(kernel.digest(kernel.INPUTS / "dax.patch"), pins["patch_sha256"])
-                self.assertEqual(pins["release"], "6.18.48-codewire3")
+                self.assertEqual(pins["release"], "6.18.48-codewire4")
 
     def test_image_release_checks(self):
-        banner = b"Linux version 6.18.48-codewire3 (codewire@codewire) "
+        banner = b"Linux version 6.18.48-codewire4 (codewire@codewire) "
         arm64 = bytearray(0x40); arm64[0x38:0x3c] = b"ARM\x64"
         kernel.check_image(bytes(arm64) + banner, self.pins["arm64"])
-        for bad in (bytes(0x40) + banner, bytes(arm64) + banner.replace(b"codewire3", b"codewire2")):
+        for bad in (bytes(0x40) + banner, bytes(arm64) + banner.replace(b"codewire4", b"codewire3")):
             with self.assertRaisesRegex(ValueError, "arm64 kernel image"):
                 kernel.check_image(bad, self.pins["arm64"])
-        kernel.check_image(bytes(512) + b"6.18.48-codewire3", self.pins["x86_64"])
+        kernel.check_image(bytes(512) + b"6.18.48-codewire4", self.pins["x86_64"])
         with self.assertRaisesRegex(ValueError, "release"):
-            kernel.check_image(bytes(65536) + b"6.18.48-codewire3", self.pins["x86_64"])
+            kernel.check_image(bytes(65536) + b"6.18.48-codewire4", self.pins["x86_64"])
 
 
 class FileCustody(unittest.TestCase):
