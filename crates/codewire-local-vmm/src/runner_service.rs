@@ -331,7 +331,9 @@ impl RunnerClient {
         .await
         .map_err(|_| Status::deadline_exceeded("runner boot secrets timed out"))??
         .into_inner();
-        let valid = !response.secrets.is_empty()
+        let records = crate::runner::BootRecords::take_from(&mut response);
+        let has_record = records.local.is_some() || records.platform.is_some();
+        let valid = (!response.secrets.is_empty() || has_record)
             && response.secrets.iter().all(|secret| {
                 secret.value.len() == crate::runner::BOOT_SECRET_BYTES
                     && secret.purpose == v1::BootSecretPurpose::FrontDoorPairing as i32
@@ -339,7 +341,6 @@ impl RunnerClient {
         if !valid {
             return Err(Status::internal("runner returned invalid boot secrets"));
         }
-        let records = crate::runner::BootRecords::take_from(&mut response);
         Ok((response.secrets, records))
     }
 }
@@ -2149,6 +2150,38 @@ mod tests {
         let daemon_access = format!("{:?}", cell.get(environment_id, 2).unwrap());
         assert!(!daemon_access.contains("107, 107"));
         assert!(!format!("{answered:?}").contains("107"));
+    }
+
+    /// A non-intercepting generation that recorded an empty bound-secret
+    /// snapshot (for instance after a previously bound secret became plain and
+    /// the VM restarted) still answers `boot_secrets` with empty `secrets` and
+    /// that record, so projection does not fail closed as unrecorded (#4003).
+    #[test]
+    fn non_intercepting_generation_with_bound_secret_record_preserves_the_record() {
+        let (_parent, _listener, access) = bootstrap_access();
+        let environment_id = Uuid::new_v4();
+        let cell = GenerationAccessCell::new(environment_id);
+        let _recorded = cell
+            .install_with_secrets(
+                1,
+                access,
+                Vec::new(),
+                crate::runner::BootRecords {
+                    local: Some(Vec::new()),
+                    platform: None,
+                },
+                current_process_liveness(),
+            )
+            .unwrap();
+        let mut response = cell.boot_secrets(environment_id, 1).unwrap();
+        assert!(response.secrets.is_empty());
+        let records = crate::runner::BootRecords::take_from(&mut response);
+        assert_eq!(records.local, Some(Vec::new()));
+        assert_eq!(records.platform, None);
+        assert_eq!(
+            cell.boot_secrets(environment_id, 2).unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
     }
 
     #[test]

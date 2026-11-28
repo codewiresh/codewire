@@ -271,9 +271,12 @@ impl GenerationAccessCell {
         }
     }
 
-    /// The current generation's boot secrets, only for an intercepting boot,
-    /// with its record of its bound secrets. Every other request gets the
-    /// same answer, naming nothing.
+    /// The current generation's boot secrets (for an intercepting boot) and
+    /// its record of its bound secrets (#4003). A non-intercepting boot that
+    /// still recorded a bound-secret snapshot (for instance an empty local
+    /// record after a previously bound secret became plain) answers with empty
+    /// `secrets` and that record so projection does not fail closed as
+    /// unrecorded. Every other request gets the same answer, naming nothing.
     pub(super) fn boot_secrets(
         &self,
         environment_id: Uuid,
@@ -292,7 +295,9 @@ impl GenerationAccessCell {
                 (secrets, access.bound_secrets.clone())
             })
             .ok()
-            .filter(|(secrets, _)| !secrets.is_empty())
+            .filter(|(secrets, records)| {
+                !secrets.is_empty() || records.local.is_some() || records.platform.is_some()
+            })
             .ok_or_else(|| Status::failed_precondition("no boot secrets"))?;
         Ok(v1::GetBootSecretsResponse {
             secrets,
