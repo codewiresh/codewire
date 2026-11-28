@@ -2283,7 +2283,7 @@ prepare_application_secret_fixture() {
     run_cw secrets --local --project "$project" list --output json
     jq -e 'length == 4 and any(.[]; .key == "DATABASE_URL") and
       any(.[]; .key == "CW_NATIVE_SCOPE_COLLISION") and
-      all(.[]; (keys | sort) == ["created_at", "key", "updated_at"]) and
+      all(.[]; (keys | sort) == ["binding", "created_at", "key", "updated_at"] and .binding == null) and
       (tostring | contains("cwapp") | not)' "$LAST_STDOUT" >/dev/null ||
       die 'selected application project metadata is not key-only'
   done
@@ -2293,7 +2293,7 @@ prepare_application_secret_fixture() {
     any(.[]; .key == "CW_NATIVE_PERSONAL_ONLY") and
     any(.[]; .key == "CW_NATIVE_SCOPE_COLLISION") and
     any(.[]; .key == "CW_NATIVE_PRECEDENCE") and
-    all(.[]; (keys | sort) == ["created_at", "key", "updated_at"]) and
+    all(.[]; (keys | sort) == ["binding", "created_at", "key", "updated_at"] and .binding == null) and
     (tostring | contains("cwpersonal") | not)
   ' "$LAST_STDOUT" >/dev/null || die 'selected personal application metadata is not key-only'
   cat >"$MOUNT_SOURCE/app-secrets-install.sh" <<'APP_INSTALL'
@@ -3374,7 +3374,8 @@ if [[ "$MANAGED_CREDENTIAL_BROKER" -eq 1 ]]; then
   run_cw secrets --local --project "$APP_SECRET_UNSELECTED_PROJECT" list --output json
   jq -e '
     length == 1 and
-    (.[0] | keys | sort) == ["created_at", "key", "updated_at"] and
+    (.[0] | keys | sort) == ["binding", "created_at", "key", "updated_at"] and
+    .[0].binding == null and
     .[0].key == "CW_NATIVE_SMOKE_SECRET" and
     (tostring | contains("cwworkload") | not)
   ' "$LAST_STDOUT" >/dev/null || die 'unselected workload-secret inventory was not key-only'
