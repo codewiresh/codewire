@@ -48,6 +48,9 @@ const MAX_REMOTE_STREAMS: usize = 64;
 /// A remote connection that sends nothing for this long ends; keepalive
 /// answers count, so a live client is never ended.
 const REMOTE_INACTIVITY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// A remote connection must authenticate within this, so a client that stalls
+/// its key exchange doesn't hold a remote slot until the inactivity timeout.
+const REMOTE_HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(30);
 /// The largest SSH frame sent to the client, and the in-memory pipe and frame
 /// queue behind it: a stream's memory stays bounded whatever its peer does.
 const FRAME_BYTES: usize = 32 * 1024;
@@ -293,9 +296,11 @@ pub(super) fn serve(
     let (server_side, client_side) = tokio::io::duplex(PIPE_BYTES);
     let (mut from_server, mut to_server) = tokio::io::split(client_side);
     let mut config = daemon_ssh_server_config(host_key);
-    if permit.remote {
+    let remote = permit.remote;
+    if remote {
         config.inactivity_timeout = Some(REMOTE_INACTIVITY);
     }
+    let (authenticated, mut authenticated_rx) = tokio::sync::watch::channel(false);
     let config = Arc::new(config);
     let runner = Arc::new(DaemonBackedSshRunner::new(daemon.clone()));
     // Durable sessions over SSH, as a hosted environment serves them (#3827):
@@ -321,7 +326,8 @@ pub(super) fn serve(
     .with_exec_shell(features.exec_shell)
     .with_session_attach(sessions)
     // The guest daemon serves its API on vsock, so no workload port is its.
-    .with_port_forwarding(dialer, Arc::new(platform_listeners(None)));
+    .with_port_forwarding(dialer, Arc::new(platform_listeners(None)))
+    .with_authenticated(authenticated);
     tokio::spawn(async move {
         let _permit = permit;
         let (handle_tx, mut handle_rx) = tokio::sync::oneshot::channel();
@@ -370,10 +376,21 @@ pub(super) fn serve(
                 }
             }
         };
+        let handshake = async move {
+            let authenticates = authenticated_rx.wait_for(|authenticated| *authenticated);
+            if !remote
+                || tokio::time::timeout(REMOTE_HANDSHAKE, authenticates)
+                    .await
+                    .is_ok()
+            {
+                std::future::pending::<()>().await;
+            }
+        };
         let mut transport = std::pin::pin!(async { tokio::join!(session, egress) });
         tokio::select! {
             _ = &mut transport => return,
             _ = ingress => return,
+            () = handshake => return,
             _ = replaced => {}
         }
         // The VM is stopping or being replaced: tell the client why, so it
@@ -883,6 +900,171 @@ mod tests {
         );
         held.clear();
         assert!(streams.open.lock().unwrap().is_empty());
+    }
+
+    /// Whether the server granted the request just sent on `channel`.
+    async fn granted(channel: &mut russh::Channel<client::Msg>) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Ok(Some(message)) = tokio::time::timeout_at(deadline, channel.wait()).await {
+            match message {
+                ChannelMsg::Success => return true,
+                ChannelMsg::Failure => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// What the stream answers to each kind of request a client can make,
+    /// with a local forward to `forward_port`.
+    async fn answers(
+        client: &client::Handle<ExpectKey>,
+        forward_port: u16,
+    ) -> Vec<(&'static str, bool)> {
+        let mut answered = Vec::new();
+        for subsystem in ["session@codewire.sh", "sftp", "unknown@codewire.sh"] {
+            let mut channel = client.channel_open_session().await.unwrap();
+            channel.request_subsystem(true, subsystem).await.unwrap();
+            answered.push((subsystem, granted(&mut channel).await));
+        }
+        let mut channel = client.channel_open_session().await.unwrap();
+        channel.agent_forward(true).await.unwrap();
+        answered.push(("agent forwarding", granted(&mut channel).await));
+        let mut channel = client.channel_open_session().await.unwrap();
+        channel
+            .request_x11(true, false, "MIT-MAGIC-COOKIE-1", "00", 0)
+            .await
+            .unwrap();
+        answered.push(("X11 forwarding", granted(&mut channel).await));
+        let reverse = timeout(Duration::from_secs(5), client.tcpip_forward("127.0.0.1", 0))
+            .await
+            .expect("reverse forwarding is answered");
+        answered.push(("reverse forwarding", reverse.is_ok()));
+        let forward = timeout(
+            Duration::from_secs(5),
+            client.channel_open_direct_tcpip("127.0.0.1", forward_port.into(), "127.0.0.1", 40_000),
+        )
+        .await
+        .expect("a local forward is answered");
+        answered.push(("local forwarding", forward.is_ok()));
+        answered
+    }
+
+    /// A remote stream offers exactly what the owner's does: the same
+    /// subsystems and forwarding, and the same refusals. Its mark selects a
+    /// budget, not a set of operations (#3609, slice 3).
+    #[tokio::test]
+    async fn a_remote_stream_answers_every_request_as_the_owners_does() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = in_process_daemon(temp.path()).await;
+        let keys = HostKeys::new(temp.path());
+        let environment = Uuid::new_v4();
+        let streams = Arc::new(SshStreams::default());
+        let (operations, _) = broadcast::channel(16);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        let mut seen = Vec::new();
+        for remote in [false, true] {
+            let connected = connect(
+                daemon.clone(),
+                keys.private(environment).unwrap(),
+                operations.subscribe(),
+                environment,
+                streams.admit(environment, remote).unwrap(),
+            )
+            .await;
+            seen.push(answers(&connected.client, port).await);
+        }
+        assert_eq!(
+            seen[0], seen[1],
+            "the owner's answers, then a remote stream's"
+        );
+        assert_eq!(
+            seen[0],
+            [
+                ("session@codewire.sh", true),
+                ("sftp", true),
+                ("unknown@codewire.sh", false),
+                ("agent forwarding", false),
+                ("X11 forwarding", false),
+                ("reverse forwarding", false),
+                ("local forwarding", true),
+            ]
+        );
+    }
+
+    /// A remote client that never finishes its handshake ends at the deadline
+    /// and frees its slot, so stalled key exchanges can't hold the remote
+    /// budget for the inactivity timeout. The owner's own stream has no such
+    /// deadline, and an authenticated remote one outlives it.
+    #[tokio::test]
+    async fn a_remote_stream_that_never_authenticates_ends_at_the_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = in_process_daemon(temp.path()).await;
+        let keys = HostKeys::new(temp.path());
+        let environment = Uuid::new_v4();
+        let streams = Arc::new(SshStreams::default());
+        let (operations, _) = broadcast::channel(16);
+        let mut authenticated = connect(
+            daemon.clone(),
+            keys.private(environment).unwrap(),
+            operations.subscribe(),
+            environment,
+            streams.admit(environment, true).unwrap(),
+        )
+        .await;
+        let stalled = |remote: bool, features| {
+            let (input, inbound) = mpsc::channel(8);
+            let frames = serve(
+                daemon.clone(),
+                features,
+                keys.private(environment).unwrap(),
+                ReceiverStream::new(inbound),
+                operations.subscribe(),
+                environment,
+                streams.admit(environment, remote).unwrap(),
+            );
+            (input, frames)
+        };
+        let (_owner_input, mut owner) = stalled(false, DaemonFeatures::read(&daemon).await);
+        let (_remote_input, mut remote) = stalled(true, DaemonFeatures::read(&daemon).await);
+        let open = |remote: bool| {
+            streams
+                .open
+                .lock()
+                .unwrap()
+                .get(&(environment, remote))
+                .copied()
+                .unwrap_or(0)
+        };
+        assert_eq!((open(false), open(true)), (1, 2));
+
+        tokio::time::pause();
+        timeout(REMOTE_HANDSHAKE * 2, async {
+            while remote.next().await.is_some() {}
+            while open(true) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the stalled remote stream ends at the deadline");
+        assert!(
+            timeout(REMOTE_HANDSHAKE * 2, async {
+                while owner.next().await.is_some() {}
+            })
+            .await
+            .is_err(),
+            "the owner's stalled stream stays open"
+        );
+        assert_eq!((open(false), open(true)), (1, 1));
+        tokio::time::resume();
+        assert!(
+            authenticated.stream_ended.try_recv().is_err(),
+            "the authenticated remote stream stays open"
+        );
+        let (stdout, exit) = exec(&authenticated.client, "printf still").await;
+        assert_eq!((stdout.as_slice(), exit), (&b"still"[..], Some(0)));
     }
 
     /// A remote flood, as many tailnet connections as the remote budget

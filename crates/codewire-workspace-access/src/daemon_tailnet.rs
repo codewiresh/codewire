@@ -873,11 +873,28 @@ async fn resolve_endpoints(endpoints: &[String]) -> Result<Vec<SocketAddr>> {
     Ok(resolved)
 }
 
+/// What serves each connection to the peer's tailnet port 22. It must not
+/// listen anywhere: the port exists only on the userspace tailnet.
+#[async_trait]
+pub trait TailnetSshServer: Send + Sync + 'static {
+    /// Serves one connection until it ends.
+    async fn serve(&self, stream: TailnetStream);
+}
+
 /// SSH served over the tailnet by the daemon.
 #[derive(Clone)]
 pub struct TailnetSsh {
     pub config: Arc<server::Config>,
     pub runners: DaemonSshRunners,
+}
+
+#[async_trait]
+impl TailnetSshServer for TailnetSsh {
+    async fn serve(&self, stream: TailnetStream) {
+        self.runners
+            .serve_stream(self.config.clone(), stream, "tailnet")
+            .await;
+    }
 }
 
 /// Run the daemon's tailnet peer until shutdown. The first coordinator
@@ -888,7 +905,7 @@ pub async fn run(
     grants: Arc<AccessGrants>,
     plane: Arc<dyn AccessControlPlane>,
     dialer: Arc<dyn CoordinatorDialer>,
-    ssh: TailnetSsh,
+    ssh: Arc<dyn TailnetSshServer>,
     app_ports: watch::Receiver<AppPorts>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -958,7 +975,19 @@ pub async fn run(
         config.quiet.subscribe(),
         shutdown.clone(),
     ));
-    let mut shutdown = shutdown;
+    serve_tailnet_ssh(&tailnet, &mut listener, ssh, shutdown).await;
+    sessions.abort();
+    Ok(())
+}
+
+/// Hand each connection to the tailnet's port 22 to `ssh` until shutdown,
+/// only while the connecting address is a current peer's.
+async fn serve_tailnet_ssh(
+    tailnet: &DaemonTailnet,
+    listener: &mut TailnetListener,
+    ssh: Arc<dyn TailnetSshServer>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -970,14 +999,11 @@ pub async fn run(
                 let connections = tailnet.ssh_connections.clone();
                 tokio::spawn(async move {
                     let peer = stream.peer_addr().ip();
-                    let serve = ssh.runners.serve_stream(ssh.config, stream, "tailnet");
-                    connections.serve(peer, serve).await;
+                    connections.serve(peer, ssh.serve(stream)).await;
                 });
             }
         }
     }
-    sessions.abort();
-    Ok(())
 }
 
 /// Serve the environment's application ports on the tailnet address,

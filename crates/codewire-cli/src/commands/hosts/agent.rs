@@ -1,6 +1,8 @@
 //! The host agent, `cw host run`: it keeps this computer's session with
 //! Codewire open, proving the host key, and reconnects when it ends. It runs
-//! the lifecycle operations the session sends ([`super::operations`]).
+//! the lifecycle operations the session sends ([`super::operations`]), and a
+//! tailnet peer for each VM that runs here ([`super::peers`]), whose access
+//! calls go out on the session.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -9,9 +11,11 @@ use std::pin::Pin;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 
-use codewire_client::hosts::{HostOperation, HostOperationResult};
+use codewire_client::hosts::{HostOperation, HostOperationResult, host_operation_result};
+use tokio::sync::mpsc;
 
 use super::operations::{self, Outcome};
+use super::peers::{self, Peers};
 use super::*;
 
 /// Held while an agent runs, so a computer runs one agent per enrollment.
@@ -109,6 +113,21 @@ pub(super) async fn run(_globals: &Globals) -> anyhow::Result<()> {
         "Host agent for `{}` ({}) on {}. Ctrl-C stops it.",
         enrollment.name, enrollment.host_id, enrollment.server_url
     );
+    // The tailnet peers' warnings, which are value-blind, go to stderr with
+    // the agent's own lines.
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
+            "warn,codewire_workspace_access=info",
+        ))
+        .try_init();
+    let (link, mut calls) = peers::link();
+    let peers = Peers::start(Arc::new(peers::OnThisComputer::new(
+        link,
+        operations::Placement::new(&enrollment.host_id),
+        coordinator(&dir, &enrollment),
+    )));
     let key_store = HostKeyStore::open(&dir, enrollment.key_store)
         .map_err(|error| key_store_error(enrollment.key_store, error))?;
     let mut stop = StopSignal::listen()?;
@@ -145,9 +164,14 @@ pub(super) async fn run(_globals: &Globals) -> anyhow::Result<()> {
             }
         };
         write_agent_status(&dir, "attaching", "");
-        match session(&agent, &enrollment, platform, &key, &dir, &mut stop).await {
+        let link = SessionLink {
+            peers: &peers,
+            calls: &mut calls,
+        };
+        match session(&agent, &enrollment, platform, &key, &dir, &mut stop, link).await {
             SessionEnd::Stopped => break,
             SessionEnd::Final(reason) => {
+                peers.stop().await;
                 write_agent_status(&dir, "revoked", &reason);
                 eprintln!("{reason}");
                 return Ok(());
@@ -176,8 +200,29 @@ pub(super) async fn run(_globals: &Globals) -> anyhow::Result<()> {
             }
         }
     }
+    peers.stop().await;
     write_agent_status(&dir, "stopped", "");
     Ok(())
+}
+
+/// The coordinator the peers dial: trusted through the deployment's CA when
+/// the host enrolled with one, otherwise the WebPKI roots only.
+fn coordinator(
+    dir: &Path,
+    enrollment: &Enrollment,
+) -> Arc<dyn codewire_workspace_access::daemon_tailnet::CoordinatorDialer> {
+    use codewire_workspace_access::daemon_tailnet::PublicCoordinator;
+    Arc::new(match enrollment.deployment_ca {
+        Some(_) => PublicCoordinator::with_extra_roots_file(dir.join(config::DEPLOYMENT_CA_FILE)),
+        None => PublicCoordinator::webpki_only(),
+    })
+}
+
+/// What a session shares with the peers: their reports, and their access
+/// calls to carry.
+struct SessionLink<'a> {
+    peers: &'a Peers,
+    calls: &'a mut mpsc::Receiver<peers::Call>,
 }
 
 /// Waits, or returns true when asked to stop.
@@ -211,7 +256,9 @@ async fn session(
     key: &Arc<SigningKey>,
     dir: &Path,
     stop: &mut StopSignal,
+    link: SessionLink<'_>,
 ) -> SessionEnd {
+    let SessionLink { peers, calls } = link;
     let sign = |statement: &[u8]| key.sign(statement).to_bytes().to_vec();
     let placement = operations::Placement::new(&enrollment.host_id);
     // The hello reports what runs here; a host that cannot read its own VMs
@@ -225,6 +272,7 @@ async fn session(
             };
         }
     };
+    let reported = inventory.clone();
     let attached = tokio::select! {
         attached = agent.attach(&enrollment.host_id, platform, HOST_CAPABILITY_VERSION, inventory, sign) => attached,
         () = stop.requested() => return SessionEnd::Stopped,
@@ -233,6 +281,9 @@ async fn session(
         Ok(host) => host,
         Err(error) => return ended(error),
     };
+    peers.hello(&reported);
+    // Dropped with the session, which fails each call as retryable.
+    let mut pending = peers::Pending::default();
     write_agent_status(dir, "attached", "");
     eprintln!("Attached: this host is online.");
     let ping_every = Duration::from_secs(u64::from(host.attached.ping_interval_seconds.max(1)));
@@ -252,12 +303,27 @@ async fn session(
             }
             Some(()) = open_tunnels.next(), if !open_tunnels.is_empty() => {}
             Some(result) = running.next(), if !running.is_empty() => {
+                let done = match &result.outcome {
+                    Some(host_operation_result::Outcome::Done(done)) => Some((**done).clone()),
+                    _ => None,
+                };
                 if let Err(error) = host.send_result(result).await {
+                    return attached_end(ended(error));
+                }
+                if let Some(done) = done {
+                    peers.reported(&done);
+                }
+            }
+            Some(call) = calls.recv() => {
+                if let Some(call) = pending.take(call)
+                    && let Err(error) = host.send_access(call).await
+                {
                     return attached_end(ended(error));
                 }
             }
             event = host.next_event() => match event {
                 Ok(HostEvent::Pong) => {}
+                Ok(HostEvent::Access(answer)) => pending.answer(answer),
                 Ok(HostEvent::OpenTunnel(request)) => {
                     open_tunnels.push(Box::pin(super::tunnels::serve(
                         agent.clone(),
@@ -294,7 +360,14 @@ async fn session(
                         attached: false,
                     });
                 }
-                Err(error) => return attached_end(ended(error)),
+                Err(error) => {
+                    // A server without access calls ends the session that
+                    // sends one as out of order.
+                    if error.code() == ErrorCode::InvalidArgument && !pending.is_empty() {
+                        peers.unsupported();
+                    }
+                    return attached_end(ended(error));
+                }
             },
             () = stop.requested() => return SessionEnd::Stopped,
         }

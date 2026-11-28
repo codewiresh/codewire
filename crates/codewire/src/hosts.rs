@@ -11,12 +11,13 @@ use std::sync::Arc;
 
 pub use codewire_proto::codewire::v1::{
     AttachHostRequest, AttachHostResponse, EnrollHostRequest, GetHostRequest, GrantHostRequest,
-    Host, HostAttached, HostCreate, HostEnvironmentObservation, HostEnvironmentState, HostLimits,
-    HostOpenTunnel, HostOperation, HostOperationFailure, HostOperationResult, HostPlatform,
-    HostStaleGeneration, HostState, HostTunnelKind, LeaveHostRequest, ListHostsRequest,
-    RevokeHostGrantRequest, RevokeHostRequest, UpdateHostProvideRequest, attach_host_request,
-    attach_host_response, grant_host_request, host_operation, host_operation_result,
-    revoke_host_grant_request,
+    Host, HostAccessGrant, HostAccessRefresh, HostAccessRefusal, HostAttached, HostCreate,
+    HostEnvironmentObservation, HostEnvironmentState, HostKeyRecord, HostKeyRecorded, HostLimits,
+    HostOpenTunnel, HostOperation, HostOperationFailure, HostOperationResult,
+    HostPeerRelayAllocate, HostPeerRelayAllocation, HostPlatform, HostStaleGeneration, HostState,
+    HostTunnelKind, LeaveHostRequest, ListHostsRequest, RevokeHostGrantRequest, RevokeHostRequest,
+    UpdateHostProvideRequest, attach_host_request, attach_host_response, grant_host_request,
+    host_operation, host_operation_result, revoke_host_grant_request,
 };
 use codewire_proto::codewire::v1::{
     AttachHostResponseView, HostAgentServiceClient, HostServiceClient, OpenHostTunnelResponseView,
@@ -189,8 +190,49 @@ pub enum HostEvent {
     Operation(Box<HostOperation>),
     /// Open this tunnel with [`HostAgentClient::open_tunnel`].
     OpenTunnel(Box<HostOpenTunnel>),
+    /// The answer to an access call sent with [`AttachedHost::send_access`].
+    Access(AccessAnswer),
     /// The stream ended without an error.
     Ended,
+}
+
+/// An access call for one running VM's tailnet peer (capability 3). The
+/// answer echoes its `request_id`.
+#[derive(Debug)]
+pub enum AccessCall {
+    Refresh(HostAccessRefresh),
+    RecordKey(HostKeyRecord),
+    AllocateRelay(HostPeerRelayAllocate),
+}
+
+impl AccessCall {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Refresh(call) => &call.request_id,
+            Self::RecordKey(call) => &call.request_id,
+            Self::AllocateRelay(call) => &call.request_id,
+        }
+    }
+}
+
+/// What the control plane answered an [`AccessCall`].
+#[derive(Debug)]
+pub enum AccessAnswer {
+    Grant(Box<HostAccessGrant>),
+    KeyRecorded(HostKeyRecorded),
+    RelayAllocation(Box<HostPeerRelayAllocation>),
+    Refused(HostAccessRefusal),
+}
+
+impl AccessAnswer {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Grant(answer) => &answer.request_id,
+            Self::KeyRecorded(answer) => &answer.request_id,
+            Self::RelayAllocation(answer) => &answer.request_id,
+            Self::Refused(answer) => &answer.request_id,
+        }
+    }
 }
 
 /// An attached host session, after its key was proven.
@@ -458,6 +500,23 @@ impl AttachedHost {
             .map_err(ClientError::from)
     }
 
+    /// Sends an access call; its answer arrives as [`HostEvent::Access`].
+    pub async fn send_access(&mut self, call: AccessCall) -> Result<(), ClientError> {
+        let call = match call {
+            AccessCall::Refresh(call) => attach_host_request::Input::AccessRefresh(Box::new(call)),
+            AccessCall::RecordKey(call) => {
+                attach_host_request::Input::HostKeyRecord(Box::new(call))
+            }
+            AccessCall::AllocateRelay(call) => {
+                attach_host_request::Input::PeerRelayAllocate(Box::new(call))
+            }
+        };
+        self.stream
+            .send(input(call))
+            .await
+            .map_err(ClientError::from)
+    }
+
     /// Answers a challenge with `sign`'s signature of its statement.
     pub async fn prove(
         &mut self,
@@ -489,14 +548,18 @@ impl AttachedHost {
             Some(attach_host_response::Output::OpenTunnel(request)) => {
                 HostEvent::OpenTunnel(request)
             }
-            // Answers to access calls (capability 3), which this host never
-            // makes.
-            Some(
-                attach_host_response::Output::AccessGrant(_)
-                | attach_host_response::Output::HostKeyRecorded(_)
-                | attach_host_response::Output::PeerRelayAllocation(_)
-                | attach_host_response::Output::AccessRefused(_),
-            ) => return Err(unexpected("an access answer it never asked for")),
+            Some(attach_host_response::Output::AccessGrant(grant)) => {
+                HostEvent::Access(AccessAnswer::Grant(grant))
+            }
+            Some(attach_host_response::Output::HostKeyRecorded(recorded)) => {
+                HostEvent::Access(AccessAnswer::KeyRecorded(*recorded))
+            }
+            Some(attach_host_response::Output::PeerRelayAllocation(allocation)) => {
+                HostEvent::Access(AccessAnswer::RelayAllocation(allocation))
+            }
+            Some(attach_host_response::Output::AccessRefused(refusal)) => {
+                HostEvent::Access(AccessAnswer::Refused(*refusal))
+            }
             None => HostEvent::Ended,
         })
     }

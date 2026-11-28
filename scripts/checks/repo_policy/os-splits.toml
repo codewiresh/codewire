@@ -177,4 +177,3 @@ and journeys listed in docs/dev/MACOS-CLI.md."""
 # A workspace crate a CLI crate links on one OS only, although it has no
 # OS-specific code of its own.
 [dependencies]
-"codewire-cli/codewire-tailnet" = { os = "linux", group = "member" }

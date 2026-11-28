@@ -29,8 +29,9 @@ use ed25519_dalek::{Signer as _, SigningKey};
 
 use super::*;
 
-/// The host capability this `cw` offers: 2 runs lifecycle operations.
-pub(crate) const HOST_CAPABILITY_VERSION: u32 = 2;
+/// The host capability this `cw` offers: 2 runs lifecycle operations, 3
+/// also runs a tailnet peer for each running VM and makes its access calls.
+pub(crate) const HOST_CAPABILITY_VERSION: u32 = 3;
 /// This computer's enrollment, beside the platform config.
 const ENROLLMENT_FILE: &str = "host.json";
 
@@ -998,6 +999,7 @@ async fn leave(globals: &Globals, args: HostLeaveArgs) -> anyhow::Result<()> {
 
 mod agent;
 mod operations;
+mod peers;
 mod tunnels;
 
 // ── The service ───────────────────────────────────────────────────────────

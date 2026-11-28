@@ -1093,10 +1093,10 @@ A **host** is a computer that a member enrolls to run Codewire VMs for their
 organization, through the same local VM runtime and supervisor as `cw
 --local`. It is not a trusted host: its environments are VMs. Hosts are a
 preview (#3609): a host enrolls, connects and shows its state, and an
-environment can be created, stopped, started and deleted on one. Reaching
-that environment (`cw run`, `cw shell`, `cw exec`) is not built yet, and the
-lifecycle on a host has not been observed working yet
-([docs/journeys/hosts.md](docs/journeys/hosts.md)). The user guide is
+environment can be created, stopped, started and deleted on one. `cw run`
+and `cw attach` reach it through a tunnel from the host's session; direct
+access over its tailnet (`cw shell`, `cw exec`, OpenSSH) is built but not
+yet observed working ([docs/journeys/hosts.md](docs/journeys/hosts.md)). The user guide is
 `apps/docs/zola/content/environments/hosts.md`; the commands are in
 `reference/cli/hosts.md` beside it.
 
@@ -1152,6 +1152,23 @@ lifecycle on a host has not been observed working yet
   environment's `complete` log row, once per command, as the cluster's setup
   and start do; with nothing to set up, a host environment's setup reads
   complete and sessions open at once. Resize is refused for now.
+- **Direct access.** From capability 3 the agent runs one tailnet peer for
+  each VM that both its last report on the session and the supervisor show
+  running at the same boot, and stops a changed VM's peer before the next
+  one starts. The peer's access calls (`HostAccessRefresh`, `HostKeyRecord`,
+  `HostPeerRelayAllocate`) go out on the session and name the environment,
+  the host's own ID for it and the boot generation. The grant is bound to the
+  environment's operation generation, which the control plane reads and the
+  host never names, and a final refusal stops that peer for that boot. The
+  peer records the VM's SSH host key, the supervisor's for that environment,
+  before it serves anyone. Its port 22 exists only on its userspace tailnet,
+  and each connection is spliced into the supervisor's SSH for that VM at that
+  boot. The splice is marked remote, so it counts against the remote budget,
+  not the owner's local one; the mark is the agent's own declaration on the
+  owner's socket, a fair share and not a security boundary. A host's peer
+  serves no application ports and has no relay: direct UDP found with STUN,
+  otherwise DERP. A server without access calls ends a session that sends
+  one, and the agent then runs no peers until it restarts.
 - **Running the agent.** `cw host service install` keeps it running as a user
   service: systemd `--user` on Linux, a LaunchAgent on macOS. On Linux it
   names `loginctl enable-linger` when linger is off, which keeps the agent
@@ -1252,7 +1269,12 @@ session through the environment's guest daemon over vsock, so nothing listens
 for SSH anywhere (`crates/codewire-local-vmm/src/supervisor/ssh.rs`). Host
 keys live under the supervisor root. `cw setup ssh` writes both alias
 families, `cw-cloud-*` and `cw-local-*`, and `cw ssh known-hosts` answers for a
-local VM with the key its supervisor holds.
+local VM with the key its supervisor holds. A stream a host's tailnet peer
+opens is marked remote (protocol 28): it has its own budget, 16 per
+environment and 64 in all beside the owner's 8 and 64, must authenticate
+within 30 seconds, and ends after 10 minutes without traffic. It offers the
+same requests as the owner's; the mark selects a budget, not a set of
+operations.
 
 ### Port forwarding over SSH
 

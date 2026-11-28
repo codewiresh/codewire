@@ -1,7 +1,7 @@
 ---
 title: Hosts
 description: Computers you own that provide VMs for your organization's environments. How a host connects to Codewire, who may use it, and how to set one up.
-updated: 2026-11-19
+updated: 2026-11-25
 weight: 9
 ---
 
@@ -50,6 +50,11 @@ a host works behind a home router or a firewall that allows nothing in.
 - **Online means connected.** A host shows online while its agent runs, and
   offline about 45 seconds after it stops. When the connection drops, the agent
   connects again by itself.
+- **Each running environment gets its own tailnet connection.** For direct
+  access with `cw shell`, `cw exec` and SSH, the agent also connects out for
+  each running VM: to Codewire's coordinator and relay over HTTPS, and over
+  UDP where your network allows it, so you reach the VM directly or through
+  the relay. Nothing listens on the host for it.
 - **Revoking is final.** A revoked host is disconnected at its next message
   and can never connect again.
 

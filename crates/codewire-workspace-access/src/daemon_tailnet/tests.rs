@@ -824,6 +824,103 @@ mod app_ports {
         .is_some()
     }
 
+    /// The TCP sockets this process listens on, by inode: the LISTEN rows
+    /// of the network namespace's tables whose socket one of this process's
+    /// descriptors holds. Under nextest each test is its own process.
+    fn host_tcp_listeners() -> BTreeSet<u64> {
+        let held: BTreeSet<u64> = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter_map(|target| {
+                let target = target.to_str()?;
+                target
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        ["/proc/self/net/tcp", "/proc/self/net/tcp6"]
+            .into_iter()
+            .flat_map(|table| {
+                std::fs::read_to_string(table)
+                    .unwrap_or_default()
+                    .lines()
+                    .skip(1)
+                    .filter_map(|row| {
+                        let fields: Vec<&str> = row.split_whitespace().collect();
+                        // State 0A is LISTEN; field 9 is the inode.
+                        (fields.get(3) == Some(&"0A")).then(|| fields.get(9)?.parse().ok())?
+                    })
+                    .collect::<Vec<u64>>()
+            })
+            .filter(|inode| held.contains(inode))
+            .collect()
+    }
+
+    /// Echoes what it reads, and says each connection it was handed.
+    struct EchoServer(mpsc::UnboundedSender<()>);
+
+    #[async_trait]
+    impl TailnetSshServer for EchoServer {
+        async fn serve(&self, mut stream: TailnetStream) {
+            let _ = self.0.send(());
+            let mut buffer = [0u8; 4];
+            while stream.read_exact(&mut buffer).await.is_ok() {
+                if stream.write_all(&buffer).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A host's peer serves port 22 with its own server, which splices into
+    /// the supervisor (#3609, slice 3 design §7): the port exists only on the
+    /// userspace tailnet, so serving it opens no listener on the host.
+    #[tokio::test]
+    async fn port_22_reaches_its_server_and_nothing_listens_on_the_host() {
+        let before = host_tcp_listeners();
+        let (daemon, client) = tailnet_pair();
+        let tailnet = DaemonTailnet {
+            conn: daemon.clone(),
+            relay: None,
+            relay_reconciler: StdMutex::new(None),
+            ssh_connections: Arc::default(),
+        };
+        tailnet.apply_peers(&[client.node()]);
+        let mut listener = daemon.listen("tcp", ":22").await.unwrap();
+        let (handed, mut served) = mpsc::unbounded_channel();
+        let (stop, shutdown) = watch::channel(false);
+        let serving = tokio::spawn(async move {
+            serve_tailnet_ssh(
+                &tailnet,
+                &mut listener,
+                Arc::new(EchoServer(handed)),
+                shutdown,
+            )
+            .await;
+        });
+        let mut stream = client
+            .dial_context_tcp(SocketAddr::new(IpAddr::V6(DAEMON_IP), 22))
+            .await
+            .unwrap();
+        assert!(echoes(&mut stream).await);
+        assert!(
+            served.recv().await.is_some(),
+            "the server had the connection"
+        );
+        assert_eq!(
+            host_tcp_listeners(),
+            before,
+            "serving the tailnet's port 22 listens nowhere on the host"
+        );
+        let _ = stop.send(true);
+        tokio::time::timeout(HANG_GUARD, serving)
+            .await
+            .expect("serving ends at shutdown")
+            .unwrap();
+    }
+
     /// The daemon's tailnet SSH connection from a client stays while the
     /// client is announced again under a new session, and ends as soon as a
     /// peer set gives its address to another key, through `apply_peers`

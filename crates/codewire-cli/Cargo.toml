@@ -65,21 +65,21 @@ uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+async-trait = { workspace = true }
 codewire-credential-broker = { workspace = true, features = ["ssh-agent"] }
 codewire-local-credentials = { workspace = true }
 codewire-local-vmm = { path = "../codewire-local-vmm" }
+codewire-tailnet = { workspace = true }
+codewire-workspace-access = { workspace = true }
 futures = { workspace = true }
 prost = { workspace = true }
 rustix = { workspace = true, features = ["termios"] }
 tempfile = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-async-trait = { workspace = true }
 # The hosted daemon's egress loop, its routing readback and its TUN (#4000).
 codewire-network-session = { workspace = true, features = ["hosted-guest", "hosted-routing"] }
-codewire-tailnet = { workspace = true }
 codewire-vmm-guest-probe = { workspace = true }
-codewire-workspace-access = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

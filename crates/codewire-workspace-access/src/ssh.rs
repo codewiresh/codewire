@@ -801,6 +801,9 @@ pub struct WorkspaceSshHandler<R> {
     /// holds a child token.
     ended: CancellationToken,
     channels: HashMap<ChannelId, SshChannelState>,
+    /// Set once the client authenticates, for a caller that bounds the
+    /// handshake.
+    authenticated: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl<R> WorkspaceSshHandler<R>
@@ -830,7 +833,14 @@ where
             connection: NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed),
             ended: CancellationToken::new(),
             channels: HashMap::new(),
+            authenticated: None,
         }
+    }
+
+    /// Set `authenticated` once the client authenticates.
+    pub fn with_authenticated(mut self, authenticated: tokio::sync::watch::Sender<bool>) -> Self {
+        self.authenticated = Some(authenticated);
+        self
     }
 
     /// Run each exec request's command line as `<shell> -c <command>`, as
@@ -1044,6 +1054,9 @@ where
     async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {
         if login_is_use(user) {
             crate::activity::note();
+        }
+        if let Some(authenticated) = &self.authenticated {
+            authenticated.send_replace(true);
         }
         Ok(server::Auth::Accept)
     }

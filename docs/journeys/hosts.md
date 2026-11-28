@@ -41,6 +41,7 @@ Nothing is observed on Production.
 | `host-direct` | not yet observed | not yet observed |
 | `host-exec` | not yet observed | not yet observed |
 | `host-ssh` | not yet observed | not yet observed |
+| `host-peer-end` | not yet observed | not yet observed |
 | `host-key` | not yet observed | not yet observed |
 
 ## Before the walk
@@ -341,9 +342,9 @@ source.
 
 ## Slice 3: direct access to environments on a host
 
-Not shipped: the contract is in `proto/codewire/v1/host_agent.proto` (from
-capability version 3), and the server, supervisor and agent follow in their
-own pull requests (#3609; the design is private-docs
+Not yet observed: the contract is in `proto/codewire/v1/host_agent.proto`
+(from capability version 3), with the supervisor's remote SSH streams and the
+agent's per-VM peers (#3609; the design is private-docs
 `designs/2026-11-13-host-direct-access.md`).
 `cw shell`, `cw exec`, OpenSSH and VS Code reach an environment on a host over
 its own tailnet: the host agent runs one tailnet peer per running VM, direct
@@ -372,6 +373,21 @@ Mac in slice 4.
   Remote-SSH.
 - **Proof:** both open a shell in the host's VM; VS Code's several channels
   and windows don't exhaust the host owner's local SSH.
+- **Observed:** not yet observed.
+
+### `host-peer-end`: what ends a VM's tailnet peer
+
+- **Entry points:** an open `cw shell ENV` over the tailnet, then each of
+  `cw stop ENV`, `cw rm ENV`, `cw host revoke NAME` and stopping `cw host
+  run`.
+- **States to exercise:** each of those ends; a server that has no access
+  calls yet.
+- **Proof:** each one ends the open shell and the peer, and the agent's
+  stderr says why. The peer's grant is refused from then on, and the
+  coordinator ends its node session once the record that admitted it is
+  gone; the token's 10 minutes are only the outer bound. With a server that
+  has no access calls, the agent says so once, runs no peers, and stays
+  attached.
 - **Observed:** not yet observed.
 
 ### `host-key`: the VM's host key is verified, and a new generation's key too

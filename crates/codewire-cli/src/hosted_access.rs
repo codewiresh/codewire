@@ -250,10 +250,10 @@ pub(crate) async fn serve(
                 grants.clone(),
                 plane.clone(),
                 Arc::new(tailnet_coordinator(bound.measured, bound.platform.as_ref())),
-                TailnetSsh {
+                Arc::new(TailnetSsh {
                     config: ssh_config,
                     runners,
-                },
+                }),
                 app_ports.subscribe(),
                 shutdown.clone(),
             );
