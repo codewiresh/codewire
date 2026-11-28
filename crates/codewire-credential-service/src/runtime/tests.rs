@@ -247,6 +247,7 @@ impl Running {
             listeners,
             pool,
             provider,
+            crate::delegation::BootSeal::default(),
             owner,
             repositories,
             bridge,
@@ -349,6 +350,7 @@ async fn startup_failure(private_occupied: bool) -> Result<()> {
             listeners,
             h.pool.clone(),
             h.provider.clone(),
+            crate::delegation::BootSeal::default(),
             h.owner.clone(),
             Arc::new(GithubRepositoryOwner::new(
                 h.pool.clone(),

@@ -321,7 +321,7 @@ impl RunnerClient {
             .inner
             .clone()
             .max_decoding_message_size(GENERATION_ACCESS_MAX_BYTES);
-        let response = tokio::time::timeout(
+        let mut response = tokio::time::timeout(
             GENERATION_ACCESS_TIMEOUT,
             client.get_boot_secrets(v1::GetBootSecretsRequest {
                 environment_id: environment_id.to_string(),
@@ -339,8 +339,8 @@ impl RunnerClient {
         if !valid {
             return Err(Status::internal("runner returned invalid boot secrets"));
         }
-        let record = crate::runner::records_from_proto(response.bound_secrets);
-        Ok((response.secrets, record))
+        let records = crate::runner::BootRecords::take_from(&mut response);
+        Ok((response.secrets, records))
     }
 }
 
@@ -2128,7 +2128,7 @@ mod tests {
                 2,
                 access.clone(),
                 vec![(pairing, secret.clone())],
-                None,
+                crate::runner::BootRecords::default(),
                 current_process_liveness(),
             )
             .unwrap();

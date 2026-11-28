@@ -1,11 +1,11 @@
 //! A host-bound secret's grants and leases, inside the credential service
 //! (#4003; docs/dev/SECRETS-AND-CREDENTIALS.md, "The swap" steps 1 and 2).
 //!
-//! The grants are the Pod's first-bind record, read under the projection's
-//! authority: the same scope and selection the epoch was admitted with, its
-//! creator, organization and digest, each record kept only for a source the
-//! selection holds and a key the environment doesn't set itself. Nothing a
-//! frame sends chooses one.
+//! The grants are the Pod's first-bind record, or a local VM's verified boot
+//! record, read under the projection's authority: the same scope and
+//! selection the epoch was admitted with, its creator, organization and
+//! digest, each record kept only for a source the selection holds and a key
+//! the environment doesn't set itself. Nothing a frame sends chooses one.
 //!
 //! A lease rereads the secret's row by its set's path and key, in the
 //! tenant-secret access the projection already has, and checks its
@@ -16,11 +16,14 @@
 use codewire_access::{FirstBindSecret, HostBinding, ReservedHosts, StoredBinding};
 use codewire_credential_broker::bound_secret::{BoundSecretLeaseError, BoundSecretRow};
 use codewire_credential_broker::platform::{PlatformRuntimeAuthority as _, PlatformRuntimeError};
+use codewire_project::PlatformProjectionSelection;
+use codewire_protected_store::secret_envelope::KekProvider;
 use codewire_protected_store::secret_envelope::{
     DekContext, EncryptedTenantSecret, KekProviderKind, SecretCoordinates, WrappedDek,
     decrypt_secret,
 };
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
+use std::future::Future;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -118,6 +121,23 @@ fn checked(
     Ok((binding, value_version))
 }
 
+/// The records an epoch grants: each one for a source `selection` holds and
+/// a key the environment doesn't set itself.
+pub(crate) fn selected_grants(
+    recorded: impl IntoIterator<Item = FirstBindSecret>,
+    selection: &PlatformProjectionSelection,
+) -> Vec<FirstBindSecret> {
+    let sources = paths(selection);
+    recorded
+        .into_iter()
+        .filter(|secret| {
+            sources.contains(&secret.path)
+                && !selection.ordinary_keys.contains(&secret.key)
+                && !selection.reserved_keys.contains(&secret.key)
+        })
+        .collect()
+}
+
 impl KubernetesPlatformRuntimeAuthority {
     /// The epoch's bound-secret grants: the Pod's first-bind record, under
     /// the scope and selection the epoch was admitted with. A Pod whose
@@ -155,16 +175,7 @@ impl KubernetesPlatformRuntimeAuthority {
         };
         let recorded: Vec<FirstBindSecret> =
             serde_json::from_str(&recorded).map_err(|_| PlatformRuntimeError::Denied)?;
-        let selection = &self.initial.selection;
-        let sources = paths(selection);
-        Ok(recorded
-            .into_iter()
-            .filter(|secret| {
-                sources.contains(&secret.path)
-                    && !selection.ordinary_keys.contains(&secret.key)
-                    && !selection.reserved_keys.contains(&secret.key)
-            })
-            .collect())
+        Ok(selected_grants(recorded, &self.initial.selection))
     }
 
     /// The scope and the selection's metadata now, exactly as the epoch
@@ -188,121 +199,162 @@ impl KubernetesPlatformRuntimeAuthority {
             Err(())
         }
     }
+}
 
-    /// One read of `secret`'s row, the ciphertext only with `value`, once
-    /// `secret` is one of the selection's sources.
-    async fn bound_row(
+/// What bounds each read of a lease: the caller's authority, live and
+/// within its own deadline.
+pub(crate) trait LeaseBounds {
+    fn ensure_live(&self) -> Result<(), PlatformRuntimeError>;
+    /// When the next read must have finished.
+    fn read_deadline(&self) -> Result<tokio::time::Instant, PlatformRuntimeError>;
+}
+
+/// Where a lease reads a secret's row and decrypts its value: the selection
+/// its epoch was admitted with, and the bounds its authority sets. A hosted
+/// Pod and a local VM's delegation each have one.
+pub(crate) struct LeaseSource<'a> {
+    pub(crate) pool: &'a PgPool,
+    pub(crate) provider: &'a dyn KekProvider,
+    pub(crate) selection: &'a PlatformProjectionSelection,
+    pub(crate) bounds: &'a (dyn LeaseBounds + Sync),
+}
+
+impl LeaseSource<'_> {
+    async fn bounded<T>(
         &self,
-        secret: &FirstBindSecret,
-        value: bool,
-    ) -> Result<Option<BoundRow>, BoundSecretLeaseError> {
-        if !paths(&self.initial.selection).contains(&secret.path) {
-            return Err(BoundSecretLeaseError::Denied);
-        }
-        self.identities
-            .bounded(async {
-                sqlx::query_as(BOUND_ROW_QUERY)
-                    .bind(&secret.path)
-                    .bind(&secret.key)
-                    .bind(value)
-                    .bind(MAX_BOUND_CIPHERTEXT_BYTES)
-                    .fetch_optional(&self.authority.pool)
-                    .await
-                    .map_err(|_| PlatformRuntimeError::Unavailable)
-            })
-            .await
-            .map_err(runtime_error)
+        work: impl Future<Output = Result<T, PlatformRuntimeError>>,
+    ) -> Result<T, PlatformRuntimeError> {
+        self.bounds.ensure_live()?;
+        let result = tokio::time::timeout_at(self.bounds.read_deadline()?, work).await;
+        self.bounds.ensure_live()?;
+        result.map_err(|_| PlatformRuntimeError::Unavailable)?
     }
+}
 
-    pub(crate) async fn bound_secret_row(
-        &self,
-        secret: &FirstBindSecret,
-        host: &str,
-    ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
-        let row = self.bound_row(secret, false).await?;
-        let (binding, value_version) = checked(row.as_ref(), secret, host)?;
-        Ok(BoundSecretRow {
-            binding,
-            value_version,
+/// One read of `secret`'s row, the ciphertext only with `value`, once
+/// `secret` is one of the selection's sources.
+async fn bound_row(
+    source: &LeaseSource<'_>,
+    secret: &FirstBindSecret,
+    value: bool,
+) -> Result<Option<BoundRow>, BoundSecretLeaseError> {
+    if !paths(source.selection).contains(&secret.path) {
+        return Err(BoundSecretLeaseError::Denied);
+    }
+    source
+        .bounded(async {
+            sqlx::query_as(BOUND_ROW_QUERY)
+                .bind(&secret.path)
+                .bind(&secret.key)
+                .bind(value)
+                .bind(MAX_BOUND_CIPHERTEXT_BYTES)
+                .fetch_optional(source.pool)
+                .await
+                .map_err(|_| PlatformRuntimeError::Unavailable)
         })
-    }
+        .await
+        .map_err(runtime_error)
+}
 
-    /// The row's value, decrypted for a lease whose row passes every check
-    /// again, and its version.
-    pub(crate) async fn bound_secret_value(
-        &self,
-        secret: &FirstBindSecret,
-        host: &str,
-    ) -> Result<(u64, Zeroizing<Vec<u8>>), BoundSecretLeaseError> {
-        let row = self.bound_row(secret, true).await?;
-        let (_, value_version) = checked(row.as_ref(), secret, host)?;
-        let row = row.ok_or(BoundSecretLeaseError::Deleted)?;
-        let ciphertext = row
-            .ciphertext
-            .clone()
-            .ok_or(BoundSecretLeaseError::Denied)?;
-        let context = DekContext::from_secret_path(&secret.path)
-            .map_err(|_| BoundSecretLeaseError::Denied)?;
-        let dek: DekRow = self
-            .identities
-            .bounded(async {
-                sqlx::query_as(DEK_QUERY)
-                    .bind(&row.dek_id)
-                    .bind(&row.scope)
-                    .bind(&row.scope_id)
-                    .fetch_optional(&self.authority.pool)
-                    .await
-                    .map_err(|_| PlatformRuntimeError::Unavailable)?
-                    .ok_or(PlatformRuntimeError::Denied)
-            })
-            .await
-            .map_err(runtime_error)?;
-        if dek.provider != "openbao-transit"
-            || dek.key_name != "tenant-dek"
-            || dek.revision <= 0
-            || dek.format != 1
-            || dek.wrapped_dek.len() > 4096
-        {
-            return Err(BoundSecretLeaseError::Denied);
+/// `secret`'s row now, checked against its record for `host`.
+pub(crate) async fn lease_row(
+    source: &LeaseSource<'_>,
+    secret: &FirstBindSecret,
+    host: &str,
+) -> Result<BoundSecretRow, BoundSecretLeaseError> {
+    let row = bound_row(source, secret, false).await?;
+    let (binding, value_version) = checked(row.as_ref(), secret, host)?;
+    Ok(BoundSecretRow {
+        binding,
+        value_version,
+    })
+}
+
+/// The row's value, decrypted for a lease whose row passes every check
+/// again, and its version.
+pub(crate) async fn lease_value(
+    source: &LeaseSource<'_>,
+    secret: &FirstBindSecret,
+    host: &str,
+) -> Result<(u64, Zeroizing<Vec<u8>>), BoundSecretLeaseError> {
+    let row = bound_row(source, secret, true).await?;
+    let (_, value_version) = checked(row.as_ref(), secret, host)?;
+    let row = row.ok_or(BoundSecretLeaseError::Deleted)?;
+    let ciphertext = row
+        .ciphertext
+        .clone()
+        .ok_or(BoundSecretLeaseError::Denied)?;
+    let context =
+        DekContext::from_secret_path(&secret.path).map_err(|_| BoundSecretLeaseError::Denied)?;
+    let dek: DekRow = source
+        .bounded(async {
+            sqlx::query_as(DEK_QUERY)
+                .bind(&row.dek_id)
+                .bind(&row.scope)
+                .bind(&row.scope_id)
+                .fetch_optional(source.pool)
+                .await
+                .map_err(|_| PlatformRuntimeError::Unavailable)?
+                .ok_or(PlatformRuntimeError::Denied)
+        })
+        .await
+        .map_err(runtime_error)?;
+    if dek.provider != "openbao-transit"
+        || dek.key_name != "tenant-dek"
+        || dek.revision <= 0
+        || dek.format != 1
+        || dek.wrapped_dek.len() > 4096
+    {
+        return Err(BoundSecretLeaseError::Denied);
+    }
+    let wrapped = WrappedDek {
+        provider: KekProviderKind::OpenBaoTransit,
+        key_name: dek.key_name,
+        key_version: u32::try_from(dek.key_version)
+            .ok()
+            .filter(|version| *version > 0)
+            .ok_or(BoundSecretLeaseError::Denied)?,
+        ciphertext: dek.wrapped_dek.into_bytes(),
+        nonce: None,
+        format: dek.format,
+    };
+    let unwrapped = source
+        .bounded(async {
+            source
+                .provider
+                .unwrap(&context, &wrapped)
+                .await
+                .map_err(|_| PlatformRuntimeError::Unavailable)
+        })
+        .await
+        .map_err(runtime_error)?;
+    let value = decrypt_secret(
+        &unwrapped,
+        &SecretCoordinates {
+            context: &context,
+            path: &secret.path,
+            key: &secret.key,
+        },
+        &EncryptedTenantSecret {
+            ciphertext,
+            nonce: row.nonce.clone(),
+            format: row.format,
+        },
+    )
+    .map_err(|_| BoundSecretLeaseError::Denied)?;
+    source.bounds.ensure_live().map_err(runtime_error)?;
+    Ok((value_version, value))
+}
+
+impl KubernetesPlatformRuntimeAuthority {
+    /// Where this Pod's leases read.
+    pub(crate) fn lease_source(&self) -> LeaseSource<'_> {
+        LeaseSource {
+            pool: &self.authority.pool,
+            provider: self.authority.provider.as_ref(),
+            selection: &self.initial.selection,
+            bounds: &self.identities,
         }
-        let wrapped = WrappedDek {
-            provider: KekProviderKind::OpenBaoTransit,
-            key_name: dek.key_name,
-            key_version: u32::try_from(dek.key_version)
-                .ok()
-                .filter(|version| *version > 0)
-                .ok_or(BoundSecretLeaseError::Denied)?,
-            ciphertext: dek.wrapped_dek.into_bytes(),
-            nonce: None,
-            format: dek.format,
-        };
-        let unwrapped = self
-            .identities
-            .bounded(async {
-                self.authority
-                    .provider
-                    .unwrap(&context, &wrapped)
-                    .await
-                    .map_err(|_| PlatformRuntimeError::Unavailable)
-            })
-            .await
-            .map_err(runtime_error)?;
-        let value = decrypt_secret(
-            &unwrapped,
-            &SecretCoordinates {
-                context: &context,
-                path: &secret.path,
-                key: &secret.key,
-            },
-            &EncryptedTenantSecret {
-                ciphertext,
-                nonce: row.nonce.clone(),
-                format: row.format,
-            },
-        )
-        .map_err(|_| BoundSecretLeaseError::Denied)?;
-        self.identities.ensure_live().map_err(runtime_error)?;
-        Ok((value_version, value))
     }
 }
 

@@ -22,7 +22,7 @@ use crate::{LocalCredentialError, ensure_private_root, validate_private_parent};
 // provider-catalog changes that leave the wire layout intact, with its
 // AUTHORITY_PROTOCOL_CHANGES row. An older authority in the range keeps
 // serving until a boot command finds no local VM running and replaces it.
-pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 38;
+pub(crate) const AUTHORITY_PROTOCOL_VERSION: u32 = 39;
 /// The oldest authority protocol this cw works with (v0.3.388's). A running
 /// authority in [minimum, current] keeps serving after a cw update.
 pub(crate) const MINIMUM_AUTHORITY_PROTOCOL_VERSION: u32 = 15;
@@ -123,6 +123,10 @@ const AUTHORITY_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         38,
         "RecordBootBoundSecrets gives a local VM's boot its bound secrets' record, a projection keeps a placeholder for one recorded bound and made plain since, and a broker leases a recorded secret on its channel (#4003)",
     ),
+    (
+        39,
+        "GetPlatformBootBoundSecrets asks the platform for a platform boot's sealed record of its platform sources' bound secrets, and a platform binding carries that record to its delegation (#4003)",
+    ),
 ];
 const _: () = assert!(MINIMUM_AUTHORITY_PROTOCOL_VERSION <= AUTHORITY_PROTOCOL_VERSION);
 
@@ -197,10 +201,14 @@ pub enum AuthorityFeature {
     /// An older authority has no such call, so a boot can't record its bound
     /// secrets and is refused.
     BootBoundSecrets,
+    /// `GetPlatformBootBoundSecrets`, and the platform record a binding
+    /// carries to its delegation (#4003). An older authority has no such
+    /// call and drops the record, so its platform boots record nothing.
+    PlatformBootBoundSecrets,
 }
 
 impl AuthorityFeature {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::PlatformGithub,
         Self::ClaudeSignIn,
         Self::DefaultProfile,
@@ -218,6 +226,7 @@ impl AuthorityFeature {
         Self::AntigravitySignIn,
         Self::SecretBindings,
         Self::BootBoundSecrets,
+        Self::PlatformBootBoundSecrets,
     ];
 
     /// The protocol that introduced it.
@@ -240,6 +249,7 @@ impl AuthorityFeature {
             Self::AntigravitySignIn => 36,
             Self::SecretBindings => 37,
             Self::BootBoundSecrets => 38,
+            Self::PlatformBootBoundSecrets => 39,
         }
     }
 

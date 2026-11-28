@@ -59,6 +59,7 @@ fn binding(directory: &Path, server: &str) -> PlatformCredentialBinding {
         },
         selection_sha256: [7; 32],
         front_door: false,
+        boot_record: None,
     }
 }
 
@@ -218,6 +219,36 @@ fn opening_asks_for_a_front_door_only_when_the_boot_serves_one() {
     assert!(!opening(&binding, ready()).unwrap().front_door);
     binding.front_door = true;
     assert!(opening(&binding, ready()).unwrap().front_door);
+}
+
+/// The Open carries the boot's sealed platform record exactly when the
+/// binding holds one (#4003).
+#[test]
+fn opening_carries_the_boots_platform_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut binding = binding(directory.path(), "https://codewire.example");
+    assert!(
+        opening(&binding, ready())
+            .unwrap()
+            .bound_secrets
+            .as_option()
+            .is_none()
+    );
+    let record = codewire_access::PlatformBootRecord {
+        secrets: vec![codewire_access::PlatformBootSecret {
+            path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+            key: "PLAIN_TOKEN".into(),
+            binding_generation: 1,
+            bound: None,
+        }],
+        seal: "vault:v1:synthetic".into(),
+    };
+    binding.boot_record = Some(record.clone());
+    let open = opening(&binding, ready()).unwrap();
+    let carried = open.bound_secrets.as_option().unwrap();
+    assert_eq!(carried.seal, "vault:v1:synthetic");
+    assert_eq!(carried.secrets.len(), 1);
+    assert_eq!(carried.secrets[0].key, "PLAIN_TOKEN");
 }
 
 #[tokio::test]
@@ -993,4 +1024,92 @@ async fn seed_placeholders_are_asked_with_the_delegations_own_selection() {
             .iter()
             .all(|request| request.url.path() != PATH)
     );
+}
+
+/// A platform boot's record is asked as the pinned creator with exactly
+/// the selection its delegation opens with, and carried back whole; a
+/// platform that keeps none (UNIMPLEMENTED) gives none, so the boot goes on
+/// without a record (#4003).
+#[tokio::test]
+async fn a_boots_platform_record_is_asked_with_the_delegations_own_selection() {
+    use codewire_client as rpc;
+    const PATH: &str = "/codewire.v1.CredentialDelegationService/EnvironmentBoundSecrets";
+    let ask = |server: &MockServer, directory: &Path| {
+        let ready = ready();
+        connector().environment_bound_secrets(
+            binding(directory, &server.uri()),
+            ready.environment_id,
+            ready.environment_generation,
+            no_deadline(),
+        )
+    };
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-access", true);
+    userinfo(&server, "synthetic-access", "synthetic-owner").await;
+    Mock::given(method("POST"))
+        .and(path(PATH))
+        .and(header("authorization", "Bearer synthetic-access"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/proto")
+                .set_body_bytes(
+                    rpc::EnvironmentBoundSecretsResponse {
+                        record: Some(rpc::LocalBootBoundSecrets {
+                            secrets: vec![rpc::LocalBootBoundSecret {
+                                path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                                key: "PLAIN_TOKEN".into(),
+                                binding_generation: 3,
+                                ..Default::default()
+                            }],
+                            seal: "vault:v1:synthetic".into(),
+                            ..Default::default()
+                        })
+                        .into(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let record = match ask(&server, directory.path()).await {
+        Ok(record) => record.expect("the platform keeps a record"),
+        Err(error) => panic!("{error:?}: {}", reached(&server).await),
+    };
+    assert_eq!(record.seal, "vault:v1:synthetic");
+    assert_eq!(record.secrets.len(), 1);
+    assert_eq!(record.secrets[0].binding_generation, 3);
+    let sent = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == PATH)
+        .expect("the record question reached the platform");
+    let sent = rpc::EnvironmentBoundSecretsRequest::decode_from_slice(&sent.body).unwrap();
+    assert_eq!(
+        sent.selection.into_option(),
+        Some(opening(&binding(directory.path(), &server.uri()), ready()).unwrap())
+    );
+
+    let server = MockServer::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    saved(directory.path(), &server.uri(), "synthetic-access", true);
+    userinfo(&server, "synthetic-access", "synthetic-owner").await;
+    Mock::given(method("POST"))
+        .and(path(PATH))
+        .respond_with(
+            ResponseTemplate::new(501)
+                .insert_header("content-type", "application/json")
+                .set_body_json(serde_json::json!({
+                    "code": "unimplemented",
+                    "message": "synthetic: no seal key",
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(ask(&server, directory.path()).await.unwrap(), None);
 }

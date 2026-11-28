@@ -80,7 +80,7 @@ impl RateLimit {
     /// Count one call by `user` at `now`, or refuse it when the user has
     /// made [`RATE_LIMIT`] calls in the window before it. A refused call is
     /// not counted, so a caller that waits is served once the window moves.
-    fn admit(&self, user: &str, now: Instant) -> bool {
+    pub(super) fn admit(&self, user: &str, now: Instant) -> bool {
         let mut users = self
             .0
             .lock()

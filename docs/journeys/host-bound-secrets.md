@@ -22,6 +22,7 @@ Updated 2026-11-25. Written first; every step is not yet observed.
 | `secret-reentry` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `secret-host-change` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `secret-host-conflict` | not yet observed | not yet observed | not yet observed | not yet observed |
+| `secret-platform-record` | not yet observed | not yet observed | n/a | n/a |
 | `secret-preset` | not yet observed | not yet observed | not yet observed | not yet observed |
 | `secret-dashboard` | n/a | n/a | not yet observed | not yet observed |
 
@@ -183,6 +184,41 @@ Updated 2026-11-25. Written first; every step is not yet observed.
   - in a local VM the boot is refused with the same codes;
   - the source change is refused the same way and the running environment
     is unchanged.
+- **Observed:** not yet observed.
+
+## `secret-platform-record`: a local VM keeps its boot's record of a platform secret
+
+- **Entry points:** `cw secrets --cloud set --host`, `cw create --local`
+  with a platform profile and platform sources.
+- **States to exercise:** a platform project secret bound before the boot;
+  the same secret made plain while the VM runs; a platform secret bound
+  once, deleted and set again plain; a local bound personal secret selected
+  beside the platform profile; a stop and start from a VM checkpoint.
+- **Driving it:**
+  1. Bind `FANCY_TOKEN` to `FIXTURE` on the project with the value, start a
+     platform-mode local VM that selects the project, and send it to
+     `FIXTURE` as in `secret-bound`.
+  2. Make it plain with the value (`--plain`), then start a new process in
+     the VM and read `FANCY_TOKEN`.
+  3. Restart the VM and read it again.
+  4. Bind a local personal secret too and start the VM again.
+- **Proof:**
+  - in step 1 the fixture recorded the canary, and the VM's environment
+    holds only the placeholder;
+  - in step 2 the new process gets the same placeholder, never the canary,
+    and a request carrying it to `FIXTURE` is refused
+    `secret_binding_changed`;
+  - a platform secret plain at the boot, then bound and made plain again
+    while the VM runs, refuses the next process's launch
+    `bound_secret_record_stale`, naming the key;
+  - after the restart in step 3 the plain value is projected;
+  - in step 4 the start is refused `bound_secret_not_interceptable`, naming
+    the local key, before the VM runs;
+  - a restore from a checkpoint taken in step 1 keeps the placeholder and
+    the fixture still gets the canary.
+- **Gotchas:** the platform's record is sealed; a boot older than two
+  rotations of the seal key is refused at its next delegation and has to
+  be restarted, which the walk doesn't exercise.
 - **Observed:** not yet observed.
 
 ## `secret-preset`: a preset fills in the right fields

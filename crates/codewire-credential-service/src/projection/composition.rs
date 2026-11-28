@@ -32,9 +32,11 @@ pub(crate) fn encode_platform(
     encode_platform_inventories(inventories).map_err(|_| Error::Denied)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn capture_in(
     tx: &mut Transaction<'_, Postgres>,
     selection: &PlatformProjectionSelection,
+    first_bind: super::FirstBind,
     local_inventories: &[ProjectionSourceInventory],
     context: &ProjectionContext,
     request_id: [u8; 16],
@@ -56,13 +58,7 @@ pub(crate) async fn capture_in(
         &inventories,
         plan.winning_keys(ProjectionContributor::Platform),
     )?;
-    let captured = capture_winners_in(
-        tx,
-        inventories,
-        winner_paths,
-        super::bound::FirstBind::NotHosted,
-    )
-    .await?;
+    let captured = capture_winners_in(tx, inventories, winner_paths, first_bind).await?;
     Ok(CompositionCapture {
         captured,
         platform_inventories,

@@ -104,6 +104,20 @@ impl LocalBrokerProcessSpawner for BrokerPeer {
 /// (#4232, #4169).
 const LEASE_HANG_GUARD: Duration = Duration::from_secs(60);
 
+/// The owner's organization secrets alone, as a platform selection.
+fn organization_sources() -> PlatformProjectionSelection {
+    PlatformProjectionSelection {
+        creator: "owner".into(),
+        organization: "organization".into(),
+        organization_selected: true,
+        project_id: None,
+        user_selected: false,
+        profile: None,
+        ordinary_keys: Default::default(),
+        reserved_keys: ["CODEX_HOME".into()].into(),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owner_client_requires_exact_local_profile_and_delivers_both_application_sources() {
     let temp = tempfile::tempdir().unwrap();
@@ -197,16 +211,8 @@ async fn owner_client_requires_exact_local_profile_and_delivers_both_application
         server_url: "https://platform.invalid".into(),
         selection_sha256: context.selection_sha256,
         front_door: false,
-        selection: PlatformProjectionSelection {
-            creator: "owner".into(),
-            organization: "organization".into(),
-            organization_selected: true,
-            project_id: None,
-            user_selected: false,
-            profile: None,
-            ordinary_keys: Default::default(),
-            reserved_keys: ["CODEX_HOME".into()].into(),
-        },
+        boot_record: None,
+        selection: organization_sources(),
     };
     let mut selection = EnvironmentBrokerSelection {
         local_profile: None,

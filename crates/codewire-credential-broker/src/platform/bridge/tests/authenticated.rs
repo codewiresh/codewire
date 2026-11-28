@@ -14,6 +14,12 @@ impl PlatformRuntimeAuthority for OwnerAuthority {
     async fn current_session(&self) -> Result<PlatformRuntimeSession, PlatformRuntimeError> {
         self.0.current_session().await
     }
+
+    async fn bound_secrets(
+        &self,
+    ) -> Result<Vec<codewire_access::FirstBindSecret>, PlatformRuntimeError> {
+        self.0.bound_secrets().await
+    }
 }
 
 fn owner_authority(fixture: &Fixture) -> Arc<OwnerAuthority> {
@@ -38,6 +44,7 @@ fn owner_authority(fixture: &Fixture) -> Arc<OwnerAuthority> {
         session: Mutex::new(session),
         calls: AtomicUsize::new(0),
         captured: Notify::new(),
+        bound_reads: AtomicUsize::new(0),
     }))
 }
 
@@ -111,6 +118,35 @@ async fn mixed_authorities_share_capacity_and_closed_admission_never_polls_lazy_
     fixture.slots_released().await;
     fixture.service.shutdown().await.unwrap();
     rejected_without_polling(&fixture, authority, Code::Unavailable).await;
+    fixture.finish().await;
+}
+
+/// An owner's delegation that declared a front door reads its bound-secret
+/// grants once at admission, as a hosted intercepted epoch does, so the
+/// front door it joins swaps what the boot's sealed record grants (#4003).
+#[tokio::test]
+async fn an_owner_delegation_with_a_front_door_reads_its_bound_secret_grants() {
+    let fixture = Fixture::new().await;
+    let authority = owner_authority(&fixture);
+    for (front_door, reads) in [(false, 0), (true, 1)] {
+        let (input, receiver) = mpsc::channel(4);
+        input.send(Ok(fixture.ready())).await.unwrap();
+        let admitted = Arc::clone(&authority);
+        let (output, _, _) = tokio::time::timeout(
+            TEST_TIMEOUT,
+            fixture
+                .service
+                .serve_authenticated_delegation("synthetic-owner".into(), async move {
+                    Ok((admitted, ReceiverStream::new(receiver), front_door))
+                }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(authority.0.bound_reads.load(Ordering::SeqCst), reads);
+        drop((input, output));
+    }
+    fixture.slots_released().await;
     fixture.finish().await;
 }
 

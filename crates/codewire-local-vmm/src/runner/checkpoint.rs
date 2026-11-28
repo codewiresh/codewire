@@ -589,7 +589,7 @@ mod tests {
             udp_peers: Vec::new(),
             intercepts: Default::default(),
             credential_placeholders: Default::default(),
-            bound_secrets: None,
+            bound_secrets: Default::default(),
             checkpoint: Some(RestoreBoot {
                 checkpoint_id: Uuid::new_v4(),
                 source_environment_id: Uuid::new_v4(),
@@ -610,7 +610,7 @@ mod tests {
                     image_disk_id,
                     build_id: build,
                 }),
-                bound_secrets: None,
+                bound_secrets: Default::default(),
                 state_identity: None,
             }),
         };
@@ -644,8 +644,8 @@ pub struct RestoreBoot {
     pub intercept: bool,
     /// The image disk the captured boot sat on (#4646).
     pub image_disk: Option<CheckpointImageDisk>,
-    /// The captured boot's record of its bound secrets (#4003).
-    pub bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
+    /// The captured boot's records of its bound secrets (#4003).
+    pub bound_secrets: super::BootRecords,
     /// On a Mac, the identity the supervisor pinned for the saved state it
     /// cloned into `checkpoints/in`: a match skips the digest (#6124).
     pub(crate) state_identity: Option<crate::checkpoint_pin::StateIdentity>,

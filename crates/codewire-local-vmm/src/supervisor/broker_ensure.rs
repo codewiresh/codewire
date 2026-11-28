@@ -40,13 +40,17 @@ pub(super) async fn ensure_credential_broker(
             running: false,
         });
     }
-    let (boot_secrets, record) = super::boot_egress::broker_boot_secrets(
+    let (boot_secrets, records) = super::boot_egress::broker_boot_secrets(
         &request.runner_socket,
         &request.environment_id,
         request.environment_generation,
     )
     .await?;
-    bind_boot_record(&mut request, record);
+    bind_boot_record(&mut request, records.local);
+    // The platform's sealed record goes back to it in the delegation's Open.
+    if let Some(platform) = request.platform.as_mut() {
+        platform.boot_record = records.platform;
+    }
     let mut client = LocalCredentialControlClient::connect(&request.authority)
         .await
         .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?;

@@ -109,7 +109,7 @@ impl HibernateRecord {
                 image_disk_id: self.image_disk_id.clone(),
                 build_id: self.build_id.clone(),
             }),
-            bound_secrets: None,
+            bound_secrets: Default::default(),
             state_identity: None,
         }
     }
@@ -786,7 +786,7 @@ mod tests {
                 image_disk_id: settings.image_disk_id.clone(),
                 build_id: settings.build_id.clone(),
             }),
-            bound_secrets: None,
+            bound_secrets: Default::default(),
             state_identity: None,
         };
         let record = build_record(

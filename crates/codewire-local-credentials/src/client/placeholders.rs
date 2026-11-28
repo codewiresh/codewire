@@ -87,6 +87,34 @@ impl LocalCredentialControlClient {
         .await
     }
 
+    /// A platform boot's sealed record of its platform sources' bound
+    /// secrets (#4003), which the authority asks of the platform as the
+    /// selection's creator. `None` when the platform keeps no record. An
+    /// authority that predates the question is refused before any call
+    /// (`FailedPrecondition`).
+    pub async fn platform_boot_bound_secrets(
+        &mut self,
+        environment_id: &EnvironmentId,
+        environment_generation: u64,
+        platform: crate::PlatformCredentialBinding,
+    ) -> Result<Option<codewire_access::PlatformBootRecord>, Status> {
+        if !AuthorityFeature::PlatformBootBoundSecrets.served_by(self.info.protocol_version) {
+            return Err(Status::failed_precondition(
+                "the running credential authority predates platform boot bound secrets",
+            ));
+        }
+        let response = self
+            .inner
+            .get_platform_boot_bound_secrets(v1::GetPlatformBootBoundSecretsRequest {
+                environment_id: environment_id.to_string(),
+                environment_generation,
+                platform: Some(platform.into_proto()),
+            })
+            .await?
+            .into_inner();
+        Ok(response.record.map(crate::platform::boot_record_from_proto))
+    }
+
     async fn placeholders(
         &mut self,
         request: v1::GetEnvironmentCredentialPlaceholdersRequest,

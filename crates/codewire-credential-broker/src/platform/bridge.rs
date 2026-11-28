@@ -885,6 +885,19 @@ where
                             .map_err(lease_status)?,
                     ),
                 )
+            } else if delegated_front_door {
+                // A local VM's delegation that declared a front door swaps
+                // the bound secrets its boot's sealed record grants (#4003):
+                // the boot's front door relays them here.
+                (
+                    None,
+                    Some(
+                        provider
+                            .admitted_bound_secrets()
+                            .await
+                            .map_err(lease_status)?,
+                    ),
+                )
             } else {
                 (None, None)
             };

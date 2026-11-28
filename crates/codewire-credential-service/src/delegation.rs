@@ -5,7 +5,10 @@
 //! the isolated platform broker. Constructing an authority mounts no listener.
 
 mod authority;
+mod boot_record;
 mod wire;
 
 pub use authority::{OwnerLocalRuntimeAuthority, OwnerLocalSelection};
+pub(crate) use boot_record::BootSeal;
+pub use boot_record::VerifiedBootRecord;
 pub(crate) use wire::router;

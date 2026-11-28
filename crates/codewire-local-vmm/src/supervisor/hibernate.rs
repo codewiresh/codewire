@@ -70,6 +70,8 @@ pub(in crate::supervisor) struct LocalHibernateRecord {
     pub intercept: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_bound_secrets: Option<codewire_access::PlatformBootRecord>,
     pub host_cpu: String,
     pub hibernated_at_unix_ms: i64,
     pub hibernate_reason: String,
@@ -100,6 +102,9 @@ impl LocalHibernateRecord {
                 daemon_vsock_port: self.daemon_vsock_port,
                 intercept: self.intercept,
                 bound_secrets: crate::runner::records_to_proto(self.bound_secrets.clone()),
+                platform_bound_secrets: crate::runner::BootRecords::platform_to_proto(
+                    self.platform_bound_secrets.clone(),
+                ),
             }),
             source_generation: self.restore_generation,
             state_identity: None,
@@ -671,6 +676,7 @@ mod tests {
             daemon_vsock_port: 7777,
             intercept: false,
             bound_secrets: None,
+            platform_bound_secrets: None,
             host_cpu: host_cpu.to_owned(),
             hibernated_at_unix_ms: 1_764_300_000_000,
             hibernate_reason: "user".to_owned(),

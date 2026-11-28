@@ -12,7 +12,138 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file codewire/v1/credential_delegation.proto.
  */
 export const file_codewire_v1_credential_delegation: GenFile = /*@__PURE__*/
-  fileDesc("Cidjb2Rld2lyZS92MS9jcmVkZW50aWFsX2RlbGVnYXRpb24ucHJvdG8SC2NvZGV3aXJlLnYxIn4KKEVudmlyb25tZW50Q3JlZGVudGlhbFBsYWNlaG9sZGVyc1JlcXVlc3QSOAoJc2VsZWN0aW9uGAEgASgLMiUuY29kZXdpcmUudjEuQ3JlZGVudGlhbERlbGVnYXRpb25PcGVuEhgKEGNhcGFiaWxpdHlfc2xvdHMYAiADKAkiVQogRW52aXJvbm1lbnRDcmVkZW50aWFsUGxhY2Vob2xkZXISFwoPY2FwYWJpbGl0eV9zbG90GAEgASgJEhgKC3BsYWNlaG9sZGVyGAIgASgJQgOAAQEicAopRW52aXJvbm1lbnRDcmVkZW50aWFsUGxhY2Vob2xkZXJzUmVzcG9uc2USQwoMcGxhY2Vob2xkZXJzGAEgAygLMi0uY29kZXdpcmUudjEuRW52aXJvbm1lbnRDcmVkZW50aWFsUGxhY2Vob2xkZXIiXQoaRnJvbnREb29yRGVsZWdhdGlvblJlcXVlc3QSPwoFZnJhbWUYASABKAsyMC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUd1ZXN0TWVzc2FnZSKnAQobRnJvbnREb29yRGVsZWdhdGlvblJlc3BvbnNlEjwKCGFkbWl0dGVkGAEgASgLMiguY29kZXdpcmUudjEuRnJvbnREb29yRGVsZWdhdGlvbkFkbWl0dGVkSAASQAoFZnJhbWUYAiABKAsyLy5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUhvc3RNZXNzYWdlSABCCAoGb3V0cHV0IjMKG0Zyb250RG9vckRlbGVnYXRpb25BZG1pdHRlZBIUCgxjYXBhYmlsaXRpZXMYASADKAkiSwobQ3JlZGVudGlhbERlbGVnYXRpb25Qcm9maWxlEhIKCnByb2ZpbGVfaWQYASABKAkSGAoQcHJvZmlsZV9yZXZpc2lvbhgCIAEoBCLwAgoYQ3JlZGVudGlhbERlbGVnYXRpb25PcGVuEjkKB3J1bnRpbWUYASABKAsyKC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZU9wZW4SDgoGb3JnX2lkGAIgASgJEhgKEHNlbGVjdGlvbl9zaGEyNTYYAyABKAwSFwoKcHJvamVjdF9pZBgEIAEoCUgAiAEBEhQKDHVzZXJfc2VjcmV0cxgFIAEoCBIcChRvcmdhbml6YXRpb25fc2VjcmV0cxgGIAEoCBI5Cgdwcm9maWxlGAcgASgLMiguY29kZXdpcmUudjEuQ3JlZGVudGlhbERlbGVnYXRpb25Qcm9maWxlEiEKGW9yZGluYXJ5X2Vudmlyb25tZW50X2tleXMYCCADKAkSIQoZcmVzZXJ2ZWRfZW52aXJvbm1lbnRfa2V5cxgJIAMoCRISCgpmcm9udF9kb29yGAogASgIQg0KC19wcm9qZWN0X2lkIh8KHUNyZWRlbnRpYWxEZWxlZ2F0aW9uS2VlcGFsaXZlIuABChpEZWxlZ2F0ZUNyZWRlbnRpYWxzUmVxdWVzdBI1CgRvcGVuGAEgASgLMiUuY29kZXdpcmUudjEuQ3JlZGVudGlhbERlbGVnYXRpb25PcGVuSAASQQoFZnJhbWUYAiABKAsyMC5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUd1ZXN0TWVzc2FnZUgAEj8KCWtlZXBhbGl2ZRgDIAEoCzIqLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uS2VlcGFsaXZlSABCBwoFaW5wdXQinwIKG0RlbGVnYXRlQ3JlZGVudGlhbHNSZXNwb25zZRJACgVmcmFtZRgBIAEoCzIvLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlSG9zdE1lc3NhZ2VIABI5CghhZG1pdHRlZBgCIAEoCzIlLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uT3BlbkgAEj8KCWtlZXBhbGl2ZRgDIAEoCzIqLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uS2VlcGFsaXZlSAASGQoRYWNjZXB0c19rZWVwYWxpdmUYBCABKAgSHQoQZnJvbnRfZG9vcl9lcG9jaBgFIAEoDEIDgAEBQggKBm91dHB1dDKOAwobQ3JlZGVudGlhbERlbGVnYXRpb25TZXJ2aWNlEmwKE0RlbGVnYXRlQ3JlZGVudGlhbHMSJy5jb2Rld2lyZS52MS5EZWxlZ2F0ZUNyZWRlbnRpYWxzUmVxdWVzdBooLmNvZGV3aXJlLnYxLkRlbGVnYXRlQ3JlZGVudGlhbHNSZXNwb25zZSgBMAESbAoTRnJvbnREb29yRGVsZWdhdGlvbhInLmNvZGV3aXJlLnYxLkZyb250RG9vckRlbGVnYXRpb25SZXF1ZXN0GiguY29kZXdpcmUudjEuRnJvbnREb29yRGVsZWdhdGlvblJlc3BvbnNlKAEwARKSAQohRW52aXJvbm1lbnRDcmVkZW50aWFsUGxhY2Vob2xkZXJzEjUuY29kZXdpcmUudjEuRW52aXJvbm1lbnRDcmVkZW50aWFsUGxhY2Vob2xkZXJzUmVxdWVzdBo2LmNvZGV3aXJlLnYxLkVudmlyb25tZW50Q3JlZGVudGlhbFBsYWNlaG9sZGVyc1Jlc3BvbnNlQrwBCg9jb20uY29kZXdpcmUudjFCGUNyZWRlbnRpYWxEZWxlZ2F0aW9uUHJvdG9QAVpBZ2l0aHViLmNvbS9jb2Rld2lyZXNoL2NvZGV3aXJlL2xpYnMvZ2VuLWdvL2NvZGV3aXJlL3YxO2NvZGV3aXJldjGiAgNDWFiqAgtDb2Rld2lyZS5WMcoCC0NvZGV3aXJlXFYx4gIXQ29kZXdpcmVcVjFcR1BCTWV0YWRhdGHqAgxDb2Rld2lyZTo6VjFiBnByb3RvMw", [file_codewire_bridge_v1_bridge]);
+  fileDesc("Cidjb2Rld2lyZS92MS9jcmVkZW50aWFsX2RlbGVnYXRpb24ucHJvdG8SC2NvZGV3aXJlLnYxIloKHkVudmlyb25tZW50Qm91bmRTZWNyZXRzUmVxdWVzdBI4CglzZWxlY3Rpb24YASABKAsyJS5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbk9wZW4iVQofRW52aXJvbm1lbnRCb3VuZFNlY3JldHNSZXNwb25zZRIyCgZyZWNvcmQYASABKAsyIi5jb2Rld2lyZS52MS5Mb2NhbEJvb3RCb3VuZFNlY3JldHMiWQoVTG9jYWxCb290Qm91bmRTZWNyZXRzEjIKB3NlY3JldHMYASADKAsyIS5jb2Rld2lyZS52MS5Mb2NhbEJvb3RCb3VuZFNlY3JldBIMCgRzZWFsGAIgASgJInsKFExvY2FsQm9vdEJvdW5kU2VjcmV0EgwKBHBhdGgYASABKAkSCwoDa2V5GAIgASgJEhoKEmJpbmRpbmdfZ2VuZXJhdGlvbhgDIAEoBBIsCgVib3VuZBgEIAEoCzIdLmNvZGV3aXJlLnYxLkxvY2FsQm9vdEJpbmRpbmciVQoQTG9jYWxCb290QmluZGluZxISCgpiaW5kaW5nX2lkGAEgASgJEhMKBnByZWZpeBgCIAEoCUgAiAEBEg0KBWhvc3RzGAMgAygJQgkKB19wcmVmaXgifgooRW52aXJvbm1lbnRDcmVkZW50aWFsUGxhY2Vob2xkZXJzUmVxdWVzdBI4CglzZWxlY3Rpb24YASABKAsyJS5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbk9wZW4SGAoQY2FwYWJpbGl0eV9zbG90cxgCIAMoCSJVCiBFbnZpcm9ubWVudENyZWRlbnRpYWxQbGFjZWhvbGRlchIXCg9jYXBhYmlsaXR5X3Nsb3QYASABKAkSGAoLcGxhY2Vob2xkZXIYAiABKAlCA4ABASJwCilFbnZpcm9ubWVudENyZWRlbnRpYWxQbGFjZWhvbGRlcnNSZXNwb25zZRJDCgxwbGFjZWhvbGRlcnMYASADKAsyLS5jb2Rld2lyZS52MS5FbnZpcm9ubWVudENyZWRlbnRpYWxQbGFjZWhvbGRlciJdChpGcm9udERvb3JEZWxlZ2F0aW9uUmVxdWVzdBI/CgVmcmFtZRgBIAEoCzIwLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlR3Vlc3RNZXNzYWdlIqcBChtGcm9udERvb3JEZWxlZ2F0aW9uUmVzcG9uc2USPAoIYWRtaXR0ZWQYASABKAsyKC5jb2Rld2lyZS52MS5Gcm9udERvb3JEZWxlZ2F0aW9uQWRtaXR0ZWRIABJACgVmcmFtZRgCIAEoCzIvLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlSG9zdE1lc3NhZ2VIAEIICgZvdXRwdXQiMwobRnJvbnREb29yRGVsZWdhdGlvbkFkbWl0dGVkEhQKDGNhcGFiaWxpdGllcxgBIAMoCSJLChtDcmVkZW50aWFsRGVsZWdhdGlvblByb2ZpbGUSEgoKcHJvZmlsZV9pZBgBIAEoCRIYChBwcm9maWxlX3JldmlzaW9uGAIgASgEIqsDChhDcmVkZW50aWFsRGVsZWdhdGlvbk9wZW4SOQoHcnVudGltZRgBIAEoCzIoLmNvZGV3aXJlLmJyaWRnZS52MS5DcmVkZW50aWFsQnJpZGdlT3BlbhIOCgZvcmdfaWQYAiABKAkSGAoQc2VsZWN0aW9uX3NoYTI1NhgDIAEoDBIXCgpwcm9qZWN0X2lkGAQgASgJSACIAQESFAoMdXNlcl9zZWNyZXRzGAUgASgIEhwKFG9yZ2FuaXphdGlvbl9zZWNyZXRzGAYgASgIEjkKB3Byb2ZpbGUYByABKAsyKC5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvblByb2ZpbGUSIQoZb3JkaW5hcnlfZW52aXJvbm1lbnRfa2V5cxgIIAMoCRIhChlyZXNlcnZlZF9lbnZpcm9ubWVudF9rZXlzGAkgAygJEhIKCmZyb250X2Rvb3IYCiABKAgSOQoNYm91bmRfc2VjcmV0cxgLIAEoCzIiLmNvZGV3aXJlLnYxLkxvY2FsQm9vdEJvdW5kU2VjcmV0c0INCgtfcHJvamVjdF9pZCIfCh1DcmVkZW50aWFsRGVsZWdhdGlvbktlZXBhbGl2ZSLgAQoaRGVsZWdhdGVDcmVkZW50aWFsc1JlcXVlc3QSNQoEb3BlbhgBIAEoCzIlLmNvZGV3aXJlLnYxLkNyZWRlbnRpYWxEZWxlZ2F0aW9uT3BlbkgAEkEKBWZyYW1lGAIgASgLMjAuY29kZXdpcmUuYnJpZGdlLnYxLkNyZWRlbnRpYWxCcmlkZ2VHdWVzdE1lc3NhZ2VIABI/CglrZWVwYWxpdmUYAyABKAsyKi5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbktlZXBhbGl2ZUgAQgcKBWlucHV0Ip8CChtEZWxlZ2F0ZUNyZWRlbnRpYWxzUmVzcG9uc2USQAoFZnJhbWUYASABKAsyLy5jb2Rld2lyZS5icmlkZ2UudjEuQ3JlZGVudGlhbEJyaWRnZUhvc3RNZXNzYWdlSAASOQoIYWRtaXR0ZWQYAiABKAsyJS5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbk9wZW5IABI/CglrZWVwYWxpdmUYAyABKAsyKi5jb2Rld2lyZS52MS5DcmVkZW50aWFsRGVsZWdhdGlvbktlZXBhbGl2ZUgAEhkKEWFjY2VwdHNfa2VlcGFsaXZlGAQgASgIEh0KEGZyb250X2Rvb3JfZXBvY2gYBSABKAxCA4ABAUIICgZvdXRwdXQyhAQKG0NyZWRlbnRpYWxEZWxlZ2F0aW9uU2VydmljZRJsChNEZWxlZ2F0ZUNyZWRlbnRpYWxzEicuY29kZXdpcmUudjEuRGVsZWdhdGVDcmVkZW50aWFsc1JlcXVlc3QaKC5jb2Rld2lyZS52MS5EZWxlZ2F0ZUNyZWRlbnRpYWxzUmVzcG9uc2UoATABEmwKE0Zyb250RG9vckRlbGVnYXRpb24SJy5jb2Rld2lyZS52MS5Gcm9udERvb3JEZWxlZ2F0aW9uUmVxdWVzdBooLmNvZGV3aXJlLnYxLkZyb250RG9vckRlbGVnYXRpb25SZXNwb25zZSgBMAESkgEKIUVudmlyb25tZW50Q3JlZGVudGlhbFBsYWNlaG9sZGVycxI1LmNvZGV3aXJlLnYxLkVudmlyb25tZW50Q3JlZGVudGlhbFBsYWNlaG9sZGVyc1JlcXVlc3QaNi5jb2Rld2lyZS52MS5FbnZpcm9ubWVudENyZWRlbnRpYWxQbGFjZWhvbGRlcnNSZXNwb25zZRJ0ChdFbnZpcm9ubWVudEJvdW5kU2VjcmV0cxIrLmNvZGV3aXJlLnYxLkVudmlyb25tZW50Qm91bmRTZWNyZXRzUmVxdWVzdBosLmNvZGV3aXJlLnYxLkVudmlyb25tZW50Qm91bmRTZWNyZXRzUmVzcG9uc2VCvAEKD2NvbS5jb2Rld2lyZS52MUIZQ3JlZGVudGlhbERlbGVnYXRpb25Qcm90b1ABWkFnaXRodWIuY29tL2NvZGV3aXJlc2gvY29kZXdpcmUvbGlicy9nZW4tZ28vY29kZXdpcmUvdjE7Y29kZXdpcmV2MaICA0NYWKoCC0NvZGV3aXJlLlYxygILQ29kZXdpcmVcVjHiAhdDb2Rld2lyZVxWMVxHUEJNZXRhZGF0YeoCDENvZGV3aXJlOjpWMWIGcHJvdG8z", [file_codewire_bridge_v1_bridge]);
+
+/**
+ * @generated from message codewire.v1.EnvironmentBoundSecretsRequest
+ */
+export type EnvironmentBoundSecretsRequest = Message<"codewire.v1.EnvironmentBoundSecretsRequest"> & {
+  /**
+   * The boot's selection, exactly as EnvironmentCredentialPlaceholdersRequest
+   * carries it, with no record.
+   *
+   * @generated from field: codewire.v1.CredentialDelegationOpen selection = 1;
+   */
+  selection?: CredentialDelegationOpen | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.EnvironmentBoundSecretsRequest.
+ * Use `create(EnvironmentBoundSecretsRequestSchema)` to create a new message.
+ */
+export const EnvironmentBoundSecretsRequestSchema: GenMessage<EnvironmentBoundSecretsRequest> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential_delegation, 0);
+
+/**
+ * @generated from message codewire.v1.EnvironmentBoundSecretsResponse
+ */
+export type EnvironmentBoundSecretsResponse = Message<"codewire.v1.EnvironmentBoundSecretsResponse"> & {
+  /**
+   * @generated from field: codewire.v1.LocalBootBoundSecrets record = 1;
+   */
+  record?: LocalBootBoundSecrets | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.EnvironmentBoundSecretsResponse.
+ * Use `create(EnvironmentBoundSecretsResponseSchema)` to create a new message.
+ */
+export const EnvironmentBoundSecretsResponseSchema: GenMessage<EnvironmentBoundSecretsResponse> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential_delegation, 1);
+
+/**
+ * A local VM boot's sealed record of its platform sources' secrets (#4003;
+ * docs/dev/SECRETS-AND-CREDENTIALS.md, "A local VM's platform sources").
+ * Names, generations, hosts and prefixes only: never a value or a
+ * placeholder.
+ *
+ * @generated from message codewire.v1.LocalBootBoundSecrets
+ */
+export type LocalBootBoundSecrets = Message<"codewire.v1.LocalBootBoundSecrets"> & {
+  /**
+   * @generated from field: repeated codewire.v1.LocalBootBoundSecret secrets = 1;
+   */
+  secrets: LocalBootBoundSecret[];
+
+  /**
+   * The platform's HMAC over the record, the environment, its generation
+   * and the selection, as OpenBao transit's `vault:vN:` string, unchanged.
+   *
+   * @generated from field: string seal = 2;
+   */
+  seal: string;
+};
+
+/**
+ * Describes the message codewire.v1.LocalBootBoundSecrets.
+ * Use `create(LocalBootBoundSecretsSchema)` to create a new message.
+ */
+export const LocalBootBoundSecretsSchema: GenMessage<LocalBootBoundSecrets> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential_delegation, 2);
+
+/**
+ * One platform secret the boot's projection takes. `bound` is set for a
+ * secret bound at the read.
+ *
+ * @generated from message codewire.v1.LocalBootBoundSecret
+ */
+export type LocalBootBoundSecret = Message<"codewire.v1.LocalBootBoundSecret"> & {
+  /**
+   * @generated from field: string path = 1;
+   */
+  path: string;
+
+  /**
+   * @generated from field: string key = 2;
+   */
+  key: string;
+
+  /**
+   * @generated from field: uint64 binding_generation = 3;
+   */
+  bindingGeneration: bigint;
+
+  /**
+   * @generated from field: codewire.v1.LocalBootBinding bound = 4;
+   */
+  bound?: LocalBootBinding | undefined;
+};
+
+/**
+ * Describes the message codewire.v1.LocalBootBoundSecret.
+ * Use `create(LocalBootBoundSecretSchema)` to create a new message.
+ */
+export const LocalBootBoundSecretSchema: GenMessage<LocalBootBoundSecret> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential_delegation, 3);
+
+/**
+ * @generated from message codewire.v1.LocalBootBinding
+ */
+export type LocalBootBinding = Message<"codewire.v1.LocalBootBinding"> & {
+  /**
+   * The binding's UUID, lowercase and hyphenated.
+   *
+   * @generated from field: string binding_id = 1;
+   */
+  bindingId: string;
+
+  /**
+   * @generated from field: optional string prefix = 2;
+   */
+  prefix?: string | undefined;
+
+  /**
+   * @generated from field: repeated string hosts = 3;
+   */
+  hosts: string[];
+};
+
+/**
+ * Describes the message codewire.v1.LocalBootBinding.
+ * Use `create(LocalBootBindingSchema)` to create a new message.
+ */
+export const LocalBootBindingSchema: GenMessage<LocalBootBinding> = /*@__PURE__*/
+  messageDesc(file_codewire_v1_credential_delegation, 4);
 
 /**
  * @generated from message codewire.v1.EnvironmentCredentialPlaceholdersRequest
@@ -41,7 +172,7 @@ export type EnvironmentCredentialPlaceholdersRequest = Message<"codewire.v1.Envi
  * Use `create(EnvironmentCredentialPlaceholdersRequestSchema)` to create a new message.
  */
 export const EnvironmentCredentialPlaceholdersRequestSchema: GenMessage<EnvironmentCredentialPlaceholdersRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 0);
+  messageDesc(file_codewire_v1_credential_delegation, 5);
 
 /**
  * @generated from message codewire.v1.EnvironmentCredentialPlaceholder
@@ -65,7 +196,7 @@ export type EnvironmentCredentialPlaceholder = Message<"codewire.v1.EnvironmentC
  * Use `create(EnvironmentCredentialPlaceholderSchema)` to create a new message.
  */
 export const EnvironmentCredentialPlaceholderSchema: GenMessage<EnvironmentCredentialPlaceholder> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 1);
+  messageDesc(file_codewire_v1_credential_delegation, 6);
 
 /**
  * @generated from message codewire.v1.EnvironmentCredentialPlaceholdersResponse
@@ -84,7 +215,7 @@ export type EnvironmentCredentialPlaceholdersResponse = Message<"codewire.v1.Env
  * Use `create(EnvironmentCredentialPlaceholdersResponseSchema)` to create a new message.
  */
 export const EnvironmentCredentialPlaceholdersResponseSchema: GenMessage<EnvironmentCredentialPlaceholdersResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 2);
+  messageDesc(file_codewire_v1_credential_delegation, 7);
 
 /**
  * One front-door bridge frame from the front door, carried unchanged.
@@ -103,7 +234,7 @@ export type FrontDoorDelegationRequest = Message<"codewire.v1.FrontDoorDelegatio
  * Use `create(FrontDoorDelegationRequestSchema)` to create a new message.
  */
 export const FrontDoorDelegationRequestSchema: GenMessage<FrontDoorDelegationRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 3);
+  messageDesc(file_codewire_v1_credential_delegation, 8);
 
 /**
  * @generated from message codewire.v1.FrontDoorDelegationResponse
@@ -136,7 +267,7 @@ export type FrontDoorDelegationResponse = Message<"codewire.v1.FrontDoorDelegati
  * Use `create(FrontDoorDelegationResponseSchema)` to create a new message.
  */
 export const FrontDoorDelegationResponseSchema: GenMessage<FrontDoorDelegationResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 4);
+  messageDesc(file_codewire_v1_credential_delegation, 9);
 
 /**
  * A join's admission: the front-door operations its epoch serves, which the
@@ -156,7 +287,7 @@ export type FrontDoorDelegationAdmitted = Message<"codewire.v1.FrontDoorDelegati
  * Use `create(FrontDoorDelegationAdmittedSchema)` to create a new message.
  */
 export const FrontDoorDelegationAdmittedSchema: GenMessage<FrontDoorDelegationAdmitted> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 5);
+  messageDesc(file_codewire_v1_credential_delegation, 10);
 
 /**
  * An explicit immutable selection, not a credential or transferable grant.
@@ -180,7 +311,7 @@ export type CredentialDelegationProfile = Message<"codewire.v1.CredentialDelegat
  * Use `create(CredentialDelegationProfileSchema)` to create a new message.
  */
 export const CredentialDelegationProfileSchema: GenMessage<CredentialDelegationProfile> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 6);
+  messageDesc(file_codewire_v1_credential_delegation, 11);
 
 /**
  * First and only selection frame. The authenticated owner asserts the native
@@ -255,6 +386,17 @@ export type CredentialDelegationOpen = Message<"codewire.v1.CredentialDelegation
    * @generated from field: bool front_door = 10;
    */
   frontDoor: boolean;
+
+  /**
+   * The boot's sealed record of its platform sources' bound secrets
+   * (#4003), as EnvironmentBoundSecrets answered it. Absent from a boot
+   * that has none, which counts as recording nothing. The platform verifies
+   * its seal against this Open's environment, generation and selection
+   * before anything else. Part of the exact admission echo.
+   *
+   * @generated from field: codewire.v1.LocalBootBoundSecrets bound_secrets = 11;
+   */
+  boundSecrets?: LocalBootBoundSecrets | undefined;
 };
 
 /**
@@ -262,7 +404,7 @@ export type CredentialDelegationOpen = Message<"codewire.v1.CredentialDelegation
  * Use `create(CredentialDelegationOpenSchema)` to create a new message.
  */
 export const CredentialDelegationOpenSchema: GenMessage<CredentialDelegationOpen> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 7);
+  messageDesc(file_codewire_v1_credential_delegation, 12);
 
 /**
  * An empty message that keeps an idle admitted stream from being ended by a
@@ -279,7 +421,7 @@ export type CredentialDelegationKeepalive = Message<"codewire.v1.CredentialDeleg
  * Use `create(CredentialDelegationKeepaliveSchema)` to create a new message.
  */
 export const CredentialDelegationKeepaliveSchema: GenMessage<CredentialDelegationKeepalive> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 8);
+  messageDesc(file_codewire_v1_credential_delegation, 13);
 
 /**
  * @generated from message codewire.v1.DelegateCredentialsRequest
@@ -319,7 +461,7 @@ export type DelegateCredentialsRequest = Message<"codewire.v1.DelegateCredential
  * Use `create(DelegateCredentialsRequestSchema)` to create a new message.
  */
 export const DelegateCredentialsRequestSchema: GenMessage<DelegateCredentialsRequest> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 9);
+  messageDesc(file_codewire_v1_credential_delegation, 14);
 
 /**
  * @generated from message codewire.v1.DelegateCredentialsResponse
@@ -383,7 +525,7 @@ export type DelegateCredentialsResponse = Message<"codewire.v1.DelegateCredentia
  * Use `create(DelegateCredentialsResponseSchema)` to create a new message.
  */
 export const DelegateCredentialsResponseSchema: GenMessage<DelegateCredentialsResponse> = /*@__PURE__*/
-  messageDesc(file_codewire_v1_credential_delegation, 10);
+  messageDesc(file_codewire_v1_credential_delegation, 15);
 
 /**
  * The isolated platform credential authority serves this owner-OAuth-only
@@ -434,6 +576,24 @@ export const CredentialDelegationService: GenService<{
     methodKind: "unary";
     input: typeof EnvironmentCredentialPlaceholdersRequestSchema;
     output: typeof EnvironmentCredentialPlaceholdersResponseSchema;
+  },
+  /**
+   * A local VM's record of its platform sources' bound secrets (#4003),
+   * asked before the boot starts and admitted exactly as
+   * EnvironmentCredentialPlaceholders is: the same selection checks, the
+   * same refusals and the same rate limit. The platform reads the
+   * selection's sources once and answers every platform secret its
+   * projection would take, bound or plain, and the record's seal. The boot
+   * carries both back in its delegation's Open. A selection that can't be
+   * read, or a seal key that can't be reached, is UNAVAILABLE; a platform
+   * with no seal key answers UNIMPLEMENTED.
+   *
+   * @generated from rpc codewire.v1.CredentialDelegationService.EnvironmentBoundSecrets
+   */
+  environmentBoundSecrets: {
+    methodKind: "unary";
+    input: typeof EnvironmentBoundSecretsRequestSchema;
+    output: typeof EnvironmentBoundSecretsResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_codewire_v1_credential_delegation, 0);

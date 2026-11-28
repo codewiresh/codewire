@@ -60,6 +60,8 @@ struct Authority {
     session: Mutex<PlatformRuntimeSession>,
     calls: AtomicUsize,
     captured: Notify,
+    /// Each read of the epoch's bound-secret grants (#4003).
+    bound_reads: AtomicUsize,
 }
 
 #[async_trait]
@@ -70,6 +72,13 @@ impl PlatformRuntimeAuthority for Authority {
             self.captured.notify_one();
         }
         Ok(session)
+    }
+
+    async fn bound_secrets(
+        &self,
+    ) -> Result<Vec<codewire_access::FirstBindSecret>, PlatformRuntimeError> {
+        self.bound_reads.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
     }
 }
 
@@ -260,6 +269,7 @@ impl Fixture {
             session: Mutex::new(session),
             calls: AtomicUsize::new(0),
             captured: Notify::new(),
+            bound_reads: AtomicUsize::new(0),
         });
         let authenticator = Arc::new(Authenticator {
             authority,

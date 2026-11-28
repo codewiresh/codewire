@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use codewire_access::{
     AccessProfileId, AccessProfileName, AccessProfileReference, CapabilitySlot, CredentialAuthKind,
-    CredentialId, CredentialStatus, DerivedGrant, EnvironmentAccessBinding, EnvironmentId,
-    ProviderCatalog, ProviderId, builtin_provider_catalog,
+    CredentialId, CredentialStatus, EnvironmentAccessBinding, EnvironmentId, ProviderCatalog,
+    ProviderId, builtin_provider_catalog,
 };
 use codewire_protected_store::{
     MAX_PROTECTED_VALUE_BYTES, ProtectedStore, ProtectedStorePersistence, ProtectedValue,
@@ -70,6 +70,7 @@ mod credential_lifecycle;
 mod renewal;
 use renewal::BrokerRenewal;
 mod grants;
+pub(crate) use grants::derived_grant_to_proto;
 mod placeholders;
 mod profiles;
 mod provider_revocation;
@@ -1639,6 +1640,15 @@ impl<S: ProtectedStore + 'static> LocalCredentialAuthorityService for AuthorityR
         .map(Response::new)
     }
 
+    async fn get_platform_boot_bound_secrets(
+        &self,
+        request: Request<v1::GetPlatformBootBoundSecretsRequest>,
+    ) -> Result<Response<v1::GetPlatformBootBoundSecretsResponse>, Status> {
+        placeholders::platform_boot_bound_secrets(Arc::clone(&self.brokers), request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
     async fn ensure_environment_broker(
         &self,
         request: Request<v1::EnsureEnvironmentBrokerRequest>,
@@ -1985,33 +1995,6 @@ pub(crate) fn credential_to_proto(record: CredentialRecord) -> v1::Credential {
             openssh: key.openssh,
             fingerprint: key.fingerprint,
         }),
-    }
-}
-
-pub(crate) fn derived_grant_to_proto(grant: DerivedGrant) -> v1::DerivedGrant {
-    v1::DerivedGrant {
-        environment_id: grant.environment_id.to_string(),
-        environment_generation: grant.environment_generation,
-        // Local grants always name their profile; a missing one encodes as
-        // revision 0, which every decoder rejects.
-        profile_id: grant
-            .profile
-            .as_ref()
-            .map(|profile| profile.id.to_string())
-            .unwrap_or_default(),
-        profile_revision: grant.profile.as_ref().map_or(0, |profile| profile.revision),
-        capability_slot: grant.capability_slot.to_string(),
-        credential_id: grant.credential_id.to_string(),
-        credential_revocation_generation: grant.credential_revocation_generation,
-        expires_at_unix: grant.expires_at_unix,
-        permissions: grant
-            .permissions
-            .into_iter()
-            .map(|permission| v1::GrantPermission {
-                operation: permission.operation.to_string(),
-                route: permission.route.to_string(),
-            })
-            .collect(),
     }
 }
 

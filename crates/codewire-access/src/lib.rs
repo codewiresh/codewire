@@ -17,6 +17,7 @@ mod id;
 mod managed_refresh;
 mod model;
 mod placeholder;
+mod platform_boot_record;
 mod presets;
 mod projected_placeholders;
 mod projection;
@@ -78,6 +79,7 @@ pub use placeholder::{
     ApplicationSecretKey, CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG,
     CredentialPlaceholder, PLACEHOLDER_KEY_BYTES, PlaceholderKey, SecretPlaceholder, known_answer,
 };
+pub use platform_boot_record::{PlatformBootBinding, PlatformBootRecord, PlatformBootSecret};
 pub use presets::{BINDING_PRESETS, BindingPreset, binding_preset, nearest_binding_preset};
 pub use projected_placeholders::{PROJECTED_PLACEHOLDER_SLOTS, ProjectedPlaceholders};
 pub use projection::{

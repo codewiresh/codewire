@@ -38,6 +38,7 @@ mod tests {
                 value: b"boot-secret-canary".to_vec(),
             }],
             bound_secrets: None,
+            platform_bound_secrets: None,
         };
         let debug = format!("{response:?}");
         assert!(debug.contains("[REDACTED]"), "{debug}");

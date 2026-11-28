@@ -115,5 +115,49 @@ async fn platform_placeholders<S: ProtectedStore + 'static>(
     .map_err(|_| Status::deadline_exceeded("platform credential placeholders timed out"))?
 }
 
+/// A platform boot's sealed record of its platform sources' bound secrets
+/// (#4003), asked of the platform as its selection's creator for an
+/// environment a platform broker start would admit, under the same deadline
+/// as its seed placeholders. A platform that keeps no record gives none.
+pub(super) async fn platform_boot_bound_secrets<S: ProtectedStore + 'static>(
+    brokers: Arc<BrokerProcessManager<S>>,
+    request: v1::GetPlatformBootBoundSecretsRequest,
+) -> Result<v1::GetPlatformBootBoundSecretsResponse, Status> {
+    let environment_id = environment_id(request.environment_id)?;
+    let generation = request.environment_generation;
+    if generation == 0 {
+        return Err(Status::invalid_argument("invalid environment generation"));
+    }
+    let platform = request
+        .platform
+        .ok_or_else(|| Status::invalid_argument("a platform boot names its binding"))?;
+    let deadline = tokio::time::Instant::now() + PLATFORM_PLACEHOLDERS_DEADLINE;
+    let binding = crate::PlatformCredentialBinding::from_proto(platform)?;
+    binding.validate()?;
+    if binding.boot_record.is_some() {
+        return Err(Status::invalid_argument(
+            "a boot's record question carries no record",
+        ));
+    }
+    let authority = Arc::clone(&brokers.authority);
+    let connector = brokers.platform_connector.clone();
+    let record = tokio::time::timeout_at(deadline, async move {
+        let id = environment_id.clone();
+        run_blocking(move || authority.evaluate_selected_environment_grants(&id, generation, None))
+            .await?;
+        let connector = connector.ok_or_else(|| {
+            Status::unavailable("native platform credential connector is unavailable")
+        })?;
+        connector
+            .environment_bound_secrets(binding, environment_id.to_string(), generation, deadline)
+            .await
+    })
+    .await
+    .map_err(|_| Status::deadline_exceeded("platform boot bound secrets timed out"))??;
+    Ok(v1::GetPlatformBootBoundSecretsResponse {
+        record: record.map(crate::platform::boot_record_to_proto),
+    })
+}
+
 #[cfg(test)]
 mod tests;

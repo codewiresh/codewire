@@ -7,6 +7,48 @@ from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
+class EnvironmentBoundSecretsRequest(_message.Message):
+    __slots__ = ("selection",)
+    SELECTION_FIELD_NUMBER: _ClassVar[int]
+    selection: CredentialDelegationOpen
+    def __init__(self, selection: _Optional[_Union[CredentialDelegationOpen, _Mapping]] = ...) -> None: ...
+
+class EnvironmentBoundSecretsResponse(_message.Message):
+    __slots__ = ("record",)
+    RECORD_FIELD_NUMBER: _ClassVar[int]
+    record: LocalBootBoundSecrets
+    def __init__(self, record: _Optional[_Union[LocalBootBoundSecrets, _Mapping]] = ...) -> None: ...
+
+class LocalBootBoundSecrets(_message.Message):
+    __slots__ = ("secrets", "seal")
+    SECRETS_FIELD_NUMBER: _ClassVar[int]
+    SEAL_FIELD_NUMBER: _ClassVar[int]
+    secrets: _containers.RepeatedCompositeFieldContainer[LocalBootBoundSecret]
+    seal: str
+    def __init__(self, secrets: _Optional[_Iterable[_Union[LocalBootBoundSecret, _Mapping]]] = ..., seal: _Optional[str] = ...) -> None: ...
+
+class LocalBootBoundSecret(_message.Message):
+    __slots__ = ("path", "key", "binding_generation", "bound")
+    PATH_FIELD_NUMBER: _ClassVar[int]
+    KEY_FIELD_NUMBER: _ClassVar[int]
+    BINDING_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    BOUND_FIELD_NUMBER: _ClassVar[int]
+    path: str
+    key: str
+    binding_generation: int
+    bound: LocalBootBinding
+    def __init__(self, path: _Optional[str] = ..., key: _Optional[str] = ..., binding_generation: _Optional[int] = ..., bound: _Optional[_Union[LocalBootBinding, _Mapping]] = ...) -> None: ...
+
+class LocalBootBinding(_message.Message):
+    __slots__ = ("binding_id", "prefix", "hosts")
+    BINDING_ID_FIELD_NUMBER: _ClassVar[int]
+    PREFIX_FIELD_NUMBER: _ClassVar[int]
+    HOSTS_FIELD_NUMBER: _ClassVar[int]
+    binding_id: str
+    prefix: str
+    hosts: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, binding_id: _Optional[str] = ..., prefix: _Optional[str] = ..., hosts: _Optional[_Iterable[str]] = ...) -> None: ...
+
 class EnvironmentCredentialPlaceholdersRequest(_message.Message):
     __slots__ = ("selection", "capability_slots")
     SELECTION_FIELD_NUMBER: _ClassVar[int]
@@ -58,7 +100,7 @@ class CredentialDelegationProfile(_message.Message):
     def __init__(self, profile_id: _Optional[str] = ..., profile_revision: _Optional[int] = ...) -> None: ...
 
 class CredentialDelegationOpen(_message.Message):
-    __slots__ = ("runtime", "org_id", "selection_sha256", "project_id", "user_secrets", "organization_secrets", "profile", "ordinary_environment_keys", "reserved_environment_keys", "front_door")
+    __slots__ = ("runtime", "org_id", "selection_sha256", "project_id", "user_secrets", "organization_secrets", "profile", "ordinary_environment_keys", "reserved_environment_keys", "front_door", "bound_secrets")
     RUNTIME_FIELD_NUMBER: _ClassVar[int]
     ORG_ID_FIELD_NUMBER: _ClassVar[int]
     SELECTION_SHA256_FIELD_NUMBER: _ClassVar[int]
@@ -69,6 +111,7 @@ class CredentialDelegationOpen(_message.Message):
     ORDINARY_ENVIRONMENT_KEYS_FIELD_NUMBER: _ClassVar[int]
     RESERVED_ENVIRONMENT_KEYS_FIELD_NUMBER: _ClassVar[int]
     FRONT_DOOR_FIELD_NUMBER: _ClassVar[int]
+    BOUND_SECRETS_FIELD_NUMBER: _ClassVar[int]
     runtime: _bridge_pb2.CredentialBridgeOpen
     org_id: str
     selection_sha256: bytes
@@ -79,7 +122,8 @@ class CredentialDelegationOpen(_message.Message):
     ordinary_environment_keys: _containers.RepeatedScalarFieldContainer[str]
     reserved_environment_keys: _containers.RepeatedScalarFieldContainer[str]
     front_door: bool
-    def __init__(self, runtime: _Optional[_Union[_bridge_pb2.CredentialBridgeOpen, _Mapping]] = ..., org_id: _Optional[str] = ..., selection_sha256: _Optional[bytes] = ..., project_id: _Optional[str] = ..., user_secrets: _Optional[bool] = ..., organization_secrets: _Optional[bool] = ..., profile: _Optional[_Union[CredentialDelegationProfile, _Mapping]] = ..., ordinary_environment_keys: _Optional[_Iterable[str]] = ..., reserved_environment_keys: _Optional[_Iterable[str]] = ..., front_door: _Optional[bool] = ...) -> None: ...
+    bound_secrets: LocalBootBoundSecrets
+    def __init__(self, runtime: _Optional[_Union[_bridge_pb2.CredentialBridgeOpen, _Mapping]] = ..., org_id: _Optional[str] = ..., selection_sha256: _Optional[bytes] = ..., project_id: _Optional[str] = ..., user_secrets: _Optional[bool] = ..., organization_secrets: _Optional[bool] = ..., profile: _Optional[_Union[CredentialDelegationProfile, _Mapping]] = ..., ordinary_environment_keys: _Optional[_Iterable[str]] = ..., reserved_environment_keys: _Optional[_Iterable[str]] = ..., front_door: _Optional[bool] = ..., bound_secrets: _Optional[_Union[LocalBootBoundSecrets, _Mapping]] = ...) -> None: ...
 
 class CredentialDelegationKeepalive(_message.Message):
     __slots__ = ()

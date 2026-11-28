@@ -67,6 +67,11 @@ pub(in crate::supervisor) struct BootBindings {
     /// restore keeps. A checkpoint taken before the record has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(in crate::supervisor) bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
+    /// The captured boot's sealed record of its platform sources (#4003),
+    /// which a restore keeps and its delegation carries back. A checkpoint
+    /// taken before the record, or of a boot with none, has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(in crate::supervisor) platform_bound_secrets: Option<codewire_access::PlatformBootRecord>,
 }
 
 impl BootBindings {
@@ -448,6 +453,9 @@ pub(super) fn attach_boot(
     // The restored guest holds the placeholders its captured boot's record
     // derives, so that record is this boot's.
     request.bound_secrets = crate::runner::records_to_proto(checkpoint.boot.bound_secrets.clone());
+    request.platform_bound_secrets = crate::runner::BootRecords::platform_to_proto(
+        checkpoint.boot.platform_bound_secrets.clone(),
+    );
     request.checkpoint = Some(v1::CheckpointBoot {
         checkpoint_id: checkpoint_id.to_string(),
         source_environment_id: manifest.source.environment_id.to_string(),
@@ -477,6 +485,9 @@ pub(super) fn attach_boot(
             daemon_vsock_port: checkpoint.boot.daemon_vsock_port,
             intercept: checkpoint.boot.intercept,
             bound_secrets: crate::runner::records_to_proto(checkpoint.boot.bound_secrets.clone()),
+            platform_bound_secrets: crate::runner::BootRecords::platform_to_proto(
+                checkpoint.boot.platform_bound_secrets.clone(),
+            ),
         }),
         source_generation: checkpoint.source_generation,
         state_identity: placed_state_identity(supervisor, &request.environment_id),
@@ -677,5 +688,56 @@ mod name_tests {
         // A cut never leaves a separator before the time.
         let cut = format!("{}-b", "a".repeat(45));
         assert!(!default_name(&cut, 0).contains("--"));
+    }
+}
+
+#[cfg(test)]
+mod boot_binding_tests {
+    use super::*;
+
+    /// A checkpoint keeps its boot's sealed platform record in its manifest,
+    /// and one taken before the record reads as having none (#4003).
+    #[test]
+    fn boot_bindings_keep_the_platform_record() {
+        let record = codewire_access::PlatformBootRecord {
+            secrets: vec![codewire_access::PlatformBootSecret {
+                path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                key: "FANCY_TOKEN".into(),
+                binding_generation: 2,
+                bound: Some(codewire_access::PlatformBootBinding {
+                    binding_id: "00000000-0000-0000-0000-000000000009".into(),
+                    prefix: None,
+                    hosts: vec!["api.fancy.com".into()],
+                }),
+            }],
+            seal: "vault:v1:synthetic".into(),
+        };
+        let bindings = BootBindings {
+            skill_snapshot_sha256: None,
+            environment_projection_sha256: None,
+            managed_credential_clients: String::new(),
+            docker: false,
+            cw_runtime_catalog_generation: None,
+            daemon_vsock_port: 7777,
+            intercept: true,
+            state_disk_cleared: Some(true),
+            bound_secrets: Some(Vec::new()),
+            platform_bound_secrets: Some(record),
+        };
+        let json = serde_json::to_string(&bindings).unwrap();
+        assert_eq!(
+            serde_json::from_str::<BootBindings>(&json).unwrap(),
+            bindings
+        );
+        let older = BootBindings {
+            platform_bound_secrets: None,
+            ..bindings
+        };
+        let older_json = serde_json::to_value(&older).unwrap();
+        assert!(older_json.get("platform_bound_secrets").is_none());
+        assert_eq!(
+            serde_json::from_value::<BootBindings>(older_json).unwrap(),
+            older
+        );
     }
 }

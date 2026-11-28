@@ -3,8 +3,9 @@
 
 use super::*;
 
-/// The boot's bound names and seed placeholders, and its record of its
-/// bound secrets (#4003), whose hosts are bound beside the credentials'.
+/// The boot's bound names and seed placeholders, and its records of its
+/// bound secrets (#4003), local and platform, whose hosts are bound
+/// together beside the credentials'.
 pub(super) fn boot_interception(
     request: &mut v1::StartVmRequest,
     clients: codewire_access::ManagedCredentialClients,
@@ -12,19 +13,24 @@ pub(super) fn boot_interception(
     (
         codewire_egress_policy::intercept::InterceptSet,
         codewire_vmm_guest_probe::SeedPlaceholders,
-        Option<Vec<codewire_access::FirstBindSecret>>,
+        crate::runner::BootRecords,
     ),
     Status,
 > {
-    let record = crate::runner::records_from_proto(request.bound_secrets.take());
+    let records = crate::runner::BootRecords {
+        local: crate::runner::records_from_proto(request.bound_secrets.take()),
+        platform: crate::runner::BootRecords::platform_from_proto(
+            request.platform_bound_secrets.take(),
+        ),
+    };
     let (intercepts, placeholders) = crate::runner::boot_interception(
         request.intercept,
         clients,
         std::mem::take(&mut request.credential_placeholders),
-        record.as_deref().unwrap_or_default(),
+        &records.union(),
     )
     .map_err(|_| Status::invalid_argument("invalid credential placeholders"))?;
-    Ok((intercepts, placeholders, record))
+    Ok((intercepts, placeholders, records))
 }
 
 pub(super) fn parse_environment_id(value: &str) -> Result<Uuid, Status> {

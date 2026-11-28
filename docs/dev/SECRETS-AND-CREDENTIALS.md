@@ -3059,17 +3059,114 @@ and the credential service refuses to start without that grant.
     - On macOS the broker's sandbox allows outbound 443 only when the boot
       has a provider credential or a recorded bound secret. The sandbox
       can't filter by host, so the broker's own host check is the gate.
-  - **Not yet built: a local VM's platform sources.** The platform will seal
-    the boot's record of its platform sources, and the boot will carry the
-    record back in its delegation. Until then:
-    - A local VM's delegated projection counts as recording nothing, so a
-      platform secret that was ever bound and is plain now is refused
-      `first_bind_unrecorded`.
-    - A platform secret that is bound now gets its placeholder. No local
-      route swaps it, so it fails closed.
-    - A platform-mode boot's local bound secrets fail closed the same way:
-      its front door relays to the platform, which holds no grant for them.
-    Host-bound secrets aren't turned on anywhere until this is built.
+  - **A local VM's platform sources.** The boot records the bound secrets
+    of its platform sources as it records its local ones, but the platform
+    holds them. So the platform seals the record and the boot carries it
+    back. The platform keeps no row for a local boot.
+    - **The question.** A platform-mode boot asks
+      `CredentialDelegationService.EnvironmentBoundSecrets` before it starts,
+      beside its seed placeholders and within the same deadline. The question
+      is admitted exactly as `EnvironmentCredentialPlaceholders` is: the same
+      selection, the same refusals and the same rate limit. The local
+      authority asks it from protocol 39. A platform that doesn't serve it
+      answers UNIMPLEMENTED, and the boot goes on with no record, as with an
+      authority older than 39.
+    - **The answer.** The platform reads the selection's platform sources
+      once, in one transaction, and answers with:
+      - **the record:** every platform secret the projection would take,
+        bound or plain. Each entry has its path, key and
+        `binding_generation` at that read. A bound entry also has its
+        `binding_id`, hosts and prefix (`FirstBindSecret`).
+      - **the seal:** an HMAC-SHA256 under the platform's local-boot seal
+        key, as the transit `vault:vN:` string, which carries the key's
+        version.
+      - A selection the platform can't read is UNAVAILABLE, and the boot
+        fails. A selection that takes no platform secret gets an empty
+        record, still sealed.
+    - **The seal key.** The key is an OpenBao transit key used for nothing
+      else, created with `exportable=false`, `allow_plaintext_backup=false`
+      and `deletion_allowed=false`, on the credential service's own transit
+      mount (docs/CONFIGURATION.md, "Host-bound secrets").
+      - The credential service's policy grants `update` on
+        `transit/hmac/<key>/sha2-256` and `transit/verify/<key>/sha2-256`
+        only. It grants no read, rotate, config or export on
+        `transit/keys/<key>`. The hash algorithm is in the path, never taken
+        from a caller.
+      - Only the checked-in operator helper rotates the key and sets
+        `min_decryption_version`, which it keeps at the latest version minus
+        one.
+      - A seal is the transit `vault:vN:` string, unchanged. Verification
+        passes it to `transit/verify` as `hmac`, so OpenBao refuses a version
+        below `min_decryption_version` and compares in constant time. The
+        service never reads the key.
+      - A seal from the version before the latest still verifies, so one
+        rotation never refuses a running boot. A boot older than two
+        rotations is refused PERMISSION_DENIED at its next Open and has to
+        be restarted.
+      - A service with no seal key configured doesn't serve the question
+        (UNIMPLEMENTED) and refuses an Open that carries a record. If
+        OpenBao is unavailable, the boot question and the Open both fail
+        UNAVAILABLE, never as a pass.
+    - **The sealed input.** The input is the domain label
+      `codewire.local-bound-secrets.v1`, one zero byte, then each field
+      length-prefixed: a big-endian u32 length followed by the bytes.
+      - The fields, in order, are the environment ID (its 16 bytes), the
+        environment generation (big-endian u64), the selection's
+        `selection_sha256`, and then the entries, sorted by path and then
+        key.
+      - Each entry is its path, key, `binding_generation` (big-endian u64)
+        and a bound flag (one byte). A bound entry adds its `binding_id` (16
+        bytes), its prefix (empty when it has none) and its hosts, sorted and
+        preceded by their count (big-endian u32).
+      - The input is never proto bytes. A golden test holds the encoding
+        and that the record holds names, generations, hosts and prefixes
+        only, never a value.
+    - **The boot keeps it.** The boot keeps the record and seal for its life,
+      beside its local record. A checkpoint keeps them too, and a restore
+      carries the checkpoint's. The runner binds the record's bound hosts
+      with the local ones, and the boot refusals above cover the union.
+    - **A mixed boot.** A platform-mode boot's front door relays every
+      request to the platform, which holds no grant for a local source's
+      bound secret. So a platform-mode boot that records a local bound
+      secret is refused before anything starts
+      (`bound_secret_not_interceptable`, naming the key), never started with
+      that secret unswapped.
+    - **The delegation checks it.** `CredentialDelegationOpen` carries the
+      record and its seal.
+      - The platform verifies the seal against the Open's environment,
+        generation and selection before anything else. A seal that doesn't
+        verify is PERMISSION_DENIED, the same as any refused selection.
+      - The delegated projection and the epoch's bound-secret grants then
+        follow the record, as a Pod's first-bind record does hosted. The
+        epoch's front-door session swaps a recorded secret on the platform's
+        broker, since the boot's front door relays to it.
+      - **The invariant.** A secret that is plain now is projected raw only
+        when a seal that verifies records it plain at its current
+        `binding_generation`, or when it was never bound and the record
+        lacks it (created after the seal). Every other case gets a
+        placeholder, which carries no value, or a refusal by name. For a
+        secret that is plain now:
+
+        | The record | Projected |
+        | --- | --- |
+        | Recorded bound, at any generation | The placeholder the record derives. Its lease finds the secret plain and refuses it (`secret_binding_changed`), as hosted does. |
+        | Recorded plain, at its current generation | Its value. |
+        | Recorded plain, at another generation | Refused, `bound_secret_record_stale`. |
+        | Missing, and ever bound | Refused, `bound_secret_record_stale`. |
+        | Missing, and never bound, such as a secret created after the seal | Its value, as hosted. |
+
+      - The refusals make an older seal for the same boot worthless, so no
+        row is needed: a seal from while a secret was plain at generation g
+        is refused once the secret has been bound (g+1) and made plain again
+        (g+2), and one from while it was bound gives only the placeholder,
+        whose lease is refused.
+      - It refuses one rare case: a secret plain at boot, then bound, then
+        made plain again while the VM runs. A restart fixes it.
+      - An Open with no record, from an older client, counts as recording
+        nothing: a secret that was ever bound is refused
+        `first_bind_unrecorded`, and a secret that is bound now gets its
+        placeholder with no grant, so it fails closed.
+      - Each lease rereads the row as hosted does.
 
 **The swap**, on a bound host, after the network policy:
 
@@ -3258,6 +3355,7 @@ with #4971.
 | `secret_not_bound_to_host` | 403 | (#4003, not yet built) a bound secret's placeholder on an intercepted host its binding no longer names, or never named for this environment | "Codewire: KEY is not bound to HOST." Fix: bind it with `cw secrets … set KEY --host HOST`, then restart the environment |
 | `secret_binding_changed` | 403 | (#4003, not yet built) a bound secret's placeholder from before its binding changed (another header, scheme, prefix or presentation) | "Codewire: KEY's binding changed since this environment started." Fix: restart the environment |
 | `secret_deleted` | 403 | (#4003, not yet built) a bound secret's placeholder after the secret was deleted | "Codewire: KEY was deleted." No fix line |
+| `bound_secret_record_stale` | none: a launch is refused, not a request | (#4003, not yet built) a local VM's delegated projection, for a platform secret plain now that its boot's sealed record recorded plain at another `binding_generation`, or one missing from the record and ever bound | No body; the refused launch names the key. Fix: restart the environment so its boot records the secret again |
 | `credential_refresh_rate_limited` | 429 | a sign-in that waits out its provider's rate limit on a refresh, for a request whose access token has expired; it carries `Retry-After` with the wait left, 60 to 600 seconds, and is never Reconnect needed (#4975) | "Codewire: the provider is rate-limiting the refresh of the PROVIDER credential; try again in N seconds." No fix line |
 | `unavailable` | 503 | the request can't be checked against the network policy now: the signed policy decision is missing or doesn't match | "Codewire: this request to HOST can't be checked against the network policy right now; try again." |
 

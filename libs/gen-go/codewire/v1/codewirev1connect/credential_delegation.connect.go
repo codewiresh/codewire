@@ -43,6 +43,9 @@ const (
 	// CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure is the fully-qualified name
 	// of the CredentialDelegationService's EnvironmentCredentialPlaceholders RPC.
 	CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure = "/codewire.v1.CredentialDelegationService/EnvironmentCredentialPlaceholders"
+	// CredentialDelegationServiceEnvironmentBoundSecretsProcedure is the fully-qualified name of the
+	// CredentialDelegationService's EnvironmentBoundSecrets RPC.
+	CredentialDelegationServiceEnvironmentBoundSecretsProcedure = "/codewire.v1.CredentialDelegationService/EnvironmentBoundSecrets"
 )
 
 // CredentialDelegationServiceClient is a client for the codewire.v1.CredentialDelegationService
@@ -66,6 +69,16 @@ type CredentialDelegationServiceClient interface {
 	// reason. A key that can't be read or created is UNAVAILABLE, and more
 	// than 30 calls by one user in a minute RESOURCE_EXHAUSTED. Never logged.
 	EnvironmentCredentialPlaceholders(context.Context, *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error)
+	// A local VM's record of its platform sources' bound secrets (#4003),
+	// asked before the boot starts and admitted exactly as
+	// EnvironmentCredentialPlaceholders is: the same selection checks, the
+	// same refusals and the same rate limit. The platform reads the
+	// selection's sources once and answers every platform secret its
+	// projection would take, bound or plain, and the record's seal. The boot
+	// carries both back in its delegation's Open. A selection that can't be
+	// read, or a seal key that can't be reached, is UNAVAILABLE; a platform
+	// with no seal key answers UNIMPLEMENTED.
+	EnvironmentBoundSecrets(context.Context, *connect.Request[v1.EnvironmentBoundSecretsRequest]) (*connect.Response[v1.EnvironmentBoundSecretsResponse], error)
 }
 
 // NewCredentialDelegationServiceClient constructs a client for the
@@ -97,6 +110,12 @@ func NewCredentialDelegationServiceClient(httpClient connect.HTTPClient, baseURL
 			connect.WithSchema(credentialDelegationServiceMethods.ByName("EnvironmentCredentialPlaceholders")),
 			connect.WithClientOptions(opts...),
 		),
+		environmentBoundSecrets: connect.NewClient[v1.EnvironmentBoundSecretsRequest, v1.EnvironmentBoundSecretsResponse](
+			httpClient,
+			baseURL+CredentialDelegationServiceEnvironmentBoundSecretsProcedure,
+			connect.WithSchema(credentialDelegationServiceMethods.ByName("EnvironmentBoundSecrets")),
+			connect.WithClientOptions(opts...),
+		),
 	}
 }
 
@@ -105,6 +124,7 @@ type credentialDelegationServiceClient struct {
 	delegateCredentials               *connect.Client[v1.DelegateCredentialsRequest, v1.DelegateCredentialsResponse]
 	frontDoorDelegation               *connect.Client[v1.FrontDoorDelegationRequest, v1.FrontDoorDelegationResponse]
 	environmentCredentialPlaceholders *connect.Client[v1.EnvironmentCredentialPlaceholdersRequest, v1.EnvironmentCredentialPlaceholdersResponse]
+	environmentBoundSecrets           *connect.Client[v1.EnvironmentBoundSecretsRequest, v1.EnvironmentBoundSecretsResponse]
 }
 
 // DelegateCredentials calls codewire.v1.CredentialDelegationService.DelegateCredentials.
@@ -121,6 +141,11 @@ func (c *credentialDelegationServiceClient) FrontDoorDelegation(ctx context.Cont
 // codewire.v1.CredentialDelegationService.EnvironmentCredentialPlaceholders.
 func (c *credentialDelegationServiceClient) EnvironmentCredentialPlaceholders(ctx context.Context, req *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error) {
 	return c.environmentCredentialPlaceholders.CallUnary(ctx, req)
+}
+
+// EnvironmentBoundSecrets calls codewire.v1.CredentialDelegationService.EnvironmentBoundSecrets.
+func (c *credentialDelegationServiceClient) EnvironmentBoundSecrets(ctx context.Context, req *connect.Request[v1.EnvironmentBoundSecretsRequest]) (*connect.Response[v1.EnvironmentBoundSecretsResponse], error) {
+	return c.environmentBoundSecrets.CallUnary(ctx, req)
 }
 
 // CredentialDelegationServiceHandler is an implementation of the
@@ -144,6 +169,16 @@ type CredentialDelegationServiceHandler interface {
 	// reason. A key that can't be read or created is UNAVAILABLE, and more
 	// than 30 calls by one user in a minute RESOURCE_EXHAUSTED. Never logged.
 	EnvironmentCredentialPlaceholders(context.Context, *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error)
+	// A local VM's record of its platform sources' bound secrets (#4003),
+	// asked before the boot starts and admitted exactly as
+	// EnvironmentCredentialPlaceholders is: the same selection checks, the
+	// same refusals and the same rate limit. The platform reads the
+	// selection's sources once and answers every platform secret its
+	// projection would take, bound or plain, and the record's seal. The boot
+	// carries both back in its delegation's Open. A selection that can't be
+	// read, or a seal key that can't be reached, is UNAVAILABLE; a platform
+	// with no seal key answers UNIMPLEMENTED.
+	EnvironmentBoundSecrets(context.Context, *connect.Request[v1.EnvironmentBoundSecretsRequest]) (*connect.Response[v1.EnvironmentBoundSecretsResponse], error)
 }
 
 // NewCredentialDelegationServiceHandler builds an HTTP handler from the service implementation. It
@@ -171,6 +206,12 @@ func NewCredentialDelegationServiceHandler(svc CredentialDelegationServiceHandle
 		connect.WithSchema(credentialDelegationServiceMethods.ByName("EnvironmentCredentialPlaceholders")),
 		connect.WithHandlerOptions(opts...),
 	)
+	credentialDelegationServiceEnvironmentBoundSecretsHandler := connect.NewUnaryHandler(
+		CredentialDelegationServiceEnvironmentBoundSecretsProcedure,
+		svc.EnvironmentBoundSecrets,
+		connect.WithSchema(credentialDelegationServiceMethods.ByName("EnvironmentBoundSecrets")),
+		connect.WithHandlerOptions(opts...),
+	)
 	return "/codewire.v1.CredentialDelegationService/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case CredentialDelegationServiceDelegateCredentialsProcedure:
@@ -179,6 +220,8 @@ func NewCredentialDelegationServiceHandler(svc CredentialDelegationServiceHandle
 			credentialDelegationServiceFrontDoorDelegationHandler.ServeHTTP(w, r)
 		case CredentialDelegationServiceEnvironmentCredentialPlaceholdersProcedure:
 			credentialDelegationServiceEnvironmentCredentialPlaceholdersHandler.ServeHTTP(w, r)
+		case CredentialDelegationServiceEnvironmentBoundSecretsProcedure:
+			credentialDelegationServiceEnvironmentBoundSecretsHandler.ServeHTTP(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -198,4 +241,8 @@ func (UnimplementedCredentialDelegationServiceHandler) FrontDoorDelegation(conte
 
 func (UnimplementedCredentialDelegationServiceHandler) EnvironmentCredentialPlaceholders(context.Context, *connect.Request[v1.EnvironmentCredentialPlaceholdersRequest]) (*connect.Response[v1.EnvironmentCredentialPlaceholdersResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialDelegationService.EnvironmentCredentialPlaceholders is not implemented"))
+}
+
+func (UnimplementedCredentialDelegationServiceHandler) EnvironmentBoundSecrets(context.Context, *connect.Request[v1.EnvironmentBoundSecretsRequest]) (*connect.Response[v1.EnvironmentBoundSecretsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("codewire.v1.CredentialDelegationService.EnvironmentBoundSecrets is not implemented"))
 }

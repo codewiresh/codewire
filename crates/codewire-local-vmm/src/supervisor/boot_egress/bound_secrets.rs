@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use codewire_access::FirstBindSecret;
+use codewire_access::{FirstBindSecret, PlatformBootRecord};
 use codewire_egress_policy::intercept::InterceptSet;
 use codewire_local_credentials::AuthorityFeature;
 
@@ -18,6 +18,9 @@ use super::{Supervisor, SupervisorError};
 
 /// The supervisor's bound on the authority's metadata read.
 const RECORD_CALL_BOUND: Duration = Duration::from_secs(30);
+/// The supervisor's bound on a platform boot's record question, past the
+/// authority's own 10-second deadline for it, the seed placeholders'.
+const PLATFORM_RECORD_CALL_BOUND: Duration = Duration::from_secs(15);
 
 impl Supervisor {
     /// What the boot of `broker`'s selection records. A boot that selects no
@@ -43,6 +46,52 @@ impl Supervisor {
         .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?
         .map(Some)
         .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
+    }
+
+    /// What a platform boot of `broker`'s selection records of its platform
+    /// sources: the platform's sealed record, through the authority. A boot
+    /// that isn't on the platform has none, and so does one whose authority
+    /// or platform keeps none (older than the record, or with no seal key):
+    /// its delegation then counts as recording nothing. A selection the
+    /// platform can't read, or a seal key it can't reach, fails the boot.
+    pub(super) async fn record_platform_bound_secrets(
+        &self,
+        broker: &super::super::CredentialBrokerEnsureRequest,
+    ) -> Result<Option<PlatformBootRecord>, SupervisorError> {
+        let Some(platform) = &broker.platform else {
+            return Ok(None);
+        };
+        let mut client = self.access_control_client().await?;
+        if !AuthorityFeature::PlatformBootBoundSecrets.served_by(client.info().protocol_version) {
+            return Ok(None);
+        }
+        tokio::time::timeout(
+            PLATFORM_RECORD_CALL_BOUND,
+            client.platform_boot_bound_secrets(
+                &broker.environment_id,
+                broker.environment_generation,
+                platform.clone(),
+            ),
+        )
+        .await
+        .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)?
+        .map_err(|_| SupervisorError::CredentialAuthorityUnavailable)
+    }
+}
+
+/// Refuse a platform boot that records a local source's bound secret: its
+/// front door relays every request to the platform, which holds no grant
+/// for it, so it would never be swapped (docs/dev/SECRETS-AND-CREDENTIALS.md,
+/// "A mixed boot").
+pub(super) fn admit_mixed(
+    local: &[FirstBindSecret],
+    platform_boot: bool,
+) -> Result<(), BoundSecretsRefusal> {
+    match local.first() {
+        Some(first) if platform_boot => Err(BoundSecretsRefusal::LocalOnPlatform {
+            key: first.key.clone(),
+        }),
+        _ => Ok(()),
     }
 }
 

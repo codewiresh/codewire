@@ -110,7 +110,12 @@ impl RunnerRpc {
                         .unwrap_or_default(),
                     daemon_vsock_port: boot.daemon_vsock_port,
                     intercept: !boot.intercepts.is_empty(),
-                    bound_secrets: crate::runner::records_to_proto(boot.bound_secrets.clone()),
+                    bound_secrets: crate::runner::records_to_proto(
+                        boot.bound_secrets.local.clone(),
+                    ),
+                    platform_bound_secrets: crate::runner::BootRecords::platform_to_proto(
+                        boot.bound_secrets.platform.clone(),
+                    ),
                 }),
                 resume_failed: capture.resume_failed,
             };
@@ -200,7 +205,12 @@ pub(super) fn parse_checkpoint_boot(
         daemon_vsock_port: bindings.daemon_vsock_port,
         intercept: bindings.intercept,
         image_disk: None,
-        bound_secrets: crate::runner::records_from_proto(bindings.bound_secrets.clone()),
+        bound_secrets: crate::runner::BootRecords {
+            local: crate::runner::records_from_proto(bindings.bound_secrets.clone()),
+            platform: crate::runner::BootRecords::platform_from_proto(
+                bindings.platform_bound_secrets.clone(),
+            ),
+        },
         state_identity: boot.state_identity.as_ref().map(|identity| {
             crate::checkpoint_pin::StateIdentity {
                 device: identity.device,
@@ -311,5 +321,41 @@ mod tests {
             change(&mut boot);
             assert!(parse_checkpoint_boot(&request(Some(boot))).is_err());
         }
+    }
+
+    /// A checkpoint's sealed platform record is what its restore pins, so a
+    /// restored boot carries exactly the captured boot's record (#4003).
+    #[test]
+    fn a_checkpoint_boot_keeps_its_platform_record() {
+        let record = codewire_access::PlatformBootRecord {
+            secrets: vec![codewire_access::PlatformBootSecret {
+                path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                key: "PLAIN_TOKEN".into(),
+                binding_generation: 1,
+                bound: None,
+            }],
+            seal: "vault:v1:synthetic".into(),
+        };
+        let mut captured = boot();
+        captured.boot.as_mut().unwrap().platform_bound_secrets =
+            crate::runner::BootRecords::platform_to_proto(Some(record.clone()));
+        let request = v1::StartVmRequest {
+            checkpoint: Some(captured),
+            ..Default::default()
+        };
+        let parsed = parse_checkpoint_boot(&request).unwrap().unwrap();
+        assert_eq!(parsed.bound_secrets.platform, Some(record));
+        let without = v1::StartVmRequest {
+            checkpoint: Some(boot()),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_checkpoint_boot(&without)
+                .unwrap()
+                .unwrap()
+                .bound_secrets
+                .platform,
+            None
+        );
     }
 }

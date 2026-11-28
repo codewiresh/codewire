@@ -1,10 +1,10 @@
 //! The local authority's answer to which grants an environment generation
 //! holds, material-free.
 
-use codewire_access::{CapabilitySlot, EnvironmentId};
+use codewire_access::{CapabilitySlot, DerivedGrant, EnvironmentId};
 use codewire_protected_store::ProtectedStore;
 
-use super::{auth_kind_to_proto, derived_grant_to_proto};
+use super::auth_kind_to_proto;
 use crate::control::v1;
 use crate::{LocalCredentialAuthority, LocalCredentialError};
 
@@ -36,4 +36,32 @@ pub(super) fn local_grants<S: ProtectedStore>(
         platform_github_connected: false,
         anthropic_authentication_kind,
     })
+}
+
+/// A derived grant on the authority's wire.
+pub(crate) fn derived_grant_to_proto(grant: DerivedGrant) -> v1::DerivedGrant {
+    v1::DerivedGrant {
+        environment_id: grant.environment_id.to_string(),
+        environment_generation: grant.environment_generation,
+        // Local grants always name their profile; a missing one encodes as
+        // revision 0, which every decoder rejects.
+        profile_id: grant
+            .profile
+            .as_ref()
+            .map(|profile| profile.id.to_string())
+            .unwrap_or_default(),
+        profile_revision: grant.profile.as_ref().map_or(0, |profile| profile.revision),
+        capability_slot: grant.capability_slot.to_string(),
+        credential_id: grant.credential_id.to_string(),
+        credential_revocation_generation: grant.credential_revocation_generation,
+        expires_at_unix: grant.expires_at_unix,
+        permissions: grant
+            .permissions
+            .into_iter()
+            .map(|permission| v1::GrantPermission {
+                operation: permission.operation.to_string(),
+                route: permission.route.to_string(),
+            })
+            .collect(),
+    }
 }

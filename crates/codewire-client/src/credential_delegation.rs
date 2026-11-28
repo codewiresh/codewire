@@ -9,6 +9,7 @@ use base64::Engine as _;
 use codewire_proto::codewire::bridge::v1 as bridge;
 use codewire_proto::codewire::v1::{
     CredentialDelegationServiceClient, DelegateCredentialsResponseView,
+    EnvironmentBoundSecretsRequest, EnvironmentBoundSecretsResponse,
     EnvironmentCredentialPlaceholdersRequest, EnvironmentCredentialPlaceholdersResponse,
     FrontDoorDelegationRequest, FrontDoorDelegationResponse, FrontDoorDelegationResponseView,
     front_door_delegation_response,
@@ -194,6 +195,24 @@ impl CodewireClient {
             self.config().environment_session_connect_config()?,
         )
         .environment_credential_placeholders_with_options(request, self.auth_options().await?)
+        .await
+        .map(|response| response.into_owned())
+        .map_err(ClientError::from)
+    }
+
+    /// A local VM's sealed record of its platform sources' bound secrets
+    /// (#4003): one unary call with one current bearer, admitted as the seed
+    /// placeholders are. A platform that keeps no record answers
+    /// UNIMPLEMENTED. The caller bounds the call.
+    pub async fn environment_bound_secrets(
+        &self,
+        request: EnvironmentBoundSecretsRequest,
+    ) -> Result<EnvironmentBoundSecretsResponse, ClientError> {
+        CredentialDelegationServiceClient::new(
+            self.transport(),
+            self.config().environment_session_connect_config()?,
+        )
+        .environment_bound_secrets_with_options(request, self.auth_options().await?)
         .await
         .map(|response| response.into_owned())
         .map_err(ClientError::from)

@@ -27,9 +27,16 @@ use uuid::Uuid;
 
 use crate::authority::{KubernetesPlatformRuntimeAuthority, SCOPE_QUERY, Scope};
 
+#[cfg(feature = "enrollment")]
+mod boot_record;
 mod bound;
 #[cfg(feature = "enrollment")]
 pub(crate) mod composition;
+
+#[cfg(feature = "enrollment")]
+pub(crate) use boot_record::boot_record_in;
+#[cfg(feature = "enrollment")]
+pub(crate) use bound::FirstBind;
 
 #[derive(Clone, PartialEq, Eq, sqlx::FromRow)]
 pub(crate) struct ProjectionMetadata {
@@ -288,13 +295,16 @@ pub(crate) const FIRST_BIND_QUERY: &str = "SELECT bound_secrets::text FROM publi
 /// Capture the exact selected tenant-secret metadata while the caller retains
 /// its own authority transaction. The caller must establish and retain its
 /// identity/owner/source locks before this function; these advisory locks then
-/// serialize the same tenant-secret scopes as their writers.
+/// serialize the same tenant-secret scopes as their writers. Each plain
+/// winner is checked against `first_bind`, what the local VM's boot
+/// recorded.
 #[cfg(feature = "enrollment")]
 pub(crate) async fn capture_in(
     tx: &mut Transaction<'_, Postgres>,
     selection: &PlatformProjectionSelection,
+    first_bind: FirstBind,
 ) -> Result<Capture, Error> {
-    capture_with(tx, selection, bound::FirstBind::NotHosted).await
+    capture_with(tx, selection, first_bind).await
 }
 
 async fn capture_with(
@@ -400,10 +410,11 @@ async fn capture_winners_in(
         }
         // Plain now: a secret the Pod recorded bound keeps its recorded
         // placeholder, and its row is never decrypted.
+        let generation = u64::try_from(envelope.binding_generation).map_err(|_| Error::Denied)?;
         if let Some(secret) =
             captured
                 .first_bind
-                .plain_or_refuse(&path, &key, envelope.binding_id)?
+                .plain_or_refuse(&path, &key, envelope.binding_id, generation)?
         {
             encoded_len = encoded_len
                 .checked_add(secret.encoded_len())

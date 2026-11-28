@@ -121,6 +121,7 @@ impl KekProvider for TaggedApplicationKek {
     }
 }
 
+mod boot_record;
 mod bound;
 mod public_wire;
 

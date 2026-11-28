@@ -128,6 +128,7 @@ fn fixture(
             server_url: "https://platform.invalid".into(),
             selection_sha256: [17; 32],
             front_door: false,
+            boot_record: None,
             selection: codewire_project::PlatformProjectionSelection {
                 creator: "synthetic-owner".into(),
                 organization: "synthetic-org".into(),

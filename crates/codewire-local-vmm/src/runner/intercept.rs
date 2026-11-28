@@ -15,6 +15,7 @@ use super::RunnerError;
 use super::front_door::{FrontDoorProcess, RunningFrontDoor};
 
 mod bound;
+pub use bound::BootRecords;
 use bound::with_bound_hosts;
 pub(crate) use bound::{BoundSecretsRefusal, bound_hosts, records_from_proto, records_to_proto};
 

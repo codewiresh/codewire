@@ -182,6 +182,7 @@ async fn serve_kind_credential_fixture() -> Result<(), RuntimeError> {
             config.listeners,
             pool.clone(),
             Arc::new(TestKekProvider),
+            crate::delegation::BootSeal::default(),
             mutation,
             repositories,
             bridge,

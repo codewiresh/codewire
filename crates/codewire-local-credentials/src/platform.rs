@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::pin::Pin;
 
-use codewire_access::{CapabilitySlot, CredentialPlaceholder};
+use codewire_access::{
+    CapabilitySlot, CredentialPlaceholder, PlatformBootBinding, PlatformBootRecord,
+    PlatformBootSecret,
+};
 use codewire_daemon_proto::codewire::bridge::v1 as bridge;
 use codewire_project::PlatformProjectionSelection;
 use futures::{Stream, future::BoxFuture};
@@ -28,6 +31,10 @@ pub struct PlatformCredentialBinding {
     /// platform for one, and the logins it delivers are placeholders. Set by
     /// the authority from the boot, never carried on the wire.
     pub front_door: bool,
+    /// The boot's sealed record of its platform sources' bound secrets
+    /// (#4003), from its runner: its delegation's Open carries it back.
+    /// `None` for a boot that has none.
+    pub boot_record: Option<PlatformBootRecord>,
 }
 
 impl PlatformCredentialBinding {
@@ -109,6 +116,7 @@ impl PlatformCredentialBinding {
             ordinary_keys: self.selection.ordinary_keys.into_iter().collect(),
             reserved_keys: self.selection.reserved_keys.into_iter().collect(),
             selection_sha256: self.selection_sha256.to_vec(),
+            boot_record: self.boot_record.map(boot_record_to_proto),
         }
     }
 
@@ -142,9 +150,53 @@ impl PlatformCredentialBinding {
             },
             selection_sha256: value.selection_sha256.try_into().map_err(|_| invalid())?,
             front_door: false,
+            boot_record: value.boot_record.map(boot_record_from_proto),
         };
         result.validate()?;
         Ok(result)
+    }
+}
+
+/// A boot's platform record on the authority's wire.
+pub(crate) fn boot_record_to_proto(record: PlatformBootRecord) -> v1::PlatformBootRecord {
+    v1::PlatformBootRecord {
+        secrets: record
+            .secrets
+            .into_iter()
+            .map(|secret| v1::PlatformBootSecret {
+                path: secret.path,
+                key: secret.key,
+                binding_generation: secret.binding_generation,
+                bound: secret.bound.map(|bound| v1::PlatformBootBinding {
+                    binding_id: bound.binding_id,
+                    prefix: bound.prefix,
+                    hosts: bound.hosts,
+                }),
+            })
+            .collect(),
+        seal: record.seal,
+    }
+}
+
+/// A boot's platform record read back from the authority's wire. Its hosts
+/// are checked where they are bound; its seal by the platform.
+pub(crate) fn boot_record_from_proto(record: v1::PlatformBootRecord) -> PlatformBootRecord {
+    PlatformBootRecord {
+        secrets: record
+            .secrets
+            .into_iter()
+            .map(|secret| PlatformBootSecret {
+                path: secret.path,
+                key: secret.key,
+                binding_generation: secret.binding_generation,
+                bound: secret.bound.map(|bound| PlatformBootBinding {
+                    binding_id: bound.binding_id,
+                    prefix: bound.prefix,
+                    hosts: bound.hosts,
+                }),
+            })
+            .collect(),
+        seal: record.seal,
     }
 }
 
@@ -245,6 +297,22 @@ pub trait PlatformCredentialConnector: Send + Sync + 'static {
             ))
         })
     }
+
+    /// The sealed record of a platform boot's platform sources' bound
+    /// secrets (#4003), asked of the platform as the selection's creator
+    /// under `deadline`, with the selection sent exactly as the delegation's
+    /// Open sends it, and no record. `None` when the platform keeps no
+    /// record, as one that predates it or has no seal key answers. The
+    /// default keeps none.
+    fn environment_bound_secrets(
+        &self,
+        _binding: PlatformCredentialBinding,
+        _environment_id: String,
+        _environment_generation: u64,
+        _deadline: Instant,
+    ) -> BoxFuture<'static, Result<Option<PlatformBootRecord>, Status>> {
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +335,7 @@ mod tests {
             },
             selection_sha256: [11; 32],
             front_door: false,
+            boot_record: None,
         }
     }
 
@@ -280,6 +349,24 @@ mod tests {
         expected.selection.profile = Some((uuid::Uuid::new_v4().to_string(), 3));
         expected.selection.project_id = Some(uuid::Uuid::new_v4().to_string());
         expected.selection.organization_selected = true;
+        assert_eq!(
+            PlatformCredentialBinding::from_proto(expected.clone().into_proto()).unwrap(),
+            expected
+        );
+        // The boot's sealed platform record rides the binding unchanged.
+        expected.boot_record = Some(PlatformBootRecord {
+            secrets: vec![PlatformBootSecret {
+                path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                key: "FANCY_TOKEN".into(),
+                binding_generation: 2,
+                bound: Some(PlatformBootBinding {
+                    binding_id: uuid::Uuid::new_v4().to_string(),
+                    prefix: Some("ft_".into()),
+                    hosts: vec!["api.fancy.example".into()],
+                }),
+            }],
+            seal: "vault:v1:synthetic".into(),
+        });
         assert_eq!(
             PlatformCredentialBinding::from_proto(expected.clone().into_proto()).unwrap(),
             expected

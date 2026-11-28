@@ -218,6 +218,9 @@ impl Supervisor {
             daemon_vsock_port: boot.daemon_vsock_port,
             intercept: boot.intercept,
             bound_secrets: crate::runner::records_from_proto(boot.bound_secrets.clone()),
+            platform_bound_secrets: crate::runner::BootRecords::platform_from_proto(
+                boot.platform_bound_secrets.clone(),
+            ),
             host_cpu: checkpoints::local::host_identity().cpu,
             hibernated_at_unix_ms: hibernate::now_unix_ms(),
             hibernate_reason: reason.to_owned(),

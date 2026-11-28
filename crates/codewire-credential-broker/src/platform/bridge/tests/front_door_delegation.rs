@@ -200,6 +200,25 @@ async fn only_a_delegation_that_declared_a_front_door_can_be_joined() {
     joined.unwrap();
 }
 
+/// A delegation that declared a front door reads its bound-secret grants
+/// once, at admission, so its front-door session swaps what the boot's
+/// sealed record grants (#4003); one that didn't reads none.
+#[tokio::test]
+async fn a_delegation_with_a_front_door_reads_its_bound_secret_grants_at_admission() {
+    let reads = |fixture: &Fixture| {
+        fixture
+            .authenticator
+            .authority
+            .bound_reads
+            .load(Ordering::SeqCst)
+    };
+    let fixture = Fixture::new().await;
+    let (_input, _epoch, _) = fixture.delegate_declaring(OWNER, false).await;
+    assert_eq!(reads(&fixture), 0);
+    let (_input, _epoch, _) = fixture.delegate_declaring(OWNER, true).await;
+    assert_eq!(reads(&fixture), 1);
+}
+
 /// Every joinable epoch seals its logins with placeholders: a declared
 /// delegation (#4909) and an intercepted hosted epoch (#4001). An epoch no
 /// front door can join keeps its logins.

@@ -84,6 +84,8 @@ pub(super) enum KekAuthorityConfig {
     OpenBao {
         credential: Box<OpenBaoTransitConfig>,
         application: Box<OpenBaoTransitConfig>,
+        /// The local-boot seal key (#4003), on `credential`'s login.
+        local_boot_seal: Option<LocalBootSealConfig>,
     },
     /// The in-memory test provider, compiled only into the non-promotable Kind
     /// image (as orchestration's tenant-secret test provider is). It does not
@@ -184,10 +186,17 @@ impl CredentialServiceConfig {
                 KekAuthorityConfig::OpenBao {
                     credential: Box::new(credential_openbao),
                     application: Box::new(application_openbao),
+                    local_boot_seal: local_boot_seal_config(&lookup)?,
                 }
             }
             #[cfg(feature = "kind-e2e")]
-            Some(value) if value == "true" => KekAuthorityConfig::KindTest,
+            Some(value) if value == "true" => {
+                // The Kind provider has no OpenBao to seal with.
+                if local_boot_seal_config(&lookup)?.is_some() {
+                    return Err(RuntimeError::Configuration(LOCAL_BOOT_SEAL_KEY));
+                }
+                KekAuthorityConfig::KindTest
+            }
             // Outside the Kind image the flag is never honoured, and any value
             // is a startup error rather than a silent OpenBao fallback.
             Some(_) => {
@@ -229,6 +238,55 @@ impl CredentialServiceConfig {
 /// with; `None` wires neither. Startup and the runtime's wiring both read it.
 pub(super) fn interception_namespace(sandbox_namespace: &Option<String>) -> Option<&str> {
     sandbox_namespace.as_deref()
+}
+
+const LOCAL_BOOT_SEAL_MOUNT: &str = "CREDENTIAL_LOCAL_BOOT_SEAL_TRANSIT_MOUNT";
+const LOCAL_BOOT_SEAL_KEY: &str = "CREDENTIAL_LOCAL_BOOT_SEAL_KEY";
+
+/// The OpenBao transit key that seals a local VM's boot record of its
+/// platform bound secrets (#4003), on the credential service's own login.
+pub(super) struct LocalBootSealConfig {
+    pub(super) mount: String,
+    pub(super) key: String,
+}
+
+/// The local-boot seal key: both settings or neither. Neither leaves the
+/// boot question unserved (UNIMPLEMENTED); one alone, or a value the
+/// transit client refuses, stops startup.
+fn local_boot_seal_config(
+    lookup: &impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<LocalBootSealConfig>, RuntimeError> {
+    let read = |name: &'static str| {
+        lookup(name)
+            .map(|value| {
+                value
+                    .into_string()
+                    .map_err(|_| RuntimeError::Configuration(name))
+            })
+            .transpose()
+    };
+    match (read(LOCAL_BOOT_SEAL_MOUNT)?, read(LOCAL_BOOT_SEAL_KEY)?) {
+        (None, None) => Ok(None),
+        (Some(mount), Some(key)) => {
+            let plain = |value: &str| {
+                !value.is_empty()
+                    && value.len() <= 63
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            };
+            if !plain(&mount) {
+                return Err(RuntimeError::Configuration(LOCAL_BOOT_SEAL_MOUNT));
+            }
+            // The envelope key is used for nothing but DEKs.
+            if !plain(&key) || key == "tenant-dek" {
+                return Err(RuntimeError::Configuration(LOCAL_BOOT_SEAL_KEY));
+            }
+            Ok(Some(LocalBootSealConfig { mount, key }))
+        }
+        (None, Some(_)) => Err(RuntimeError::Configuration(LOCAL_BOOT_SEAL_MOUNT)),
+        (Some(_), None) => Err(RuntimeError::Configuration(LOCAL_BOOT_SEAL_KEY)),
+    }
 }
 
 const HOSTED_PLACEHOLDERS: &str = "CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED";
@@ -697,6 +755,57 @@ mod tests {
                     "GitHub App authorization configuration"
                 ))
             ));
+        }
+    }
+
+    /// The local-boot seal key is both settings or neither (#4003).
+    #[test]
+    fn the_local_boot_seal_is_both_settings_or_neither() {
+        let config =
+            CredentialServiceConfig::from_lookup(|name| inputs().get(name).cloned()).unwrap();
+        assert!(matches!(
+            config.keks,
+            KekAuthorityConfig::OpenBao {
+                local_boot_seal: None,
+                ..
+            }
+        ));
+        let mut values = inputs();
+        values.insert(LOCAL_BOOT_SEAL_MOUNT, "codewire-credentials-test".into());
+        values.insert(LOCAL_BOOT_SEAL_KEY, "local-boot-seal".into());
+        let config =
+            CredentialServiceConfig::from_lookup(|name| values.get(name).cloned()).unwrap();
+        let KekAuthorityConfig::OpenBao {
+            local_boot_seal: Some(seal),
+            ..
+        } = config.keks
+        else {
+            panic!("both settings configure the seal");
+        };
+        assert_eq!(
+            (seal.mount.as_str(), seal.key.as_str()),
+            ("codewire-credentials-test", "local-boot-seal")
+        );
+        for (name, value) in [
+            (LOCAL_BOOT_SEAL_KEY, "tenant-dek"),
+            (LOCAL_BOOT_SEAL_KEY, "a/b"),
+            (LOCAL_BOOT_SEAL_KEY, ""),
+            (LOCAL_BOOT_SEAL_MOUNT, "a b"),
+        ] {
+            let mut refused = values.clone();
+            refused.insert(name, value.into());
+            assert!(
+                CredentialServiceConfig::from_lookup(|name| refused.get(name).cloned()).is_err(),
+                "{name}={value}"
+            );
+        }
+        for alone in [LOCAL_BOOT_SEAL_MOUNT, LOCAL_BOOT_SEAL_KEY] {
+            let mut partial = values.clone();
+            partial.remove(alone);
+            assert!(
+                CredentialServiceConfig::from_lookup(|name| partial.get(name).cloned()).is_err(),
+                "without {alone}"
+            );
         }
     }
 

@@ -52,6 +52,7 @@ fn binding(directory: PathBuf) -> crate::PlatformCredentialBinding {
         },
         selection_sha256: [7; 32],
         front_door: false,
+        boot_record: None,
     }
 }
 

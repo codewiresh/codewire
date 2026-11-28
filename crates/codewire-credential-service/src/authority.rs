@@ -315,7 +315,7 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
         secret: &codewire_access::FirstBindSecret,
         host: &str,
     ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
-        KubernetesPlatformRuntimeAuthority::bound_secret_row(self, secret, host).await
+        crate::bound_lease::lease_row(&self.lease_source(), secret, host).await
     }
 
     async fn bound_secret_value(
@@ -323,7 +323,7 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
         secret: &codewire_access::FirstBindSecret,
         host: &str,
     ) -> Result<(u64, Zeroizing<Vec<u8>>), BoundSecretLeaseError> {
-        KubernetesPlatformRuntimeAuthority::bound_secret_value(self, secret, host).await
+        crate::bound_lease::lease_value(&self.lease_source(), secret, host).await
     }
 
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {
@@ -347,6 +347,16 @@ pub(crate) struct Identities {
     workspace: VerifiedPodIdentity,
     expires_at_unix: u64,
     deadline: Instant,
+}
+
+impl crate::bound_lease::LeaseBounds for Identities {
+    fn ensure_live(&self) -> Result<(), Error> {
+        Identities::ensure_live(self)
+    }
+
+    fn read_deadline(&self) -> Result<tokio::time::Instant, Error> {
+        Ok(self.deadline.min(Instant::now() + AUTHORITY_TIMEOUT))
+    }
 }
 
 impl Identities {

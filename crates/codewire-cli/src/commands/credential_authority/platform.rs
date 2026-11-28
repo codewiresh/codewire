@@ -30,6 +30,7 @@ use tonic::Status;
 
 use crate::config;
 
+mod bound_secrets;
 mod front_door;
 mod seed_placeholders;
 
@@ -154,6 +155,33 @@ impl PlatformCredentialConnector for NativePlatformCredentialConnector {
             .map_err(|_| expired())?
         })
     }
+
+    fn environment_bound_secrets(
+        &self,
+        binding: PlatformCredentialBinding,
+        environment_id: String,
+        environment_generation: u64,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<Option<codewire_access::PlatformBootRecord>, Status>> {
+        let connect_timeout = self.connect_timeout;
+        Box::pin(async move {
+            tokio::time::timeout_at(deadline, async move {
+                live(deadline)?;
+                binding.validate()?;
+                let ready = bridge::CredentialBridgeReady {
+                    protocol_version: CREDENTIAL_BRIDGE_PROTOCOL_VERSION,
+                    environment_id,
+                    environment_generation,
+                };
+                let open = opening(&binding, ready)?;
+                let client = authenticated_client(&binding, deadline, connect_timeout).await?;
+                live(deadline)?;
+                bound_secrets::ask(&client, open).await
+            })
+            .await
+            .map_err(|_| expired())?
+        })
+    }
 }
 
 const CREDENTIAL_METADATA_PAGE_SIZE: i32 = 100;
@@ -242,6 +270,11 @@ fn opening(
         ordinary_environment_keys: binding.selection.ordinary_keys.iter().cloned().collect(),
         reserved_environment_keys: binding.selection.reserved_keys.iter().cloned().collect(),
         front_door: binding.front_door,
+        bound_secrets: binding
+            .boot_record
+            .as_ref()
+            .map(bound_secrets::to_wire)
+            .into(),
         ..Default::default()
     })
 }

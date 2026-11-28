@@ -115,8 +115,8 @@ mod mesh_processes;
 use mesh_processes::{spawn_mesh_enrollment_process, spawn_mesh_transport_process};
 
 pub(crate) use intercept::{BOOT_SECRET_BYTES, BootSecrets, BoundSecretsRefusal, bound_hosts};
+pub(crate) use intercept::{BootRecords, boot_interception, records_from_proto, records_to_proto};
 pub use intercept::{FrontDoorFailure, FrontDoorStop, InterceptRefusal};
-pub(crate) use intercept::{boot_interception, records_from_proto, records_to_proto};
 mod cw_runtime_disk;
 mod disk_admission;
 mod egress_spawn;
@@ -224,8 +224,8 @@ pub struct CreateVmRequest {
     /// The names this boot intercepts through its TLS front door (#3999);
     /// empty, the default, intercepts nothing.
     pub intercepts: InterceptSet,
-    /// What the boot recorded of its bound secrets (#4003); None when it recorded nothing.
-    pub bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
+    /// What the boot recorded of its bound secrets, local and platform (#4003).
+    pub bound_secrets: BootRecords,
     /// With `intercepts`, the seed's placeholders beside the front door's CA (#3999).
     pub credential_placeholders: codewire_vmm_guest_probe::SeedPlaceholders,
     /// Restore this boot from the VM checkpoint placed in
@@ -4972,7 +4972,7 @@ mod tests {
             udp_peers: Vec::new(),
             intercepts: InterceptSet::default(),
             credential_placeholders: Default::default(),
-            bound_secrets: None,
+            bound_secrets: BootRecords::default(),
             vm_id: Uuid::new_v4(),
             generation: 1,
             vsock_cid: 7,

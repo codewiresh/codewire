@@ -1081,7 +1081,7 @@ mod linux {
             udp_peers: Vec::new(),
             intercepts: codewire_egress_policy::intercept::InterceptSet::default(),
             credential_placeholders: Default::default(),
-            bound_secrets: None,
+            bound_secrets: Default::default(),
             checkpoint: None,
             vm_id: arguments.vm_id,
             generation,

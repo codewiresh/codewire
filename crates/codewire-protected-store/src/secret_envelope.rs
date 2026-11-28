@@ -25,6 +25,11 @@ use zeroize::Zeroizing;
 
 use crate::openbao_workload_identity::OpenBaoWorkloadIdentity;
 
+mod transit_hmac;
+#[cfg(any(test, feature = "platform-test-support"))]
+pub use transit_hmac::TestTransitHmac;
+pub use transit_hmac::{OpenBaoTransitHmac, TransitHmac, TransitHmacError};
+
 pub const SECRET_FORMAT_V1: i16 = 1;
 pub const WRAPPED_DEK_FORMAT_V1: i16 = 1;
 pub const DEK_BYTES: usize = 32;

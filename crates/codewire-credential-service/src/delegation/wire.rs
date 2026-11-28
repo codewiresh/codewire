@@ -33,8 +33,10 @@ use tokio::sync::mpsc;
 use tonic::Status;
 use uuid::Uuid;
 
+use super::boot_record::{BootSeal, SealRefusal, record_from_proto};
 use super::{OwnerLocalRuntimeAuthority, OwnerLocalSelection};
 
+mod bound_secrets;
 mod lifetime;
 mod seed;
 
@@ -48,6 +50,7 @@ pub(crate) fn router<A, U>(
     pool: PgPool,
     provider: Arc<dyn KekProvider>,
     bridge: PlatformCredentialBridgeService<A, U>,
+    seal: BootSeal,
 ) -> axum::Router
 where
     A: PlatformBridgeAuthenticator + 'static,
@@ -58,6 +61,8 @@ where
         provider,
         bridge,
         seed_rate: seed::RateLimit::default(),
+        bound_rate: seed::RateLimit::default(),
+        seal,
     });
     connect_router_with_auth_protocol_and_limits(
         connectrpc::Router::new().add_service(service),
@@ -74,6 +79,10 @@ struct Service<A, U> {
     bridge: PlatformCredentialBridgeService<A, U>,
     /// Seed placeholder calls per user (#4001).
     seed_rate: seed::RateLimit,
+    /// Boot bound-secret calls per user (#4003), at the seed's rate.
+    bound_rate: seed::RateLimit,
+    /// The local-boot seal key (#4003), if this service has one.
+    seal: BootSeal,
 }
 
 #[allow(refining_impl_trait)]
@@ -117,6 +126,20 @@ where
                     return Err(PlatformBridgeAuthenticationError::Denied);
                 };
                 let selection = selection((*open).clone(), oauth.user_id())?;
+                // A boot's sealed record is checked before anything else
+                // (#4003): one that doesn't verify for this environment,
+                // generation and selection is refused as any other.
+                let selection = match open.bound_secrets.as_option() {
+                    None => selection,
+                    Some(record) => {
+                        let verified = self
+                            .seal
+                            .verify(&selection.sealed_boot(), record_from_proto(record.clone()))
+                            .await
+                            .map_err(seal_error)?;
+                        selection.with_boot_record(verified)
+                    }
+                };
                 let front_door = open.front_door;
                 admitted = Some(open);
                 let expiry = u64::try_from(oauth.expires_at().timestamp())
@@ -240,6 +263,32 @@ where
             .await
             .map_err(seed::Refusal::status)?;
         Ok(connectrpc::Response::new(answer).with_header("cache-control", "private, no-store"))
+    }
+
+    async fn environment_bound_secrets(
+        &self,
+        ctx: RequestContext,
+        request: ServiceRequest<'_, proto::EnvironmentBoundSecretsRequest>,
+    ) -> ServiceResult<proto::EnvironmentBoundSecretsResponse> {
+        let oauth = oauth_bearer_authority(&ctx)?.clone();
+        drop(ctx);
+        let answer = self
+            .boot_bound_secrets(oauth, request)
+            .await
+            .map_err(bound_secrets::BoundRefusal::status)?;
+        Ok(connectrpc::Response::new(answer).with_header("cache-control", "private, no-store"))
+    }
+}
+
+/// A record that doesn't verify, or one a service without a seal key can't
+/// check, is refused as any refused selection; OpenBao unreachable is
+/// unavailable, never a pass.
+fn seal_error(refusal: SealRefusal) -> PlatformBridgeAuthenticationError {
+    match refusal {
+        SealRefusal::NotConfigured | SealRefusal::Denied => {
+            PlatformBridgeAuthenticationError::Denied
+        }
+        SealRefusal::Unavailable => PlatformBridgeAuthenticationError::Unavailable,
     }
 }
 

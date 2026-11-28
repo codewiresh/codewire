@@ -296,7 +296,7 @@ mod tests {
             udp_peers: Vec::new(),
             intercepts: Default::default(),
             credential_placeholders: Default::default(),
-            bound_secrets: None,
+            bound_secrets: Default::default(),
             checkpoint: None,
         };
         let restore = build_hibernate_restore(

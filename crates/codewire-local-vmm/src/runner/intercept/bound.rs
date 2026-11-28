@@ -6,7 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use codewire_access::{
-    BindingError, BoundHost, FirstBindSecret, MAX_BOUND_HOSTS_PER_ENVIRONMENT, ReservedHosts,
+    BindingError, BoundHost, FirstBindSecret, MAX_BOUND_HOSTS_PER_ENVIRONMENT, PlatformBootBinding,
+    PlatformBootRecord, PlatformBootSecret, ReservedHosts,
 };
 use codewire_egress_policy::intercept::{InterceptBinding, InterceptSet};
 
@@ -41,6 +42,13 @@ pub enum BoundSecretsRefusal {
         "{key} is sent only to its hosts through this VM's front door, which this start can't run ({reason}); remove the egress-intercept file if it says off, or update the local credential service, then start it again"
     )]
     NotInterceptable { key: String, reason: &'static str },
+    /// A local source's bound secret in a boot whose credentials come from
+    /// the platform: its front door relays every request to the platform,
+    /// which holds no grant for a local secret, so it would go unswapped.
+    #[error(
+        "{key} is a local secret sent only to its hosts, and this VM's credentials come from the platform, whose front door can't send a local secret; set {key} on the platform instead, or start this VM with a local credential profile"
+    )]
+    LocalOnPlatform { key: String },
 }
 
 impl BoundSecretsRefusal {
@@ -49,7 +57,9 @@ impl BoundSecretsRefusal {
             Self::HostReserved { .. } => "bound_host_reserved",
             Self::HostConflict { .. } => "bound_host_conflict",
             Self::TooManyHosts { .. } => "too_many_bound_hosts",
-            Self::NotInterceptable { .. } => "bound_secret_not_interceptable",
+            Self::NotInterceptable { .. } | Self::LocalOnPlatform { .. } => {
+                "bound_secret_not_interceptable"
+            }
         }
     }
 
@@ -59,7 +69,9 @@ impl BoundSecretsRefusal {
             Self::HostReserved { .. } => "create_bound_host_reserved",
             Self::HostConflict { .. } => "create_bound_host_conflict",
             Self::TooManyHosts { .. } => "create_too_many_bound_hosts",
-            Self::NotInterceptable { .. } => "create_bound_secret_not_interceptable",
+            Self::NotInterceptable { .. } | Self::LocalOnPlatform { .. } => {
+                "create_bound_secret_not_interceptable"
+            }
         }
     }
 }
@@ -182,6 +194,113 @@ pub(crate) fn records_from_proto(
     })
 }
 
+/// A boot's sealed platform record on the runner's wire, `None` for a boot
+/// that has none.
+fn platform_record_to_proto(
+    record: Option<PlatformBootRecord>,
+) -> Option<crate::control::v1::PlatformBootRecord> {
+    use crate::control::v1;
+    record.map(|record| v1::PlatformBootRecord {
+        secrets: record
+            .secrets
+            .into_iter()
+            .map(|secret| v1::PlatformBootSecret {
+                path: secret.path,
+                key: secret.key,
+                binding_generation: secret.binding_generation,
+                bound: secret.bound.map(|bound| v1::PlatformBootBinding {
+                    binding_id: bound.binding_id,
+                    prefix: bound.prefix,
+                    hosts: bound.hosts,
+                }),
+            })
+            .collect(),
+        seal: record.seal,
+    })
+}
+
+/// A boot's sealed platform record read back from the runner's wire. Its
+/// hosts are checked where they are bound; its seal by the platform.
+fn platform_record_from_proto(
+    record: Option<crate::control::v1::PlatformBootRecord>,
+) -> Option<PlatformBootRecord> {
+    record.map(|record| PlatformBootRecord {
+        secrets: record
+            .secrets
+            .into_iter()
+            .map(|secret| PlatformBootSecret {
+                path: secret.path,
+                key: secret.key,
+                binding_generation: secret.binding_generation,
+                bound: secret.bound.map(|bound| PlatformBootBinding {
+                    binding_id: bound.binding_id,
+                    prefix: bound.prefix,
+                    hosts: bound.hosts,
+                }),
+            })
+            .collect(),
+        seal: record.seal,
+    })
+}
+
+/// Every bound secret a boot records: its local sources' and its platform
+/// sources', whose hosts it binds together.
+fn boot_record_union(
+    local: Option<&[FirstBindSecret]>,
+    platform: Option<&PlatformBootRecord>,
+) -> Vec<FirstBindSecret> {
+    let mut union = local.map(<[_]>::to_vec).unwrap_or_default();
+    union.extend(platform.map(PlatformBootRecord::bound).unwrap_or_default());
+    union
+}
+
+/// A boot's records of its bound secrets (#4003): its local sources', and a
+/// platform boot's sealed record of its platform sources, which the runner
+/// holds unchanged for the boot's brokers and its checkpoints. Each is
+/// `None` when the boot has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BootRecords {
+    pub local: Option<Vec<FirstBindSecret>>,
+    pub platform: Option<PlatformBootRecord>,
+}
+
+impl BootRecords {
+    /// Every bound secret the boot records, whose hosts it binds.
+    pub(crate) fn union(&self) -> Vec<FirstBindSecret> {
+        boot_record_union(self.local.as_deref(), self.platform.as_ref())
+    }
+
+    /// [`boot_record_union`], for a caller outside the runner.
+    pub(crate) fn union_of(
+        local: Option<&[FirstBindSecret]>,
+        platform: Option<&PlatformBootRecord>,
+    ) -> Vec<FirstBindSecret> {
+        boot_record_union(local, platform)
+    }
+
+    /// [`platform_record_to_proto`], for a caller outside the runner.
+    pub(crate) fn platform_to_proto(
+        record: Option<PlatformBootRecord>,
+    ) -> Option<crate::control::v1::PlatformBootRecord> {
+        platform_record_to_proto(record)
+    }
+
+    /// [`platform_record_from_proto`], for a caller outside the runner.
+    pub(crate) fn platform_from_proto(
+        record: Option<crate::control::v1::PlatformBootRecord>,
+    ) -> Option<PlatformBootRecord> {
+        platform_record_from_proto(record)
+    }
+
+    /// The records a boot-secrets answer carries, taken from it.
+    pub(crate) fn take_from(response: &mut crate::control::v1::GetBootSecretsResponse) -> Self {
+        Self {
+            local: records_from_proto(response.bound_secrets.take()),
+            platform: platform_record_from_proto(response.platform_bound_secrets.take()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use codewire_egress_front_door_bridge::RouteTable;
@@ -243,6 +362,73 @@ mod tests {
                 .unwrap()
                 .serves_bound_secret("up.fancy.com")
         );
+    }
+
+    /// A platform boot's sealed record binds its bound hosts with the local
+    /// record's, and its plain entries bind nothing; the record crosses the
+    /// runner's wire unchanged (#4003).
+    #[test]
+    fn a_boot_binds_its_platform_records_hosts_with_its_local_ones() {
+        let local = [secret("LOCAL_TOKEN", &["api.local.com"])];
+        let platform = PlatformBootRecord {
+            secrets: vec![
+                PlatformBootSecret {
+                    path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                    key: "FANCY_TOKEN".into(),
+                    binding_generation: 2,
+                    bound: Some(PlatformBootBinding {
+                        binding_id: "00000000-0000-0000-0000-000000000009".into(),
+                        prefix: Some("ft_".into()),
+                        hosts: vec!["api.fancy.com".into()],
+                    }),
+                },
+                PlatformBootSecret {
+                    path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                    key: "PLAIN_TOKEN".into(),
+                    binding_generation: 1,
+                    bound: None,
+                },
+            ],
+            seal: "vault:v1:synthetic".into(),
+        };
+        let union = boot_record_union(Some(&local), Some(&platform));
+        assert_eq!(union.len(), 2);
+        let (intercepts, _) = boot_interception(
+            true,
+            clients(&["anthropic"]),
+            vec![api_key_placeholder()],
+            &union,
+        )
+        .unwrap();
+        let routes = RouteTable::for_intercepts(&intercepts).unwrap();
+        for host in ["api.local.com", "api.fancy.com"] {
+            assert!(intercepts.binds(host, 443), "{host}");
+            assert!(routes.serves_bound_secret(host), "{host}");
+        }
+        let shared = PlatformBootRecord {
+            secrets: vec![PlatformBootSecret {
+                bound: Some(PlatformBootBinding {
+                    hosts: vec!["api.local.com".into()],
+                    ..platform.secrets[0].bound.clone().unwrap()
+                }),
+                ..platform.secrets[0].clone()
+            }],
+            ..platform.clone()
+        };
+        assert!(matches!(
+            boot_interception(
+                true,
+                clients(&[]),
+                Vec::new(),
+                &boot_record_union(Some(&local), Some(&shared))
+            ),
+            Err(RunnerError::InvalidRequest)
+        ));
+        assert_eq!(
+            platform_record_from_proto(platform_record_to_proto(Some(platform.clone()))),
+            Some(platform)
+        );
+        assert_eq!(platform_record_from_proto(None), None);
     }
 
     /// The runner refuses what the supervisor would have refused by name: a

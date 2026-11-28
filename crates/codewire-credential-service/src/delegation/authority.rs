@@ -8,9 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use codewire_access::{
     AccessProfileId, ApplicationSecretKey, AvailableGrants, CapabilitySlot, DerivedGrant,
-    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, HttpProvider, Owner,
-    OwnerId, Placement, Withheld,
+    EnvironmentAccessBinding, EnvironmentId, FirstBindSecret, GrantContext, GrantPlacement,
+    HttpProvider, Owner, OwnerId, Placement, Withheld,
 };
+use codewire_credential_broker::bound_secret::{BoundSecretLeaseError, BoundSecretRow};
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error, PlatformRuntimeSession,
 };
@@ -27,8 +28,12 @@ use codewire_workload_secrets::{
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
-use crate::projection::{capture_in, composition};
+use super::VerifiedBootRecord;
+use crate::projection::{FirstBind, capture_in, composition};
+
+mod bound_secrets;
 
 const MAX_OWNER_LOCAL_LIFETIME: Duration = Duration::from_secs(600);
 const OWNER_LOCAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,6 +47,10 @@ pub struct OwnerLocalSelection {
     local_environment_generation: u64,
     platform: PlatformProjectionSelection,
     selection_sha256: [u8; 32],
+    /// The boot's sealed record of its platform sources (#4003), once its
+    /// seal verified for this environment, generation and digest; `None`
+    /// for an Open that carried none.
+    boot_record: Option<VerifiedBootRecord>,
 }
 
 impl OwnerLocalSelection {
@@ -66,7 +75,37 @@ impl OwnerLocalSelection {
             local_environment_generation,
             platform,
             selection_sha256,
+            boot_record: None,
         })
+    }
+
+    /// This selection with its boot's verified record.
+    pub fn with_boot_record(self, record: VerifiedBootRecord) -> Self {
+        Self {
+            boot_record: Some(record),
+            ..self
+        }
+    }
+
+    /// The boot whose record a seal covers: this environment, generation
+    /// and digest.
+    pub(crate) fn sealed_boot(&self) -> super::boot_record::SealedBoot {
+        super::boot_record::SealedBoot {
+            environment_id: self.local_environment_id,
+            generation: self.local_environment_generation,
+            selection_sha256: self.selection_sha256,
+        }
+    }
+
+    /// What the delegated projection checks each plain winner against.
+    fn first_bind(&self) -> FirstBind {
+        match &self.boot_record {
+            Some(record) => FirstBind::LocalBoot {
+                environment_id: self.local_environment_id.to_string(),
+                recorded: record.secrets().to_vec(),
+            },
+            None => FirstBind::NotHosted,
+        }
     }
 }
 
@@ -414,7 +453,12 @@ impl OwnerLocalSource {
             if first.effective(expected).is_none() {
                 return Err(Error::Denied);
             }
-            let captured = capture_in(&mut first_tx, &self.selection.platform).await?;
+            let captured = capture_in(
+                &mut first_tx,
+                &self.selection.platform,
+                self.selection.first_bind(),
+            )
+            .await?;
             ensure_request_live(&context, self)?;
             first_tx.commit().await.map_err(|_| Error::Unavailable)?;
 
@@ -430,7 +474,12 @@ impl OwnerLocalSource {
 
             let mut final_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
             let current = self.admit_in(&mut final_tx).await?;
-            let current_capture = capture_in(&mut final_tx, &self.selection.platform).await?;
+            let current_capture = capture_in(
+                &mut final_tx,
+                &self.selection.platform,
+                self.selection.first_bind(),
+            )
+            .await?;
             if current.effective(expected).is_none()
                 || current != first
                 || current_capture != captured
@@ -487,6 +536,7 @@ impl OwnerLocalSource {
             let first = composition::capture_in(
                 &mut first_tx,
                 &self.selection.platform,
+                self.selection.first_bind(),
                 &local_inventories,
                 &context,
                 *request_id.as_bytes(),
@@ -513,6 +563,7 @@ impl OwnerLocalSource {
             let current = composition::capture_in(
                 &mut final_tx,
                 &self.selection.platform,
+                self.selection.first_bind(),
                 &local_inventories,
                 &context,
                 *request_id.as_bytes(),
@@ -616,6 +667,26 @@ impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
         self.source
             .project_fragment(request, &self.initial, application_key)
             .await
+    }
+
+    async fn bound_secrets(&self) -> Result<Vec<FirstBindSecret>, Error> {
+        self.boot_grants().await
+    }
+
+    async fn bound_secret_row(
+        &self,
+        secret: &FirstBindSecret,
+        host: &str,
+    ) -> Result<BoundSecretRow, BoundSecretLeaseError> {
+        crate::bound_lease::lease_row(&self.source.lease_source(), secret, host).await
+    }
+
+    async fn bound_secret_value(
+        &self,
+        secret: &FirstBindSecret,
+        host: &str,
+    ) -> Result<(u64, Zeroizing<Vec<u8>>), BoundSecretLeaseError> {
+        crate::bound_lease::lease_value(&self.source.lease_source(), secret, host).await
     }
 }
 

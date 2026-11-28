@@ -32,6 +32,20 @@ const BOUND: Duration = Duration::from_secs(20);
 
 struct RejectPods;
 
+/// The delegation route of a service with no local-boot seal key.
+fn unsealed<A, U>(h: &Harness, bridge: PlatformCredentialBridgeService<A, U>) -> axum::Router
+where
+    A: PlatformBridgeAuthenticator + 'static,
+    U: BrokerUpstreamTransport + Clone + 'static,
+{
+    crate::delegation::router(
+        h.pool.clone(),
+        h.provider.clone(),
+        bridge,
+        crate::delegation::BootSeal::default(),
+    )
+}
+
 #[async_trait]
 impl PlatformBridgeAuthenticator for RejectPods {
     type Authority = OwnerLocalRuntimeAuthority;
@@ -87,7 +101,7 @@ impl ClientTransport for Transport {
     }
 }
 
-fn opening(selection: &OwnerLocalSelection) -> proto::CredentialDelegationOpen {
+pub(super) fn opening(selection: &OwnerLocalSelection) -> proto::CredentialDelegationOpen {
     let source = &selection.platform;
     proto::CredentialDelegationOpen {
         runtime: Some(public_bridge::CredentialBridgeOpen {
@@ -365,13 +379,12 @@ async fn journey(protocol: Protocol) -> Result<()> {
     );
     let stop = CancellationToken::new();
     let stopped = stop.clone();
-    let router = crate::delegation::router(h.pool.clone(), h.provider.clone(), bridge.clone())
-        .merge(connect_router_with_auth(
-            h.owner.router(),
-            ConnectAuthLayer::oauth_bearer_only(AuthState {
-                pool: h.pool.clone(),
-            }),
-        ));
+    let router = unsealed(&h, bridge.clone()).merge(connect_router_with_auth(
+        h.owner.router(),
+        ConnectAuthLayer::oauth_bearer_only(AuthState {
+            pool: h.pool.clone(),
+        }),
+    ));
     let mut server = tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(stopped.cancelled_owned())
@@ -587,7 +600,7 @@ async fn a_front_door_delegation_with_no_environment_row_gets_its_owners_local_p
     );
     let stop = CancellationToken::new();
     let stopped = stop.clone();
-    let router = crate::delegation::router(h.pool.clone(), h.provider.clone(), bridge.clone());
+    let router = unsealed(&h, bridge.clone());
     let mut server = tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(stopped.cancelled_owned())
@@ -752,17 +765,17 @@ async fn a_front_door_delegation_with_no_environment_row_gets_its_owners_local_p
 
 /// One seed placeholder route (#4001) over a fresh database: Alice's profile
 /// selects one Anthropic API key, and the route's rate limit starts empty.
-struct SeedRoute<'a> {
-    h: &'a Harness,
+pub(super) struct SeedRoute<'a> {
+    pub(super) h: &'a Harness,
     key: codewire_access::CredentialId,
-    selection: OwnerLocalSelection,
-    open: proto::CredentialDelegationOpen,
+    pub(super) selection: OwnerLocalSelection,
+    pub(super) open: proto::CredentialDelegationOpen,
     url: String,
     http: reqwest::Client,
 }
 
 impl SeedRoute<'_> {
-    fn client(&self, bearer: String) -> Result<CodewireClient> {
+    pub(super) fn client(&self, bearer: String) -> Result<CodewireClient> {
         Ok(CodewireClient::with_http(
             ClientConfig::new(&self.url)?,
             StaticTokenProvider::new(bearer)?,
@@ -778,6 +791,14 @@ fn slots(names: &[&str]) -> Vec<String> {
 /// Serve the delegation route on its own listener, set up Alice's selection,
 /// run `body` against it within [`BOUND`], and tear everything down.
 async fn with_seed_route(body: impl AsyncFnOnce(&SeedRoute<'_>) -> Result<()>) -> Result<()> {
+    with_route(crate::delegation::BootSeal::default(), body).await
+}
+
+/// [`with_seed_route`] with `seal` as the service's local-boot seal key.
+pub(super) async fn with_route(
+    seal: crate::delegation::BootSeal,
+    body: impl AsyncFnOnce(&SeedRoute<'_>) -> Result<()>,
+) -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let h = Harness::unserved(address).await?;
@@ -789,7 +810,7 @@ async fn with_seed_route(body: impl AsyncFnOnce(&SeedRoute<'_>) -> Result<()>) -
     );
     let stop = CancellationToken::new();
     let stopped = stop.clone();
-    let router = crate::delegation::router(h.pool.clone(), h.provider.clone(), bridge);
+    let router = crate::delegation::router(h.pool.clone(), h.provider.clone(), bridge, seal);
     let mut server = tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(stopped.cancelled_owned())

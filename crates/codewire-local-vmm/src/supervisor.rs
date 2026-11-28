@@ -4547,6 +4547,10 @@ impl Supervisor {
                         // record derives, so that record is this boot's.
                         start_request.bound_secrets =
                             crate::runner::records_to_proto(record.bound_secrets.clone());
+                        start_request.platform_bound_secrets =
+                            crate::runner::BootRecords::platform_to_proto(
+                                record.platform_bound_secrets.clone(),
+                            );
                         start_request.checkpoint = Some(record.to_checkpoint_boot());
                     }
                     Err(reason) => {

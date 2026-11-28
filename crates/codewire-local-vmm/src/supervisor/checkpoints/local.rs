@@ -36,6 +36,9 @@ fn boot_bindings(
             environment_id,
         )),
         bound_secrets: crate::runner::records_from_proto(boot.bound_secrets.clone()),
+        platform_bound_secrets: crate::runner::BootRecords::platform_from_proto(
+            boot.platform_bound_secrets.clone(),
+        ),
     }
 }
 

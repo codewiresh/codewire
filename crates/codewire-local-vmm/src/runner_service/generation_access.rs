@@ -13,14 +13,11 @@ use super::GENERATION_ACCESS_MAX_BYTES;
 use crate::RunningVm;
 use crate::control::v1;
 use crate::hybrid_vsock::HybridVsockTarget;
-use crate::runner::BootSecrets;
+use crate::runner::{BootRecords, BootSecrets};
 
-/// A generation's boot secrets and its record of its bound secrets (#4003),
-/// as the supervisor asks for them.
-pub type BootSecretsAnswer = (
-    Vec<v1::BootSecret>,
-    Option<Vec<codewire_access::FirstBindSecret>>,
-);
+/// A generation's boot secrets and its records of its bound secrets
+/// (#4003), local and platform, as the supervisor asks for them.
+pub type BootSecretsAnswer = (Vec<v1::BootSecret>, crate::runner::BootRecords);
 
 pub(super) fn validate_generation_access(
     environment_id: Uuid,
@@ -98,7 +95,7 @@ pub(super) struct PublishedGenerationAccess {
     boot_secrets: Vec<(i32, Zeroizing<Vec<u8>>)>,
     /// The boot's record of its bound secrets (#4003), handed to each of its
     /// credential brokers beside the secrets.
-    bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
+    bound_secrets: BootRecords,
     liveness: OwnedFd,
 }
 
@@ -179,7 +176,13 @@ impl GenerationAccessCell {
         access: v1::DaemonAccess,
         liveness: OwnedFd,
     ) -> Result<GenerationAccessGuard, Status> {
-        self.install_with_secrets(generation, access, Vec::new(), None, liveness)
+        self.install_with_secrets(
+            generation,
+            access,
+            Vec::new(),
+            BootRecords::default(),
+            liveness,
+        )
     }
 
     pub(super) fn install_with_secrets(
@@ -187,7 +190,7 @@ impl GenerationAccessCell {
         generation: u64,
         access: v1::DaemonAccess,
         boot_secrets: Vec<(i32, Zeroizing<Vec<u8>>)>,
-        bound_secrets: Option<Vec<codewire_access::FirstBindSecret>>,
+        records: BootRecords,
         liveness: OwnedFd,
     ) -> Result<GenerationAccessGuard, Status> {
         validate_generation_access(self.environment_id, generation, &access)?;
@@ -213,7 +216,7 @@ impl GenerationAccessCell {
             port: access.guest_port,
             token: Zeroizing::new(access.generation_capability),
             boot_secrets,
-            bound_secrets,
+            bound_secrets: records,
             liveness,
         });
         Ok(GenerationAccessGuard {
@@ -276,7 +279,7 @@ impl GenerationAccessCell {
         environment_id: Uuid,
         generation: u64,
     ) -> Result<v1::GetBootSecretsResponse, Status> {
-        let (secrets, bound_secrets) = self
+        let (secrets, records) = self
             .with_live(environment_id, generation, |access| {
                 let secrets = access
                     .boot_secrets
@@ -293,7 +296,8 @@ impl GenerationAccessCell {
             .ok_or_else(|| Status::failed_precondition("no boot secrets"))?;
         Ok(v1::GetBootSecretsResponse {
             secrets,
-            bound_secrets: crate::runner::records_to_proto(bound_secrets),
+            bound_secrets: crate::runner::records_to_proto(records.local),
+            platform_bound_secrets: BootRecords::platform_to_proto(records.platform),
         })
     }
 

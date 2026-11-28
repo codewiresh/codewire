@@ -142,6 +142,14 @@ impl CredentialDelegationService for Probe {
     ) -> ServiceResult<proto::EnvironmentCredentialPlaceholdersResponse> {
         Err(connectrpc::ConnectError::unimplemented("not under test"))
     }
+
+    async fn environment_bound_secrets(
+        &self,
+        _ctx: RequestContext,
+        _request: connectrpc::ServiceRequest<'_, proto::EnvironmentBoundSecretsRequest>,
+    ) -> ServiceResult<proto::EnvironmentBoundSecretsResponse> {
+        Err(connectrpc::ConnectError::unimplemented("not under test"))
+    }
 }
 
 impl Probe {

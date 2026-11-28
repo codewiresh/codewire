@@ -720,6 +720,9 @@ message CheckpointBootBindings {
   // The captured boot's record of its bound secrets (#4003), which a
   // restore keeps: its guest holds the placeholders that record derives.
   BootBoundSecrets bound_secrets = 8;
+  // The captured boot's sealed record of its platform sources' bound
+  // secrets (#4003), which a restore keeps and its delegation carries back.
+  PlatformBootRecord platform_bound_secrets = 9;
 }
 
 message CheckpointVmResponse {
@@ -1520,6 +1523,32 @@ message StartVmRequest {
   // life, for its brokers and its VM checkpoints. Absent from an older
   // supervisor: the boot recorded nothing.
   BootBoundSecrets bound_secrets = 33;
+  // A platform boot's sealed record of its platform sources' bound secrets
+  // (#4003): the runner binds its bound hosts with the local record's and
+  // holds it, unchanged, for the boot's brokers and its VM checkpoints.
+  // Absent for a boot that has none.
+  PlatformBootRecord platform_bound_secrets = 34;
+}
+
+// A boot's sealed record of its platform sources' secrets
+// (codewire_access::PlatformBootRecord): names, generations, hosts and
+// prefixes only, and the platform's seal, carried unchanged.
+message PlatformBootRecord {
+  repeated PlatformBootSecret secrets = 1;
+  string seal = 2;
+}
+
+message PlatformBootSecret {
+  string path = 1;
+  string key = 2;
+  uint64 binding_generation = 3;
+  PlatformBootBinding bound = 4;
+}
+
+message PlatformBootBinding {
+  string binding_id = 1;
+  optional string prefix = 2;
+  repeated string hosts = 3;
 }
 
 // One bound secret as a local VM's boot recorded it
@@ -1656,6 +1685,8 @@ message GetBootSecretsResponse {
   repeated BootSecret secrets = 1;
   // The boot's record of its bound secrets (#4003), for each of its brokers.
   BootBoundSecrets bound_secrets = 2;
+  // Its sealed platform record (#4003), for a platform broker's delegation.
+  PlatformBootRecord platform_bound_secrets = 3;
 }
 
 // One per-boot secret (#3999): 32 random bytes the runner mints for an

@@ -61,6 +61,51 @@ impl crate::PlatformCredentialConnector for Platform {
             .collect();
         Box::pin(async move { Ok(granted) })
     }
+
+    fn environment_bound_secrets(
+        &self,
+        binding: crate::PlatformCredentialBinding,
+        environment_id: String,
+        environment_generation: u64,
+        deadline: tokio::time::Instant,
+    ) -> BoxFuture<'static, Result<Option<codewire_access::PlatformBootRecord>, Status>> {
+        // The seed's own deadline covers the record's question too.
+        assert!(deadline > tokio::time::Instant::now());
+        assert!(deadline <= tokio::time::Instant::now() + PLATFORM_PLACEHOLDERS_DEADLINE);
+        self.asked.lock().unwrap().push((
+            binding.selection.creator,
+            environment_id,
+            environment_generation,
+            Vec::new(),
+        ));
+        let record = (!self.grants.is_empty()).then(record);
+        Box::pin(async move { Ok(record) })
+    }
+}
+
+/// A sealed record with one bound and one plain platform secret.
+fn record() -> codewire_access::PlatformBootRecord {
+    codewire_access::PlatformBootRecord {
+        secrets: vec![
+            codewire_access::PlatformBootSecret {
+                path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                key: "FANCY_TOKEN".into(),
+                binding_generation: 2,
+                bound: Some(codewire_access::PlatformBootBinding {
+                    binding_id: "00000000-0000-0000-0000-000000000007".into(),
+                    prefix: None,
+                    hosts: vec!["api.fancy.example".into()],
+                }),
+            },
+            codewire_access::PlatformBootSecret {
+                path: "/org-secrets/0f8a4c1e3b2d4e5f8a9b1c2d3e4f5a6b".into(),
+                key: "PLAIN_TOKEN".into(),
+                binding_generation: 1,
+                bound: None,
+            },
+        ],
+        seal: "vault:v1:synthetic".into(),
+    }
 }
 
 fn manager(
@@ -100,6 +145,7 @@ fn platform(directory: &Path) -> v1::PlatformCredentialBinding {
         },
         selection_sha256: [7; 32],
         front_door: false,
+        boot_record: None,
     }
     .into_proto()
 }
@@ -198,4 +244,63 @@ async fn a_platform_question_needs_a_connector_and_names_no_local_profile() {
         .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unavailable);
     }
+}
+
+/// A platform boot's record question is asked of the platform for the
+/// boot's own environment and generation, and its record passed on whole;
+/// a platform that keeps none gives none, and a question that carries a
+/// record is refused unasked (#4003).
+#[tokio::test]
+async fn a_platform_boot_record_is_answered_by_the_platform() {
+    let directory = tempfile::tempdir().unwrap();
+    let environment = Uuid::new_v4().to_string();
+    let question = |platform| v1::GetPlatformBootBoundSecretsRequest {
+        environment_id: environment.clone(),
+        environment_generation: 4,
+        platform: Some(platform),
+    };
+    let keeping = Arc::new(Platform {
+        grants: vec![CapabilitySlot::anthropic()],
+        asked: Mutex::default(),
+    });
+    let answer = platform_boot_bound_secrets(
+        manager(directory.path(), Some(keeping.clone())),
+        question(platform(directory.path())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answer.record.map(crate::platform::boot_record_from_proto),
+        Some(record())
+    );
+    assert_eq!(
+        *keeping.asked.lock().unwrap(),
+        [(
+            "synthetic-owner".to_owned(),
+            environment.clone(),
+            4,
+            Vec::new()
+        )]
+    );
+    let none = Arc::new(Platform {
+        grants: Vec::new(),
+        asked: Mutex::default(),
+    });
+    let answer = platform_boot_bound_secrets(
+        manager(directory.path(), Some(none)),
+        question(platform(directory.path())),
+    )
+    .await
+    .unwrap();
+    assert!(answer.record.is_none());
+    let mut carrying = platform(directory.path());
+    carrying.boot_record = Some(crate::platform::boot_record_to_proto(record()));
+    let refused = platform_boot_bound_secrets(
+        manager(directory.path(), Some(keeping.clone())),
+        question(carrying),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+    assert_eq!(keeping.asked.lock().unwrap().len(), 1);
 }

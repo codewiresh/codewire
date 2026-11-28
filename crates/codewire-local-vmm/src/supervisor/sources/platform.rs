@@ -226,6 +226,7 @@ pub(in crate::supervisor) fn broker_binding(
         .as_bytes(),
         // The authority sets it from the boot's secrets; never sent.
         front_door: false,
+        boot_record: None,
     };
     binding
         .validate()
@@ -282,6 +283,7 @@ pub(in crate::supervisor) fn repository_binding(
         .map_err(|_| SupervisorError::InvalidRequest)?
         .as_bytes(),
         front_door: false,
+        boot_record: None,
     };
     resolve_config_directory(&mut binding)?;
     Ok(Some(codewire_local_credentials::RepositoryPlatformAccess {

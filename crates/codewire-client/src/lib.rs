@@ -47,8 +47,10 @@ pub use codewire_proto::codewire::console::v1::{
     UsageSummary,
 };
 pub use codewire_proto::codewire::v1::{
+    EnvironmentBoundSecretsRequest, EnvironmentBoundSecretsResponse,
     EnvironmentCredentialPlaceholder, EnvironmentCredentialPlaceholdersRequest,
-    EnvironmentCredentialPlaceholdersResponse,
+    EnvironmentCredentialPlaceholdersResponse, LocalBootBinding, LocalBootBoundSecret,
+    LocalBootBoundSecrets,
 };
 pub use coordinator::{
     COORDINATOR_SETUP_TIMEOUT, CoordinatorPeerSession, Error as CoordinatorError,

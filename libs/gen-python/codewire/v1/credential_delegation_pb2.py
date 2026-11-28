@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from codewire.bridge.v1 import bridge_pb2 as codewire_dot_bridge_dot_v1_dot_bridge__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'codewire/v1/credential_delegation.proto\x12\x0b\x63odewire.v1\x1a\x1f\x63odewire/bridge/v1/bridge.proto\"\x9a\x01\n(EnvironmentCredentialPlaceholdersRequest\x12\x43\n\tselection\x18\x01 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenR\tselection\x12)\n\x10\x63\x61pability_slots\x18\x02 \x03(\tR\x0f\x63\x61pabilitySlots\"r\n EnvironmentCredentialPlaceholder\x12\'\n\x0f\x63\x61pability_slot\x18\x01 \x01(\tR\x0e\x63\x61pabilitySlot\x12%\n\x0bplaceholder\x18\x02 \x01(\tB\x03\x80\x01\x01R\x0bplaceholder\"~\n)EnvironmentCredentialPlaceholdersResponse\x12Q\n\x0cplaceholders\x18\x01 \x03(\x0b\x32-.codewire.v1.EnvironmentCredentialPlaceholderR\x0cplaceholders\"d\n\x1a\x46rontDoorDelegationRequest\x12\x46\n\x05\x66rame\x18\x01 \x01(\x0b\x32\x30.codewire.bridge.v1.CredentialBridgeGuestMessageR\x05\x66rame\"\xb8\x01\n\x1b\x46rontDoorDelegationResponse\x12\x46\n\x08\x61\x64mitted\x18\x01 \x01(\x0b\x32(.codewire.v1.FrontDoorDelegationAdmittedH\x00R\x08\x61\x64mitted\x12G\n\x05\x66rame\x18\x02 \x01(\x0b\x32/.codewire.bridge.v1.CredentialBridgeHostMessageH\x00R\x05\x66rameB\x08\n\x06output\"A\n\x1b\x46rontDoorDelegationAdmitted\x12\"\n\x0c\x63\x61pabilities\x18\x01 \x03(\tR\x0c\x63\x61pabilities\"g\n\x1b\x43redentialDelegationProfile\x12\x1d\n\nprofile_id\x18\x01 \x01(\tR\tprofileId\x12)\n\x10profile_revision\x18\x02 \x01(\x04R\x0fprofileRevision\"\x84\x04\n\x18\x43redentialDelegationOpen\x12\x42\n\x07runtime\x18\x01 \x01(\x0b\x32(.codewire.bridge.v1.CredentialBridgeOpenR\x07runtime\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12)\n\x10selection_sha256\x18\x03 \x01(\x0cR\x0fselectionSha256\x12\"\n\nproject_id\x18\x04 \x01(\tH\x00R\tprojectId\x88\x01\x01\x12!\n\x0cuser_secrets\x18\x05 \x01(\x08R\x0buserSecrets\x12\x31\n\x14organization_secrets\x18\x06 \x01(\x08R\x13organizationSecrets\x12\x42\n\x07profile\x18\x07 \x01(\x0b\x32(.codewire.v1.CredentialDelegationProfileR\x07profile\x12:\n\x19ordinary_environment_keys\x18\x08 \x03(\tR\x17ordinaryEnvironmentKeys\x12:\n\x19reserved_environment_keys\x18\t \x03(\tR\x17reservedEnvironmentKeys\x12\x1d\n\nfront_door\x18\n \x01(\x08R\tfrontDoorB\r\n\x0b_project_id\"\x1f\n\x1d\x43redentialDelegationKeepalive\"\xf8\x01\n\x1a\x44\x65legateCredentialsRequest\x12;\n\x04open\x18\x01 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenH\x00R\x04open\x12H\n\x05\x66rame\x18\x02 \x01(\x0b\x32\x30.codewire.bridge.v1.CredentialBridgeGuestMessageH\x00R\x05\x66rame\x12J\n\tkeepalive\x18\x03 \x01(\x0b\x32*.codewire.v1.CredentialDelegationKeepaliveH\x00R\tkeepaliveB\x07\n\x05input\"\xdd\x02\n\x1b\x44\x65legateCredentialsResponse\x12G\n\x05\x66rame\x18\x01 \x01(\x0b\x32/.codewire.bridge.v1.CredentialBridgeHostMessageH\x00R\x05\x66rame\x12\x43\n\x08\x61\x64mitted\x18\x02 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenH\x00R\x08\x61\x64mitted\x12J\n\tkeepalive\x18\x03 \x01(\x0b\x32*.codewire.v1.CredentialDelegationKeepaliveH\x00R\tkeepalive\x12+\n\x11\x61\x63\x63\x65pts_keepalive\x18\x04 \x01(\x08R\x10\x61\x63\x63\x65ptsKeepalive\x12-\n\x10\x66ront_door_epoch\x18\x05 \x01(\x0c\x42\x03\x80\x01\x01R\x0e\x66rontDoorEpochB\x08\n\x06output2\x8e\x03\n\x1b\x43redentialDelegationService\x12l\n\x13\x44\x65legateCredentials\x12\'.codewire.v1.DelegateCredentialsRequest\x1a(.codewire.v1.DelegateCredentialsResponse(\x01\x30\x01\x12l\n\x13\x46rontDoorDelegation\x12\'.codewire.v1.FrontDoorDelegationRequest\x1a(.codewire.v1.FrontDoorDelegationResponse(\x01\x30\x01\x12\x92\x01\n!EnvironmentCredentialPlaceholders\x12\x35.codewire.v1.EnvironmentCredentialPlaceholdersRequest\x1a\x36.codewire.v1.EnvironmentCredentialPlaceholdersResponseB\xbc\x01\n\x0f\x63om.codewire.v1B\x19\x43redentialDelegationProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\'codewire/v1/credential_delegation.proto\x12\x0b\x63odewire.v1\x1a\x1f\x63odewire/bridge/v1/bridge.proto\"e\n\x1e\x45nvironmentBoundSecretsRequest\x12\x43\n\tselection\x18\x01 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenR\tselection\"]\n\x1f\x45nvironmentBoundSecretsResponse\x12:\n\x06record\x18\x01 \x01(\x0b\x32\".codewire.v1.LocalBootBoundSecretsR\x06record\"h\n\x15LocalBootBoundSecrets\x12;\n\x07secrets\x18\x01 \x03(\x0b\x32!.codewire.v1.LocalBootBoundSecretR\x07secrets\x12\x12\n\x04seal\x18\x02 \x01(\tR\x04seal\"\xa0\x01\n\x14LocalBootBoundSecret\x12\x12\n\x04path\x18\x01 \x01(\tR\x04path\x12\x10\n\x03key\x18\x02 \x01(\tR\x03key\x12-\n\x12\x62inding_generation\x18\x03 \x01(\x04R\x11\x62indingGeneration\x12\x33\n\x05\x62ound\x18\x04 \x01(\x0b\x32\x1d.codewire.v1.LocalBootBindingR\x05\x62ound\"o\n\x10LocalBootBinding\x12\x1d\n\nbinding_id\x18\x01 \x01(\tR\tbindingId\x12\x1b\n\x06prefix\x18\x02 \x01(\tH\x00R\x06prefix\x88\x01\x01\x12\x14\n\x05hosts\x18\x03 \x03(\tR\x05hostsB\t\n\x07_prefix\"\x9a\x01\n(EnvironmentCredentialPlaceholdersRequest\x12\x43\n\tselection\x18\x01 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenR\tselection\x12)\n\x10\x63\x61pability_slots\x18\x02 \x03(\tR\x0f\x63\x61pabilitySlots\"r\n EnvironmentCredentialPlaceholder\x12\'\n\x0f\x63\x61pability_slot\x18\x01 \x01(\tR\x0e\x63\x61pabilitySlot\x12%\n\x0bplaceholder\x18\x02 \x01(\tB\x03\x80\x01\x01R\x0bplaceholder\"~\n)EnvironmentCredentialPlaceholdersResponse\x12Q\n\x0cplaceholders\x18\x01 \x03(\x0b\x32-.codewire.v1.EnvironmentCredentialPlaceholderR\x0cplaceholders\"d\n\x1a\x46rontDoorDelegationRequest\x12\x46\n\x05\x66rame\x18\x01 \x01(\x0b\x32\x30.codewire.bridge.v1.CredentialBridgeGuestMessageR\x05\x66rame\"\xb8\x01\n\x1b\x46rontDoorDelegationResponse\x12\x46\n\x08\x61\x64mitted\x18\x01 \x01(\x0b\x32(.codewire.v1.FrontDoorDelegationAdmittedH\x00R\x08\x61\x64mitted\x12G\n\x05\x66rame\x18\x02 \x01(\x0b\x32/.codewire.bridge.v1.CredentialBridgeHostMessageH\x00R\x05\x66rameB\x08\n\x06output\"A\n\x1b\x46rontDoorDelegationAdmitted\x12\"\n\x0c\x63\x61pabilities\x18\x01 \x03(\tR\x0c\x63\x61pabilities\"g\n\x1b\x43redentialDelegationProfile\x12\x1d\n\nprofile_id\x18\x01 \x01(\tR\tprofileId\x12)\n\x10profile_revision\x18\x02 \x01(\x04R\x0fprofileRevision\"\xcd\x04\n\x18\x43redentialDelegationOpen\x12\x42\n\x07runtime\x18\x01 \x01(\x0b\x32(.codewire.bridge.v1.CredentialBridgeOpenR\x07runtime\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\x12)\n\x10selection_sha256\x18\x03 \x01(\x0cR\x0fselectionSha256\x12\"\n\nproject_id\x18\x04 \x01(\tH\x00R\tprojectId\x88\x01\x01\x12!\n\x0cuser_secrets\x18\x05 \x01(\x08R\x0buserSecrets\x12\x31\n\x14organization_secrets\x18\x06 \x01(\x08R\x13organizationSecrets\x12\x42\n\x07profile\x18\x07 \x01(\x0b\x32(.codewire.v1.CredentialDelegationProfileR\x07profile\x12:\n\x19ordinary_environment_keys\x18\x08 \x03(\tR\x17ordinaryEnvironmentKeys\x12:\n\x19reserved_environment_keys\x18\t \x03(\tR\x17reservedEnvironmentKeys\x12\x1d\n\nfront_door\x18\n \x01(\x08R\tfrontDoor\x12G\n\rbound_secrets\x18\x0b \x01(\x0b\x32\".codewire.v1.LocalBootBoundSecretsR\x0c\x62oundSecretsB\r\n\x0b_project_id\"\x1f\n\x1d\x43redentialDelegationKeepalive\"\xf8\x01\n\x1a\x44\x65legateCredentialsRequest\x12;\n\x04open\x18\x01 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenH\x00R\x04open\x12H\n\x05\x66rame\x18\x02 \x01(\x0b\x32\x30.codewire.bridge.v1.CredentialBridgeGuestMessageH\x00R\x05\x66rame\x12J\n\tkeepalive\x18\x03 \x01(\x0b\x32*.codewire.v1.CredentialDelegationKeepaliveH\x00R\tkeepaliveB\x07\n\x05input\"\xdd\x02\n\x1b\x44\x65legateCredentialsResponse\x12G\n\x05\x66rame\x18\x01 \x01(\x0b\x32/.codewire.bridge.v1.CredentialBridgeHostMessageH\x00R\x05\x66rame\x12\x43\n\x08\x61\x64mitted\x18\x02 \x01(\x0b\x32%.codewire.v1.CredentialDelegationOpenH\x00R\x08\x61\x64mitted\x12J\n\tkeepalive\x18\x03 \x01(\x0b\x32*.codewire.v1.CredentialDelegationKeepaliveH\x00R\tkeepalive\x12+\n\x11\x61\x63\x63\x65pts_keepalive\x18\x04 \x01(\x08R\x10\x61\x63\x63\x65ptsKeepalive\x12-\n\x10\x66ront_door_epoch\x18\x05 \x01(\x0c\x42\x03\x80\x01\x01R\x0e\x66rontDoorEpochB\x08\n\x06output2\x84\x04\n\x1b\x43redentialDelegationService\x12l\n\x13\x44\x65legateCredentials\x12\'.codewire.v1.DelegateCredentialsRequest\x1a(.codewire.v1.DelegateCredentialsResponse(\x01\x30\x01\x12l\n\x13\x46rontDoorDelegation\x12\'.codewire.v1.FrontDoorDelegationRequest\x1a(.codewire.v1.FrontDoorDelegationResponse(\x01\x30\x01\x12\x92\x01\n!EnvironmentCredentialPlaceholders\x12\x35.codewire.v1.EnvironmentCredentialPlaceholdersRequest\x1a\x36.codewire.v1.EnvironmentCredentialPlaceholdersResponse\x12t\n\x17\x45nvironmentBoundSecrets\x12+.codewire.v1.EnvironmentBoundSecretsRequest\x1a,.codewire.v1.EnvironmentBoundSecretsResponseB\xbc\x01\n\x0f\x63om.codewire.v1B\x19\x43redentialDelegationProtoP\x01ZAgithub.com/codewiresh/codewire/libs/gen-go/codewire/v1;codewirev1\xa2\x02\x03\x43XX\xaa\x02\x0b\x43odewire.V1\xca\x02\x0b\x43odewire\\V1\xe2\x02\x17\x43odewire\\V1\\GPBMetadata\xea\x02\x0c\x43odewire::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -37,28 +37,38 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_ENVIRONMENTCREDENTIALPLACEHOLDER'].fields_by_name['placeholder']._serialized_options = b'\200\001\001'
   _globals['_DELEGATECREDENTIALSRESPONSE'].fields_by_name['front_door_epoch']._loaded_options = None
   _globals['_DELEGATECREDENTIALSRESPONSE'].fields_by_name['front_door_epoch']._serialized_options = b'\200\001\001'
-  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSREQUEST']._serialized_start=90
-  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSREQUEST']._serialized_end=244
-  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDER']._serialized_start=246
-  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDER']._serialized_end=360
-  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSRESPONSE']._serialized_start=362
-  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSRESPONSE']._serialized_end=488
-  _globals['_FRONTDOORDELEGATIONREQUEST']._serialized_start=490
-  _globals['_FRONTDOORDELEGATIONREQUEST']._serialized_end=590
-  _globals['_FRONTDOORDELEGATIONRESPONSE']._serialized_start=593
-  _globals['_FRONTDOORDELEGATIONRESPONSE']._serialized_end=777
-  _globals['_FRONTDOORDELEGATIONADMITTED']._serialized_start=779
-  _globals['_FRONTDOORDELEGATIONADMITTED']._serialized_end=844
-  _globals['_CREDENTIALDELEGATIONPROFILE']._serialized_start=846
-  _globals['_CREDENTIALDELEGATIONPROFILE']._serialized_end=949
-  _globals['_CREDENTIALDELEGATIONOPEN']._serialized_start=952
-  _globals['_CREDENTIALDELEGATIONOPEN']._serialized_end=1468
-  _globals['_CREDENTIALDELEGATIONKEEPALIVE']._serialized_start=1470
-  _globals['_CREDENTIALDELEGATIONKEEPALIVE']._serialized_end=1501
-  _globals['_DELEGATECREDENTIALSREQUEST']._serialized_start=1504
-  _globals['_DELEGATECREDENTIALSREQUEST']._serialized_end=1752
-  _globals['_DELEGATECREDENTIALSRESPONSE']._serialized_start=1755
-  _globals['_DELEGATECREDENTIALSRESPONSE']._serialized_end=2104
-  _globals['_CREDENTIALDELEGATIONSERVICE']._serialized_start=2107
-  _globals['_CREDENTIALDELEGATIONSERVICE']._serialized_end=2505
+  _globals['_ENVIRONMENTBOUNDSECRETSREQUEST']._serialized_start=89
+  _globals['_ENVIRONMENTBOUNDSECRETSREQUEST']._serialized_end=190
+  _globals['_ENVIRONMENTBOUNDSECRETSRESPONSE']._serialized_start=192
+  _globals['_ENVIRONMENTBOUNDSECRETSRESPONSE']._serialized_end=285
+  _globals['_LOCALBOOTBOUNDSECRETS']._serialized_start=287
+  _globals['_LOCALBOOTBOUNDSECRETS']._serialized_end=391
+  _globals['_LOCALBOOTBOUNDSECRET']._serialized_start=394
+  _globals['_LOCALBOOTBOUNDSECRET']._serialized_end=554
+  _globals['_LOCALBOOTBINDING']._serialized_start=556
+  _globals['_LOCALBOOTBINDING']._serialized_end=667
+  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSREQUEST']._serialized_start=670
+  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSREQUEST']._serialized_end=824
+  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDER']._serialized_start=826
+  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDER']._serialized_end=940
+  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSRESPONSE']._serialized_start=942
+  _globals['_ENVIRONMENTCREDENTIALPLACEHOLDERSRESPONSE']._serialized_end=1068
+  _globals['_FRONTDOORDELEGATIONREQUEST']._serialized_start=1070
+  _globals['_FRONTDOORDELEGATIONREQUEST']._serialized_end=1170
+  _globals['_FRONTDOORDELEGATIONRESPONSE']._serialized_start=1173
+  _globals['_FRONTDOORDELEGATIONRESPONSE']._serialized_end=1357
+  _globals['_FRONTDOORDELEGATIONADMITTED']._serialized_start=1359
+  _globals['_FRONTDOORDELEGATIONADMITTED']._serialized_end=1424
+  _globals['_CREDENTIALDELEGATIONPROFILE']._serialized_start=1426
+  _globals['_CREDENTIALDELEGATIONPROFILE']._serialized_end=1529
+  _globals['_CREDENTIALDELEGATIONOPEN']._serialized_start=1532
+  _globals['_CREDENTIALDELEGATIONOPEN']._serialized_end=2121
+  _globals['_CREDENTIALDELEGATIONKEEPALIVE']._serialized_start=2123
+  _globals['_CREDENTIALDELEGATIONKEEPALIVE']._serialized_end=2154
+  _globals['_DELEGATECREDENTIALSREQUEST']._serialized_start=2157
+  _globals['_DELEGATECREDENTIALSREQUEST']._serialized_end=2405
+  _globals['_DELEGATECREDENTIALSRESPONSE']._serialized_start=2408
+  _globals['_DELEGATECREDENTIALSRESPONSE']._serialized_end=2757
+  _globals['_CREDENTIALDELEGATIONSERVICE']._serialized_start=2760
+  _globals['_CREDENTIALDELEGATIONSERVICE']._serialized_end=3276
 # @@protoc_insertion_point(module_scope)

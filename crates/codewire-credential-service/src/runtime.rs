@@ -36,7 +36,9 @@ use codewire_platform_credentials::PlatformAccessProfileStore;
 use codewire_protected_store::openbao_workload_identity::{
     KubernetesOpenBaoWorkloadIdentity, OpenBaoWorkloadIdentity,
 };
-use codewire_protected_store::secret_envelope::{KekProvider, OpenBaoTransitProvider};
+use codewire_protected_store::secret_envelope::{
+    KekProvider, OpenBaoTransitHmac, OpenBaoTransitProvider, TransitHmac,
+};
 use codewire_server_core::auth::AuthState;
 use codewire_server_core::connect::ConnectAuthLayer;
 use codewire_server_core::http::AppBuilder;
@@ -257,15 +259,24 @@ fn database_pool_options_reproving_after(reprove_after_idle: Duration) -> PgPool
         })
 }
 
-/// The credential and application KEK authorities the configuration names.
+/// The service's KEK authorities and its local-boot seal key, as
+/// configured: OpenBao in promotable builds, where the seal (#4003) signs
+/// with the credential service's own login.
 async fn kek_authorities(
     keks: config::KekAuthorityConfig,
     client: &kube::Client,
-) -> Result<crate::authority::RuntimeKekAuthorities, RuntimeError> {
+) -> Result<
+    (
+        crate::authority::RuntimeKekAuthorities,
+        crate::delegation::BootSeal,
+    ),
+    RuntimeError,
+> {
     Ok(match keks {
         config::KekAuthorityConfig::OpenBao {
             credential,
             application,
+            local_boot_seal,
         } => {
             let identity: Arc<dyn OpenBaoWorkloadIdentity> = Arc::new(
                 KubernetesOpenBaoWorkloadIdentity::from_env(
@@ -290,13 +301,29 @@ async fn kek_authorities(
                 .authority_id()
                 .await
                 .map_err(|_| RuntimeError::OpenBao)?;
-            crate::authority::RuntimeKekAuthorities::new(credential_openbao, application_openbao)
+            let seal = match local_boot_seal {
+                Some(seal) => Some(Arc::new(
+                    OpenBaoTransitHmac::new(credential_openbao.clone(), seal.mount, seal.key)
+                        .map_err(|_| RuntimeError::OpenBao)?,
+                ) as Arc<dyn TransitHmac>),
+                None => None,
+            };
+            (
+                crate::authority::RuntimeKekAuthorities::new(
+                    credential_openbao,
+                    application_openbao,
+                ),
+                crate::delegation::BootSeal::new(seal),
+            )
         }
         #[cfg(feature = "kind-e2e")]
         config::KekAuthorityConfig::KindTest => {
             tracing::warn!("using the Kind-only credential KEK test provider");
             let test = Arc::new(codewire_protected_store::secret_envelope::TestKekProvider);
-            crate::authority::RuntimeKekAuthorities::new(test.clone(), test)
+            (
+                crate::authority::RuntimeKekAuthorities::new(test.clone(), test),
+                crate::delegation::BootSeal::default(),
+            )
         }
     })
 }
@@ -309,7 +336,7 @@ async fn run_connected(
     // Explicit in-cluster configuration never searches the user's kubeconfig.
     let kube_config = kube::Config::incluster().map_err(|_| RuntimeError::Kubernetes)?;
     let client = kube::Client::try_from(kube_config).map_err(|_| RuntimeError::Kubernetes)?;
-    let authorities = kek_authorities(config.keks, &client).await?;
+    let (authorities, seal) = kek_authorities(config.keks, &client).await?;
     // The platform process serves many environments. Resolve the finite product
     // destination families; each operation still requires its exact profile lease.
     // This long-lived process is the only broker that keeps provider
@@ -482,6 +509,7 @@ async fn run_connected(
         },
         pool,
         authorities.delegation_provider(),
+        seal,
         mutation,
         repositories,
         bridge,
@@ -562,6 +590,7 @@ async fn serve_owned<A, U>(
     listeners: Listeners,
     pool: PgPool,
     provider: Arc<dyn KekProvider>,
+    seal: crate::delegation::BootSeal,
     mutation: Arc<CredentialMutationOwner>,
     repositories: Arc<GithubRepositoryOwner>,
     bridge: PlatformCredentialBridgeService<A, U>,
@@ -591,7 +620,7 @@ where
             .map_err(|_| RuntimeError::Listener)?;
         let incoming =
             TlsIncoming::new(private, listeners.tls.clone()).map_err(|_| RuntimeError::Tls)?;
-        let delegation = crate::delegation::router(pool.clone(), provider, bridge.clone());
+        let delegation = crate::delegation::router(pool.clone(), provider, bridge.clone(), seal);
         let app = AppBuilder::new("codewire-credential-service")
             .with_routes(delegation)
             .with_health_and_db_probe(pool.clone(), {

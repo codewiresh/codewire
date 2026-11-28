@@ -1,11 +1,12 @@
-//! A hosted epoch's host-bound secrets (#4003; docs/dev/SECRETS-AND-
+//! An epoch's host-bound secrets (#4003; docs/dev/SECRETS-AND-
 //! CREDENTIALS.md, "The swap" steps 1 and 2).
 //!
 //! The grants come from the runtime authority at the epoch's admission: the
-//! secrets the Pod's first bind recorded that its selected sources hold,
-//! evaluated under the projection's authority, never from a frame. Each is
-//! kept with the placeholder its record derives under the environment's
-//! application-secret key, the one the Pod was projected.
+//! secrets the Pod's first bind, or a local VM boot's sealed record,
+//! recorded that its selected sources hold, evaluated under the
+//! projection's authority, never from a frame. Each is kept with the
+//! placeholder its record derives under the environment's application-secret
+//! key, the one the environment was projected.
 //!
 //! Each lease rereads the secret's row through the authority and checks it
 //! against the record, under an authority decision at most a minute old, as
@@ -17,7 +18,7 @@ use codewire_access::FirstBindSecret;
 use codewire_platform_credentials::SecretVersion;
 use zeroize::Zeroizing;
 
-use super::{PlatformBrokerLeaseProvider, PlatformRuntimeAuthority, RuntimeIdentity};
+use super::{PlatformBrokerLeaseProvider, PlatformRuntimeAuthority};
 use crate::BrokerLeaseError;
 use crate::bound_secret::{BoundSecretLeaseError, BoundSecretRow, EpochBoundSecret};
 use crate::timing::{self, Phase};
@@ -64,17 +65,16 @@ fn lease_error(error: BrokerLeaseError) -> BoundSecretLeaseError {
 }
 
 impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
-    /// The bound secrets an intercepted hosted epoch serves, read once at its
-    /// admission. An epoch that derives no placeholders, or isn't hosted,
-    /// has none: projection refuses a bound secret by name without the key.
-    /// An authority that can't answer refuses the admission, so an epoch
-    /// never serves part of its grants.
+    /// The bound secrets an epoch serves, read once at its admission: an
+    /// intercepted hosted epoch's, from its Pod's first bind, and a local
+    /// VM's delegation with a front door's, from its boot's sealed record.
+    /// An epoch that derives no placeholders has none: projection refuses a
+    /// bound secret by name without the key. An authority that can't answer
+    /// refuses the admission, so an epoch never serves part of its grants.
     pub(crate) async fn admitted_bound_secrets(
         &self,
     ) -> Result<EpochBoundSecrets, BrokerLeaseError> {
-        if self.placeholders.is_none()
-            || !matches!(self.session.identity, RuntimeIdentity::Hosted { .. })
-        {
+        if self.placeholders.is_none() {
             return Ok(EpochBoundSecrets::none());
         }
         let records = timing::timed(Phase::Grants, self.authority.bound_secrets())
