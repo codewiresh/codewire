@@ -23,6 +23,7 @@ runs the same commands and holds the result to the same standard.
 | [local-vm-docker.md](local-vm-docker.md) | Docker in a local VM (#5418): `docker exec` runs in the container it names, also after the VM is stopped and started |
 | [local-vm-git.md](local-vm-git.md) | Git in a local VM's mounted folder (#5478): a mounted checkout, its nested repositories and submodules work with nothing set by hand, and a user's own `safe.directory` lines stay |
 | [local-vm-linux.md](local-vm-linux.md) | Local VMs on Linux: the steps that differ from the Mac's, starting with the shared image disk (#4646, trial branch) |
+| [local-vm-sleep.md](local-vm-sleep.md) | Local Linux VM sleep (#5529): `cw suspend`, `cw resume`, `cw hibernate`, wake-on-access, `--idle-suspend` / `--idle-hibernate` with busy guards, and unrestorable-memory cold-boot fallback. Written first; every step is not yet observed |
 | [invitations.md](invitations.md) | Invite a teammate by email, who accepts, is listed and can be removed, within the invitation limits |
 | [email.md](email.md) | Every email Codewire sends (#4553): one plain layout and a text part, from `Codewire <hello@codewire.sh>`, and which have been seen arriving |
 | [self-hosted.md](self-hosted.md) | The self-hosted walk (#4121): install, the first admin, invite links and sign-up without an invite |

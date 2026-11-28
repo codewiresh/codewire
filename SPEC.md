@@ -788,6 +788,19 @@ authentication: a disk's integrity rests on the runner's private store, or in a
 create or saved state names it. Existing VMs, snapshots and checkpoints keep
 their combined root disk.
 
+### Sleep
+
+Target, not shipped (`#5529`): a local VM on Linux can **suspend** in memory
+(`cw suspend`, `--idle-suspend`) and **hibernate** to disk (`cw hibernate`,
+`--idle-hibernate`), and wake on `cw resume`, `cw start`, or access (`cw shell`,
+`cw run`, `cw exec`, SSH, published host ports) with its processes intact. Idle
+suspend and hibernate are off by default (`on` = `15m` suspend, `6h` hibernate)
+and follow cloud's activity rules (`#3384`). If a hibernated memory image
+cannot be restored, the supervisor removes it, cold-boots cleanly from the VM's
+disks, and surfaces a fallback notice so workspace files are never lost. The
+contract is [docs/dev/LOCAL-VM-SLEEP.md](docs/dev/LOCAL-VM-SLEEP.md) and the
+journey is [docs/journeys/local-vm-sleep.md](docs/journeys/local-vm-sleep.md).
+
 ### Networking and egress
 
 The VM has no network device. Inside the guest a TUN device carries raw IP

@@ -53,6 +53,9 @@ directory each.
 - [dev/CW-RUNTIME-JOURNAL.md](dev/CW-RUNTIME-JOURNAL.md): updating the `cw`
   a hosted sandbox runs, and how a request whose owner died is settled.
 - [dev/LINUX-LOCAL-VMS.md](dev/LINUX-LOCAL-VMS.md): local VMs on Linux.
+- [dev/LOCAL-VM-SLEEP.md](dev/LOCAL-VM-SLEEP.md): the contract for local Linux
+  VMs that suspend, resume, hibernate, and wake on access, written before the
+  code (#5529).
 - [dev/MACOS-CLI.md](dev/MACOS-CLI.md): local VMs on macOS.
 - [dev/CLI-ORCHESTRATION.md](dev/CLI-ORCHESTRATION.md): durable sessions and
   managed agents.
