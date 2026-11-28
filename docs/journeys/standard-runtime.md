@@ -9,11 +9,12 @@ This journey was written before the code. The format is in
 
 ## Where it stands
 
-Updated 2026-11-26. `standard-admission` is observed on Dev, and
+Updated 2026-11-28. `standard-admission` is observed on Dev, and
 `standard-create`, `standard-exec`, `standard-application-secrets`,
-`standard-docker`, `standard-network`, `standard-stop-start` and
-`standard-beside-commodity` are partly observed on Dev (`#5602`), except the
-parts the table names; the rest are not yet observed.
+`standard-docker`, `standard-network`, `standard-stop-start`,
+`standard-beside-commodity`, `standard-hibernate` and
+`standard-hibernate-fallback` are partly or fully observed on Dev (`#5602`,
+`#6647`), except the parts the table names; the rest are not yet observed.
 
 | ID | Kind | Dev | Production |
 | --- | --- | --- | --- |
@@ -29,8 +30,8 @@ parts the table names; the rest are not yet observed.
 | `standard-organization-move` | not yet observed | not yet observed | not yet observed |
 | `standard-suspend` | not yet observed | not yet observed | not yet observed |
 | `standard-systemd` | not yet observed | not yet observed | not yet observed |
-| `standard-hibernate` | not yet observed | not yet observed | not yet observed |
-| `standard-hibernate-fallback` | not yet observed | not yet observed | not yet observed |
+| `standard-hibernate` | not yet observed | observed 2026-11-28 through `cw` (hibernate from `running` and `suspended`, live restore via `cw start` and start-on-access `cw exec` across 3 Pod UIDs with exact PID/files/clock intact, `commodity` `cw hibernate` refusal, ordering refusal, PVC headroom vs `120 GiB` billed `sandbox_hibernate`, `#6647`); idle-timeout wait, preview URL across restore, dashboard pill, `#6367` live proxied-credential revocation across hibernate and standalone `cw update --idle-hibernate` guard not yet | not yet observed |
+| `standard-hibernate-fallback` | not yet observed | observed 2026-11-28 through `cw` (`generation-mismatch` host fallback and 30-day `runtime-image-expired` orchestration fallback, files kept, pre-hibernate process gone, artifacts cleared, notices in `cw start`/`cw info`, `#6647`); live disk-corruption/build-mismatch/VMM-digest-mismatch mutations covered by unit tests | not yet observed |
 
 ## Before the walk
 
@@ -429,10 +430,9 @@ Contract: [`docs/dev/SYSTEMD-WORKSPACE.md`](../dev/SYSTEMD-WORKSPACE.md), "On th
 
 ## `standard-hibernate`: a `standard` sandbox hibernates to its volume and restores with processes intact
 
-Target, not shipped (`#6647`). The contract is
-[`docs/dev/SANDBOX-SLEEP.md`](../dev/SANDBOX-SLEEP.md) and
+Contract: [`docs/dev/SANDBOX-SLEEP.md`](../dev/SANDBOX-SLEEP.md) and
 [`docs/dev/SANDBOX-DAEMON.md`](../dev/SANDBOX-DAEMON.md) ("Claim-time
-workspace binding").
+workspace binding", `#6647`).
 
 - **Entry points:** `idle_hibernate` in `codewire.yaml`,
   `cw create --idle-hibernate`, `cw update NAME --idle-hibernate`,
@@ -472,9 +472,9 @@ workspace binding").
     placeholders only, and proxied credentials still work / honor revocation
     after restore.
 - **Driving it:**
-  1. `cw --cloud create --name std-h --idle-hibernate 5m` (no command yet,
-     `#6647`), start a background loop writing its PID and counter to
-     `/tmp/beat` and a file in `/workspace/keep`, and publish a preview port.
+  1. `cw --cloud create --name std-h --idle-hibernate 5m`, start a background
+     loop writing its PID and counter to `/tmp/beat` and a file in
+     `/workspace/keep`, and publish a preview port.
   2. `cw hibernate std-h` (and separately let a fresh sandbox cross its
      `idle_hibernate` timeout): `cw ls` reads `hibernated`, `cw info std-h`
      names when and why it hibernated, and the operator confirms the Pod is
@@ -501,13 +501,60 @@ workspace binding").
 - **Gotchas:** record the hibernate write duration, restore duration, and
   re-bind duration; clean up all scratch sandboxes by exact name with
   `cw rm --yes NAME`.
-- **Observed:** not yet observed.
+- **Observed:** on Dev, 2026-11-28 (`cw 0.1.0` built from `e4898d202f`,
+  Dev source `74dd96eccc`, signed `pod-runtime` digest
+  `sha256:9473fa96bd2649ccd795d707d13fc2c2ed7794ab6d0b06da2ad8ec964373856a`,
+  `#6647`):
+  - Paused warm-pool members logged
+    `vm-pause-state {"generation":1,"sequence":1,"state":"paused"}`;
+    `--idle-suspend 10m --idle-hibernate 5m` was refused with
+    `validation failed`.
+  - Plain default `cw --cloud create --idle-hibernate 5m --ttl 1h` completed
+    in `1.35 s` (`Isolation: standard`, `2000m / 8192MB / 120GB`,
+    `IdleHibernate: 5m`, `NetworkPolicy: open (default) · enforced`,
+    `Egress: enforced`, guest kernel `6.18.48-codewire3`, PID 1 `systemd`,
+    PVC `129Gi / 129Gi` carrying unbilled memory headroom above `120 GiB`
+    billed disk).
+  - Manual `cw --cloud hibernate` from `running` completed in `35.6 s`:
+    `cw ls` showed `hibernated`, `cw info` showed `HibernatedAt`,
+    `HibernateReason: user`, `StopReason: hibernate_user`, repeat
+    `cw hibernate` exited 0 (`is already hibernated`), Pod was deleted while
+    the `129Gi` PVC remained, and DB `hibernate_record` recorded
+    `restore_generation: 1` and `memory_bytes: 8589934592`.
+  - Manual `cw --cloud start` restored live in `11.2 s` total (CLI
+    `Restored from hibernate in 10.9s.`, runtime
+    `restored VM is serving after 6429 ms (total_ms=6786)`) into a new Pod
+    UID (`vm-hibernate-record {"event":"restored","restore_generation":1}`,
+    `NetworkPolicy`/`Egress: enforced`, post-restore `/state/runtime`
+    hibernate artifacts empty, `CODEWIRE_VM_RESTORE_GENERATION` stripped to
+    `0`): pre-hibernate background ticker kept exact PID `69` advancing
+    `CNT=6 -> 21 -> 26`, `/workspace/keep` and `~/keep` matched, and guest
+    clock matched host clock (`DIFF=0 s`).
+  - `cw suspend` -> `cw resume` kept PID `69` (`CNT=74`), then
+    `cw suspend` -> second `cw hibernate` from `suspended` on the restored
+    Pod completed in `37.1 s`, and start-on-access `cw exec` restored in
+    `13.7 s` (runtime `restored VM is serving after 5167 ms (total_ms=5521)`)
+    into a 3rd distinct Pod UID
+    (`vm-hibernate-record {"event":"restored","restore_generation":2}`) with
+    exact PID `69` still ticking (`CNT=86`).
+  - On a `commodity` sandbox (`--image debian:bookworm-slim`), `cw hibernate`
+    refused naming `commodity`. Dev billing recorded
+    `sandbox_running_sessions` with `runtime_type = 'sandbox_hibernate'` and
+    `disk_gib = 120` (unbilled headroom excluded).
+  - Re-bind and memory-file security boundaries (port `7777` refused before
+    `rebind-ok`, one-shot `rebind-ok`, old daemon credential and credential
+    bridge epoch refusal, fresh tailnet node key rotation, snapshot clearing)
+    are verified by automated unit/boundary tests across `#6649`–`#6703`.
+  - Not yet observed live on Dev: natural `idle_hibernate` timeout expiry,
+    preview URL continuity across restore, dashboard state pill, `#6367` live
+    proxied-credential revocation across hibernate, and standalone
+    `cw update --idle-hibernate` without another update flag (currently hits
+    CLI's empty-change guard before reaching the server).
 
 ## `standard-hibernate-fallback`: an unrestorable hibernate boots cleanly from the disks
 
-Target, not shipped (`#6647`). The contract is
-[`docs/dev/SANDBOX-SLEEP.md`](../dev/SANDBOX-SLEEP.md), "When a restore
-cannot happen (fallback)".
+Contract: [`docs/dev/SANDBOX-SLEEP.md`](../dev/SANDBOX-SLEEP.md), "When a
+restore cannot happen (fallback)" (`#6647`).
 
 - **Entry points:** `cw start NAME`, `cw info NAME`, and the dashboard
   Sandbox page.
@@ -532,4 +579,27 @@ cannot happen (fallback)".
   were lost and files were kept, naming why restore could not happen.
 - **Gotchas:** never mutate a non-scratch sandbox volume; remove scratch
   sandboxes by exact name at the end.
-- **Observed:** not yet observed.
+- **Observed:** on Dev, 2026-11-28 (`cw 0.1.0` built from `e4898d202f`,
+  Dev source `74dd96eccc`, signed `pod-runtime` digest
+  `sha256:9473fa96bd2649ccd795d707d13fc2c2ed7794ab6d0b06da2ad8ec964373856a`,
+  `#6647`):
+  - **Host-runtime `generation-mismatch` (`10.8 s`):** after hibernating a
+    scratch `standard` sandbox and mutating only its DB
+    `hibernate_record.restore_generation` to `999`, `cw --cloud start`
+    cleanly cold-booted from disks (`NetworkPolicy`/`Egress: enforced`), host
+    emitted `vm-hibernate-record {"event":"fallback","reason":"generation-mismatch","restore_generation":999}`,
+    `/state/runtime` hibernate artifacts were deleted (confirmed empty), both
+    `/workspace/keep` and `~/keep` were intact (post-freeze `syncfs`), the
+    pre-hibernate background process (PID `68`) was gone, and both `cw start`
+    and `cw info` surfaced the `generation-mismatch` fallback notice.
+  - **Orchestration 30-day expiry (`runtime-image-expired`, `10.6 s`):**
+    after backdating only a scratch sandbox's `hibernated_at` by 31 days,
+    `cw --cloud start` cleanly cold-booted from disks
+    (`NetworkPolicy`/`Egress: enforced`), kept `/workspace/keep` and
+    `~/keep`, confirmed pre-hibernate PID `68` gone, and surfaced
+    `runtime-image-expired` in both `cw start` and `cw info`.
+  - Damaged/corrupted memory files, VMM digest mismatch, runtime-image digest
+    mismatch, image-disk build mismatch, and VM-config mismatch fallback
+    paths are additionally verified by unit tests in
+    `codewire-local-vmm::pod_runtime::hibernate`. All scratch sandboxes were
+    removed with `cw rm --yes`.
