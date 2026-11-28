@@ -709,6 +709,29 @@ async fn only_a_definitive_refusal_or_a_failed_readiness_wait_reclaims() {
         .unwrap_err();
     assert!(crate::worker::activity_authority::is_authority_lost(&lost));
     assert!(!reclaim_eligible(&lost));
+    let unserved = readiness_wait(async {
+        Err::<(), _>(
+            crate::worker::create::front_door_hosts::FrontDoorHostsUnserved {
+                hosts: vec!["api.example.com".into()],
+            }
+            .into(),
+        )
+    })
+    .await
+    .unwrap_err();
+    assert!(!reclaim_eligible(&unserved));
+    let bound_refused = readiness_wait(async {
+        Err::<(), _>(
+            crate::worker::create::front_door_hosts::BoundSecretsRefused {
+                end: crate::lifecycle::FailedCreate::BoundHostConflict,
+                reason: "conflict".into(),
+            }
+            .into(),
+        )
+    })
+    .await
+    .unwrap_err();
+    assert!(!reclaim_eligible(&bound_refused));
     assert!(reclaim_eligible(&anyhow::Error::from(BindRefused::Denied(
         "pool rendering"
     ))));

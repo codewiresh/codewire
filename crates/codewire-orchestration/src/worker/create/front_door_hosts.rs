@@ -31,6 +31,28 @@ pub struct BoundSecretsRefused {
     pub reason: String,
 }
 
+/// Runs `wait` until it completes or the environment's current Pod records a
+/// first-bind refusal ([`FrontDoorHostsUnserved`] or [`BoundSecretsRefused`]).
+async fn race_refusal<T>(
+    ctx: &WorkerContext,
+    placement: &Placement,
+    env_id: &str,
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    let runtime = ctx.require_runtime()?;
+    race_refusal_with(wait, refused(runtime, &ctx.pool, placement, env_id)).await
+}
+
+async fn race_refusal_with<T>(
+    wait: impl std::future::Future<Output = anyhow::Result<T>>,
+    refusal: impl std::future::Future<Output = anyhow::Error>,
+) -> anyhow::Result<T> {
+    tokio::select! {
+        result = wait => result,
+        refusal = refusal => Err(refusal),
+    }
+}
+
 /// The runtime's readiness wait for `env_id`, which create and start run,
 /// ended early with [`FrontDoorHostsUnserved`] or [`BoundSecretsRefused`] once
 /// the environment's current Pod has a recorded first-bind refusal.
@@ -41,10 +63,53 @@ pub(in crate::worker) async fn wait_ready(
     timeout: Duration,
 ) -> anyhow::Result<()> {
     let runtime = ctx.require_runtime()?;
-    tokio::select! {
-        result = runtime.wait_ready(placement, env_id, timeout) => result,
-        refusal = refused(runtime, &ctx.pool, placement, env_id) => Err(refusal),
-    }
+    race_refusal(
+        ctx,
+        placement,
+        env_id,
+        runtime.wait_ready(placement, env_id, timeout),
+    )
+    .await
+}
+
+/// The runtime's access-proof wait for `env_id` (`access_ready` during create),
+/// ended early with [`FrontDoorHostsUnserved`] or [`BoundSecretsRefused`] once
+/// the environment's current Pod has a recorded first-bind refusal.
+pub(in crate::worker) async fn prove_access(
+    ctx: &WorkerContext,
+    placement: &Placement,
+    env_id: &str,
+    timeout: Duration,
+    host_keys: &dyn crate::sandbox::host_keys::HostKeyStore,
+) -> anyhow::Result<String> {
+    let runtime = ctx.require_runtime()?;
+    race_refusal(
+        ctx,
+        placement,
+        env_id,
+        runtime.prove_access(placement, env_id, timeout, host_keys),
+    )
+    .await
+}
+
+/// The runtime's access-readiness wait for `env_id`, ended early with
+/// [`FrontDoorHostsUnserved`] or [`BoundSecretsRefused`] once the environment's
+/// current Pod has a recorded first-bind refusal.
+pub(in crate::worker) async fn wait_access_ready(
+    ctx: &WorkerContext,
+    placement: &Placement,
+    env_id: &str,
+    timeout: Duration,
+    host_keys: &dyn crate::sandbox::host_keys::HostKeyStore,
+) -> anyhow::Result<()> {
+    let runtime = ctx.require_runtime()?;
+    race_refusal(
+        ctx,
+        placement,
+        env_id,
+        runtime.wait_access_ready(placement, env_id, timeout, host_keys),
+    )
+    .await
 }
 
 /// Ends once the Pod the environment's claim names now has a recorded
@@ -219,5 +284,39 @@ mod tests {
             None
         );
         assert_eq!(bound_secrets_refused(&anyhow::anyhow!("timeout")), None);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_refusal_ends_a_pending_access_wait_immediately() {
+        let unserved = FrontDoorHostsUnserved {
+            hosts: vec!["api.example.com".into()],
+        };
+        let err = race_refusal_with(
+            std::future::pending::<anyhow::Result<String>>(),
+            std::future::ready(unserved.clone().into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(front_door_hosts_unserved(&err), Some(&unserved));
+
+        let bound = BoundSecretsRefused {
+            end: crate::lifecycle::FailedCreate::BoundHostConflict,
+            reason: "conflict".into(),
+        };
+        let err = race_refusal_with(
+            std::future::pending::<anyhow::Result<String>>(),
+            std::future::ready(bound.clone().into()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bound_secrets_refused(&err), Some(&bound));
+
+        let ok = race_refusal_with(
+            std::future::ready(Ok::<_, anyhow::Error>("pod-uid".to_owned())),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ok, "pod-uid");
     }
 }

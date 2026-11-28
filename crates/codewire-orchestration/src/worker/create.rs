@@ -50,8 +50,7 @@ mod readiness;
 pub(crate) use readiness::ReadinessWaitFailed;
 use readiness::readiness_wait;
 pub(super) use readiness::{
-    container_start_failure, end_failed_create, fail_create_for_container_start,
-    no_capacity_refusal, wait_failure_log,
+    container_start_failure, end_failed_create, no_capacity_refusal, wait_failure_log,
 };
 mod render_config;
 mod rendering_intent;
@@ -1257,6 +1256,11 @@ async fn run_environment_create(
                             reclaimed_cold = true;
                             continue;
                         }
+                        if env.never_ran
+                            && end_failed_create(ctx, &svc, authority, env_id, &error).await?
+                        {
+                            return Ok(None);
+                        }
                         return Err(error);
                     }
                 }
@@ -1800,7 +1804,8 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(runtime.prove_access(
+                        readiness_wait(front_door_hosts::prove_access(
+                            ctx,
                             &placement,
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
@@ -1853,10 +1858,8 @@ async fn run_environment_create(
                             continue;
                         }
                         if env.never_ran
-                            && let Some(failure) = container_start_failure(&e)
+                            && end_failed_create(ctx, &svc, authority, env_id, &e).await?
                         {
-                            fail_create_for_container_start(ctx, &svc, authority, env_id, failure)
-                                .await?;
                             return Ok(None);
                         }
                         record_error(&svc, authority, env_id, &format!("gateway stack: {e:#}"))
@@ -2657,7 +2660,8 @@ async fn ensure_access_stack_for_environment(
     authority
         .run_while_authoritative_for_states(
             states,
-            runtime.wait_access_ready(
+            front_door_hosts::wait_access_ready(
+                ctx,
                 &placement,
                 env_id,
                 ready_timeout_for_isolation(&env.isolation_tier),
@@ -3060,11 +3064,14 @@ pub(super) async fn refuse_for_no_capacity(
 }
 
 /// Whether a create failure may re-claim cold: a definitive bind-check
-/// refusal, or a readiness wait that failed (review M3).
+/// refusal, or a readiness wait that failed (review M3) for a cause that is
+/// neither lost authority nor a recorded first-bind refusal.
 fn reclaim_eligible(error: &anyhow::Error) -> bool {
     definitive_refusal(error)
         || (error.downcast_ref::<ReadinessWaitFailed>().is_some()
-            && !crate::worker::activity_authority::is_authority_lost(error))
+            && !crate::worker::activity_authority::is_authority_lost(error)
+            && front_door_hosts::front_door_hosts_unserved(error).is_none()
+            && front_door_hosts::bound_secrets_refused(error).is_none())
 }
 
 /// Program #2238 C3: a definitive bind-check failure, or a readiness wait

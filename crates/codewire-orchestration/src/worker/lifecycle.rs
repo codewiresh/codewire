@@ -241,7 +241,8 @@ async fn ensure_access_stack_for_env(
     authority
         .run_while_authoritative_for_states(
             START_MUTATION_STATES,
-            runtime.wait_access_ready(
+            front_door_hosts::wait_access_ready(
+                ctx,
                 &placement,
                 env_id,
                 super::create::ready_timeout_for_isolation(&env.isolation_tier),
