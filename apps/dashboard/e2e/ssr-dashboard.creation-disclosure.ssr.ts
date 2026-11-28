@@ -60,7 +60,7 @@ const selectionsDraft = () => ({
   version: 1, actor, organization, draft: draftId, saved_at: Date.now(),
   selections: {
     preset_id: "", cpu: "2000", memory: "4096", disk: "20", ttl: "8h",
-    isolation_tier: "standard", agents: [] as string[], ports: [] as { port: string; access: string }[],
+    isolation_tier: "standard", ports: [] as { port: string; access: string }[],
     secret_project: projectId, credential_profile: profile,
     include_org_secrets: true, include_user_secrets: false,
   },
@@ -87,7 +87,7 @@ function loadingCreateFixture(hydratedHtml: string) {
   const end = hydratedHtml.indexOf('<details class="cw-create-panel cw-runtime-options', start);
   expect(start).toBeGreaterThan(0);
   expect(end).toBeGreaterThan(start);
-  return `${hydratedHtml.slice(0, start)}<div class="cw-create-stack" data-create-optional-options><p role="status">Loading provider, secret, agent, and isolation choices…</p><button type="button" data-retry-create-options hidden>Retry loading choices</button><input type="hidden" name="isolation_tier" value="standard"></div>\n${hydratedHtml.slice(end)}`
+  return `${hydratedHtml.slice(0, start)}<div class="cw-create-stack" data-create-optional-options><p role="status">Loading provider, secret, and isolation choices…</p><button type="button" data-retry-create-options hidden>Retry loading choices</button><input type="hidden" name="isolation_tier" value="standard"></div>\n${hydratedHtml.slice(end)}`
     .replace('data-create-options-loading="false"', 'data-create-options-loading="true"')
     .replace(/<p class="cw-field-help" data-create-preview-hint>.*?<\/p>/, '<p class="cw-field-help" data-create-preview-hint>Loading preview URL details…</p>');
 }

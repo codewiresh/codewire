@@ -14,7 +14,6 @@
 
 pub mod abandoned_leases;
 pub mod activity_authority;
-pub mod agents;
 pub mod billing_sessions;
 pub mod cloudflare;
 pub mod confidential_slots;

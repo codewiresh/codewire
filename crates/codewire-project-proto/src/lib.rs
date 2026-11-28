@@ -14,7 +14,6 @@ pub use create::{PersonalAccess, SourceChoice, create_request, personal_access, 
 pub fn from_proto(
     value: proto::ProjectSpec,
 ) -> Result<project::ProjectSpec, project::ProjectError> {
-    let agents = value.agents.into_option().unwrap_or_default();
     let resources = value.resources.into_option().unwrap_or_default();
     let secrets = value.secrets.into_option().unwrap_or_default();
     let credentials =
@@ -79,10 +78,6 @@ pub fn from_proto(
         install_command: value.install_command,
         startup_script: value.startup_script,
         environment: ordered_map(value.environment),
-        agents: project::AgentsSpec {
-            install: agents.install,
-            tools: agents.tools,
-        },
         skills,
         application_ports: value
             .application_ports
@@ -111,11 +106,6 @@ pub fn from_proto(
 }
 
 pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
-    let agents = (!value.agents.is_empty()).then(|| proto::ProjectAgents {
-        install: value.agents.install,
-        tools: value.agents.tools,
-        ..Default::default()
-    });
     let resources = (!value.resources.is_empty()).then(|| proto::ProjectResources {
         cpu_millicores: value.resources.cpu_millicores,
         memory_mib: value.resources.memory_mib,
@@ -161,7 +151,6 @@ pub fn to_proto(value: project::ProjectSpec) -> proto::ProjectSpec {
         install_command: value.install_command,
         startup_script: value.startup_script,
         environment: value.environment.into_iter().collect(),
-        agents: agents.into(),
         skills: value
             .skills
             .into_iter()
@@ -222,7 +211,6 @@ repositories:
     destination: /workspace/app
 working_directory: /workspace/app
 environment: {RUST_LOG: info}
-agents: {tools: [claude-code, codex]}
 skills: [{source: repository, path: .agents/skills/rust, agents: [codex]}]
 ports: [{port: 8080, label: web, access: private}]
 cpu: "2"
@@ -243,12 +231,22 @@ network: {policy: local:work}
         assert_eq!(encoded.repositories[0].destination, "/workspace/app");
         assert_eq!(encoded.application_ports[0].port, 8080);
         assert_eq!(encoded.network.policy, "local:work");
+        assert!(encoded.agents.is_unset());
         let decoded = from_proto(encoded).unwrap();
         assert_eq!(decoded, original);
         assert_eq!(
             decoded.canonical_json().unwrap(),
             original.canonical_json().unwrap()
         );
+
+        let mut legacy = to_proto(original.clone());
+        legacy.agents = Some(proto::ProjectAgents {
+            install: Some(true),
+            tools: vec!["codex".to_string()],
+            ..Default::default()
+        })
+        .into();
+        assert_eq!(from_proto(legacy).unwrap(), original);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 title: Environments
 description: ls, info, create, start, stop, restart, rm, retry, update, ports, local-https, cp and the environment administration commands, plus use, current, init, shell, vscode, desktop, setup ssh, setup rex, checkpoint and preset.
-updated: 2026-11-27
+updated: 2026-11-28
 weight: 2
 aliases: ["/cli/environments"]
 ---
@@ -130,7 +130,6 @@ Working dir: /workspace/my-app
 Access:      none
 Install:     none
 Env vars:    none
-Agents:      none
 Docker:      8Gi
 Generation:  1
 Secrets:     none

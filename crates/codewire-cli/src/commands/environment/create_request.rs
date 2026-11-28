@@ -93,12 +93,6 @@ pub(crate) fn env_create_request_from_source(
     project_spec
         .environment
         .extend(parse_env_settings(&args.env, "cw create")?);
-    if let Some(agent) = args.coding_agent.as_deref().and_then(trimmed_str) {
-        project_spec.agents = codewire_project::AgentsSpec {
-            install: None,
-            tools: vec![config::canonical_agent_id(agent)],
-        };
-    }
     if args.cpu.is_some() {
         project_spec.resources.cpu_millicores =
             positive_i32(args.cpu.as_deref().map(parse_resize_cpu).transpose()?)

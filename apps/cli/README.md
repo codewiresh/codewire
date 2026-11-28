@@ -84,7 +84,6 @@ cw rm my-app
 ```
 
 `cw init` writes `codewire.yaml`, which can be used for either placement.
-Environment AI-tool selection is `--coding-agent`.
 
 A self-hosted server whose HTTPS certificate comes from its own certificate
 authority needs that CA once, when you log in:

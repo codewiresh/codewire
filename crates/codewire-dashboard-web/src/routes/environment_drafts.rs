@@ -186,7 +186,7 @@ mod tests {
             "version": 1, "actor": ACTOR, "organization": ORG, "draft": DRAFT, "saved_at": NOW,
             "selections": {
                 "preset_id": "", "cpu": "1250", "memory": "3072", "disk": "17", "ttl": "8h",
-                "isolation_tier": "standard", "agents": ["codex"], "ports": [],
+                "isolation_tier": "standard", "ports": [],
                 "secret_project": "", "credential_profile": format!("{DRAFT}@9007199254740993"),
                 "include_org_secrets": false, "include_user_secrets": true
             }
@@ -202,10 +202,6 @@ mod tests {
             .ok()
             .unwrap();
         let mut form = super::super::environments::default_create_form("current-csrf".into(), true);
-        form.agents.push(crate::view::EnvironmentAgentView {
-            id: "codex",
-            label: "Codex",
-        });
         form.sources.application_selection_enabled = true;
         form.sources.credential_selection_enabled = true;
         let current_default_image = form.image.clone();
@@ -250,7 +246,6 @@ mod tests {
             default_ttl_seconds,
             default_install_command: String::new(),
             default_startup_script: String::new(),
-            default_agents: Vec::new(),
             default_app_ports: Vec::new(),
             uses_protected_secret_bindings: false,
             official: false,
@@ -266,7 +261,6 @@ mod tests {
             ("", None, "", ""),
         ] {
             let mut value = metadata();
-            value["selections"]["agents"] = serde_json::json!([]);
             value["selections"]["preset_id"] = serde_json::json!(preset_id);
             value["selections"]["ttl"] = serde_json::json!(saved);
             let mut form =
@@ -286,17 +280,9 @@ mod tests {
     }
 
     #[test]
-    fn current_capability_and_agent_catalog_reject_unavailable_choices() {
+    fn current_capability_rejects_unavailable_choices() {
         let mut value = metadata();
         let mut form = super::super::environments::default_create_form("current-csrf".into(), true);
-        assert!(
-            SelectionDraft::parse(value.to_string().as_bytes(), NOW)
-                .ok()
-                .unwrap()
-                .hydrate(&mut form)
-                .is_err()
-        );
-        value["selections"]["agents"] = serde_json::json!([]);
         value["selections"]["isolation_tier"] = serde_json::json!("confidential");
         assert!(
             SelectionDraft::parse(value.to_string().as_bytes(), NOW)

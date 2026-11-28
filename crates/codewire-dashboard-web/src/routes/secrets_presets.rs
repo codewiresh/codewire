@@ -1166,10 +1166,6 @@ mod tests {
             environment: [("RUST_LOG".to_owned(), "info".to_owned())]
                 .into_iter()
                 .collect(),
-            agents: codewire_project::AgentsSpec {
-                install: Some(true),
-                tools: vec!["codex".to_owned()],
-            },
             application_ports: vec![codewire_project::ApplicationPort {
                 port: 3_000,
                 label: "web".to_owned(),
@@ -1183,7 +1179,6 @@ mod tests {
         };
         let repositories = project_spec.repositories.clone();
         let environment = project_spec.environment.clone();
-        let agents = project_spec.agents.clone();
         let application_ports = project_spec.application_ports.clone();
         let secrets = project_spec.secrets.clone();
         let form = PresetFormView {
@@ -1198,7 +1193,6 @@ mod tests {
 
         assert_eq!(project_spec.repositories, repositories);
         assert_eq!(project_spec.environment, environment);
-        assert_eq!(project_spec.agents, agents);
         assert_eq!(project_spec.application_ports, application_ports);
         assert_eq!(project_spec.secrets, secrets);
         assert_eq!(project_spec.resources.cpu_millicores, Some(2_000));

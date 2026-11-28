@@ -122,8 +122,7 @@ pub(super) fn format_native_environment(
 }
 
 /// The saved configuration a person set in codewire.yaml or on create: the
-/// install command, environment variable names (never their values) and
-/// agents.
+/// install command and environment variable names (never their values).
 fn format_native_configuration(spec: &codewire_project::ProjectSpec) -> String {
     use crate::commands::progress::terminal_text;
     let install = Some(terminal_text(&spec.install_command))
@@ -139,18 +138,5 @@ fn format_native_configuration(spec: &codewire_project::ProjectSpec) -> String {
     } else {
         names.join(", ")
     };
-    let mut agents = spec
-        .agents
-        .tools
-        .iter()
-        .map(|tool| terminal_text(tool))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if agents.is_empty() {
-        agents = "none".to_owned();
-    }
-    if spec.agents.install == Some(false) {
-        agents.push_str(" (agent install off)");
-    }
-    format!("Install:     {install}\nEnv vars:    {variables}\nAgents:      {agents}\n")
+    format!("Install:     {install}\nEnv vars:    {variables}\n")
 }

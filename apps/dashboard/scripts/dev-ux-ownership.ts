@@ -91,7 +91,7 @@ export async function mustHold(name: string, expectations: Expectation[]): Promi
 // our fixed step names and states, anything else as "other", so nothing the
 // page or a remote wrote is printed.
 const SETUP_STEPS = new Set(["Checking sidecar readiness", "Configuring environment", "Cloning repositories",
-  "Running install command", "Running startup script", "Checking agent tools", "Registering ports"]);
+  "Running install command", "Running startup script", "Registering ports"]);
 const STEP_STATES = new Set(["running", "completed", "warning", "failed"]);
 export type SetupRowSeen = { label: string; state: string; instant: boolean };
 export function setupRowsSeen(rows: SetupRowSeen[]): string {

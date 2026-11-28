@@ -82,10 +82,10 @@ fn an_unknown_key_is_named_at_its_own_position() {
 
     assert_eq!(
         document_error(&format!(
-            "{COMMENTED_HEADER}agents:\n  tools: [codex]\n  toolz: [codex]\n"
+            "{COMMENTED_HEADER}secrets:\n  project: dev\n  projcet: dev\n"
         )),
         (
-            "agents.toolz: unknown field `toolz`, expected one of install, tools at line 8, column 3"
+            "secrets.projcet: unknown field `projcet`, expected one of organization, user, project at line 8, column 3"
                 .to_owned(),
             8,
             3
@@ -97,12 +97,12 @@ fn an_unknown_key_is_named_at_its_own_position() {
 fn a_wrong_type_inside_a_list_names_the_item_path() {
     assert_eq!(
         document_error(&format!(
-            "{COMMENTED_HEADER}agents:\n  tools:\n    - claude-code\n    - {{name: codex}}\n"
+            "{COMMENTED_HEADER}skills:\n  - source: repository\n    path: a\n    agents:\n      - claude-code\n      - {{name: codex}}\n"
         )),
         (
-            "agents.tools[1]: expected string scalar at line 9, column 7".to_owned(),
-            9,
-            7
+            "skills[0].agents[1]: expected string scalar at line 11, column 9".to_owned(),
+            11,
+            9
         )
     );
     assert_eq!(
@@ -153,7 +153,6 @@ cpu: "2000m"
 memory: "4Gi"
 disk: "20Gi"
 environment: {A: one, B: two}
-agents: {tools: [claude-code]}
 secrets: {project: dev}
 ports: [{port: 3000}]
 "#,
@@ -162,8 +161,51 @@ ports: [{port: 3000}]
     let encoded = canonical.canonical_json().unwrap();
     assert_eq!(
         String::from_utf8(encoded).unwrap(),
-        r#"{"schema_version":1,"preset":"workspace","working_directory":"/workspace","install_command":"bun install","startup_script":"bun test","environment":{"A":"one","B":"two"},"agents":{"tools":["claude-code"]},"application_ports":[{"port":3000}],"resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":20},"secrets":{"project":"dev"}}"#
+        r#"{"schema_version":1,"preset":"workspace","working_directory":"/workspace","install_command":"bun install","startup_script":"bun test","environment":{"A":"one","B":"two"},"application_ports":[{"port":3000}],"resources":{"cpu_millicores":2000,"memory_mib":4096,"disk_gib":20},"secrets":{"project":"dev"}}"#
     );
+}
+
+#[test]
+fn legacy_agents_and_install_agents_keys_are_silently_ignored() {
+    let baseline = parse_project_yaml("version: 1\nimage: workspace\n").unwrap();
+    for legacy in [
+        "version: 1\nimage: workspace\nagents: {tools: [codex], install: true}\n",
+        "version: 1\nimage: workspace\nagents:\n  install: false\n  tools: [claude-code, codex]\n",
+        "version: 1\nimage: workspace\nagents: [codex]\n",
+        "version: 1\nimage: workspace\nagents: codex\n",
+        "version: 1\nimage: workspace\ninstall_agents: true\n",
+        "version: 1\nimage: workspace\nagents: {tools: [unknown-legacy-tool]}\ninstall_agents: false\n",
+    ] {
+        let parsed = parse_project_yaml(legacy).unwrap_or_else(|error| {
+            panic!("legacy YAML should parse cleanly: {legacy:?} -> {error}")
+        });
+        assert_eq!(parsed, baseline, "legacy YAML diverged: {legacy:?}");
+        let json = String::from_utf8(parsed.canonical_json().unwrap()).unwrap();
+        assert!(
+            !json.contains("agents"),
+            "canonical JSON emitted agents: {json}"
+        );
+        let yaml = parsed.to_yaml().unwrap();
+        assert!(
+            !yaml.contains("agents"),
+            "exported YAML emitted agents: {yaml}"
+        );
+
+        let merged = merge_project_files([
+            ProjectYamlFile::parse(legacy).unwrap(),
+            ProjectYamlFile::parse("agents: {tools: [claude-code]}\n").unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(merged, baseline);
+    }
+
+    let persisted: ProjectSpec = serde_json::from_str(
+        r#"{"schema_version":1,"image":"workspace","working_directory":"/workspace","agents":{"install":true,"tools":["codex"]}}"#,
+    )
+    .unwrap();
+    assert_eq!(persisted, baseline.spec);
+    let encoded = String::from_utf8(persisted.canonical_json().unwrap()).unwrap();
+    assert!(!encoded.contains("agents"), "{encoded}");
 }
 
 #[test]
@@ -178,10 +220,6 @@ fn removed_compatibility_forms_are_rejected() {
         "startup: bun test\n",
         "env: {A: one}\n",
         "agent: codex\n",
-        "install_agents: true\n",
-        "agents: codex\n",
-        "agents: [codex]\n",
-        "agents: {tools: [claude]}\n",
         "skills: [.agents/skills/rust]\n",
         "skills: [{path: .agents/skills/rust}]\n",
         "skills: [{source: repo, path: .agents/skills/rust}]\n",
@@ -590,13 +628,6 @@ fn schema_and_input_bounds_fail_closed() {
             ),
         ),
         (
-            "agents",
-            format!(
-                "agents: {{tools: [{}]}}\n",
-                vec!["codex"; MAX_AGENTS + 1].join(",")
-            ),
-        ),
-        (
             "skills",
             format!(
                 "skills: [{}]\n",
@@ -642,24 +673,21 @@ fn schema_and_input_bounds_fail_closed() {
 #[test]
 fn canonicalization_is_idempotent_for_generated_valid_specs() {
     for repositories in 0..=3 {
-        for agents in ["{tools: []}", "{tools: [claude-code, codex]}"] {
-            let repos = (0..repositories)
-                .map(|index| {
-                    format!(
-                        "{{source: https://example.com/org/r{index}.git, destination: /workspace/r{index}}}"
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let yaml = format!(
-                "version: 1\nrepositories: [{repos}]\nagents: {agents}\nenvironment: {{Z: last, A: first}}\n"
-            );
-            let first = parse_project_yaml(&yaml).unwrap().spec;
-            let encoded = first.canonical_json().unwrap();
-            let second: ProjectSpec = serde_json::from_slice(&encoded).unwrap();
-            assert_eq!(first, second);
-            assert_eq!(encoded, second.canonical_json().unwrap());
-        }
+        let repos = (0..repositories)
+            .map(|index| {
+                format!(
+                    "{{source: https://example.com/org/r{index}.git, destination: /workspace/r{index}}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let yaml =
+            format!("version: 1\nrepositories: [{repos}]\nenvironment: {{Z: last, A: first}}\n");
+        let first = parse_project_yaml(&yaml).unwrap().spec;
+        let encoded = first.canonical_json().unwrap();
+        let second: ProjectSpec = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(encoded, second.canonical_json().unwrap());
     }
 }
 
@@ -688,13 +716,13 @@ fn repository_destination_helper_preserves_inferred_defaults() {
 #[test]
 fn typed_specs_validate_before_crossing_adapter_boundaries() {
     let mut spec = parse_project_yaml(
-        "agents: {tools: [claude-code]}\nskills: [{source: repository, path: .agents/skills/rust}]\ncredentials: {profile: user/work}\n",
+        "skills: [{source: repository, path: .agents/skills/rust, agents: [claude-code]}]\ncredentials: {profile: user/work}\n",
     )
     .unwrap()
     .spec;
     spec.validate().unwrap();
 
-    spec.agents.tools[0] = "claude".to_string();
+    spec.skills[0].agents[0] = "claude".to_string();
     assert!(spec.validate().is_err());
     assert!(spec.canonical_json().is_err());
 

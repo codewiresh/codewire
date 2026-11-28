@@ -1,7 +1,7 @@
 ---
 title: codewire.yaml
 description: Describe an environment once in codewire.yaml so that cw create builds it the same way every time, locally or on the platform.
-updated: 2026-11-22
+updated: 2026-11-28
 weight: 1
 aliases: ["/guides/project-file"]
 ---
@@ -85,7 +85,7 @@ cw create --cloud --name ci --file codewire.yaml --file codewire.ci.yaml
 
 Files merge the same way however they are chosen:
 
-- mappings merge by key, at any depth (`environment`, `secrets`, `agents`,
+- mappings merge by key, at any depth (`environment`, `secrets`,
   `workspace`);
 - a later value or list replaces the earlier one whole, so a variant that
   changes `repositories`, `ports` or `mounts` restates the list;
@@ -108,7 +108,7 @@ elsewhere, `--stdout` prints it, and an existing file is kept unless you pass
 `--force`. Export only reads: it never starts or changes the environment.
 
 The file holds the repositories with their branch or revision, setup
-commands, resources, ports, agents, and secret and credential references as
+commands, resources, ports, and secret and credential references as
 exact IDs, never their values. Declared `environment` values are left out
 and named. The workspace's host folder is reported, never turned into a
 repository: create again from that folder to mount it. `local:` references

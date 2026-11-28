@@ -16,7 +16,7 @@ use codewire_project::ProjectSpec;
 use codewire_project::create_input::{
     CreateError, CreateField, CreateInput, CreateReason, MAX_APP_PORTS, MAX_FIELD,
     MAX_REPOSITORIES, PortInput, PresetDefaults, RepositoryInput, allowlisted_access,
-    allowlisted_agents, ttl_uses_default, valid_port_label, valid_repository_url,
+    ttl_uses_default, valid_port_label, valid_repository_url,
 };
 use codewire_proto::codewire::v1::{
     CreateEnvironmentRequest, CreatePortRequest, DeletePortRequest,
@@ -173,7 +173,6 @@ impl EnvironmentSubmission {
         let mut values = HashMap::<String, String>::new();
         let mut repositories = BTreeMap::<usize, RepositoryInput>::new();
         let mut app_ports = BTreeMap::<usize, PortInput>::new();
-        let mut agents = Vec::new();
         let mut agent_secret_supplied = false;
 
         for (key, value) in url::form_urlencoded::parse(bytes) {
@@ -182,12 +181,7 @@ impl EnvironmentSubmission {
             }
             let key = key.into_owned();
             let value = value.into_owned();
-            if key == "agent" {
-                if agents.len() >= 16 {
-                    return Err(());
-                }
-                agents.push(value);
-            } else if let Some(index) = indexed_key(&key, "repo_url_") {
+            if let Some(index) = indexed_key(&key, "repo_url_") {
                 if index >= MAX_REPOSITORIES {
                     return Err(());
                 }
@@ -242,7 +236,6 @@ impl EnvironmentSubmission {
                 ttl: take(&mut values, "ttl"),
                 isolation_tier: take(&mut values, "isolation_tier"),
                 repositories: repositories.into_values().collect(),
-                agents,
                 app_ports: app_ports.into_values().collect(),
                 application_previews_explicit: take(&mut values, "application_previews_explicit")
                     == "true",
@@ -287,10 +280,8 @@ impl EnvironmentSubmission {
             confidential_available: false,
             show_confidential_controls: false,
             preview_base_domain: String::new(),
-            selected_agents: input.agents.clone(),
             app_ports: app_port_rows(&input.app_ports),
             presets: Vec::new(),
-            agents: Vec::new(),
             sources,
             repo_error: String::new(),
             image_error: String::new(),
@@ -320,7 +311,6 @@ impl EnvironmentSubmission {
             ttl_seconds: preset.default_ttl_seconds,
             install_command: preset.default_install_command.clone(),
             startup_script: preset.default_startup_script.clone(),
-            agents: preset.default_agents.clone(),
             app_ports: preset
                 .default_app_ports
                 .iter()
@@ -448,15 +438,12 @@ fn ensure_dashboard_project_support(project_spec: &ProjectSpec) -> Result<(), &'
             valid_port_label(&port.label)
                 && matches!(port.access.as_str(), "creator" | "org_members" | "public")
         });
-    let agents_supported = project_spec.agents.install.is_none()
-        && allowlisted_agents(&project_spec.agents.tools).len() == project_spec.agents.tools.len();
     if !project_spec.preset.is_empty()
         || project_spec.working_directory != expected_working_directory
         || !project_spec.environment.is_empty()
         || !project_spec.skills.is_empty()
         || !repositories_supported
         || !ports_supported
-        || !agents_supported
         || project_spec.install_command.len() > MAX_FIELD
         || project_spec.startup_script.len() > MAX_FIELD
     {
@@ -1992,10 +1979,8 @@ pub(super) fn default_create_form(token: String, expanded: bool) -> EnvironmentC
         confidential_available: false,
         show_confidential_controls: false,
         preview_base_domain: String::new(),
-        selected_agents: Vec::new(),
         app_ports: Vec::new(),
         presets: Vec::new(),
-        agents: Vec::new(),
         sources: Default::default(),
         repo_error: String::new(),
         image_error: String::new(),
@@ -2015,7 +2000,6 @@ pub(super) fn hydrate_options(
 ) {
     form.preview_base_domain = options.preview_base_domain;
     form.presets = options.presets;
-    form.agents = options.agents;
     form.confidential_available = options.confidential_available;
     form.credit_refusal = options.credit_refusal;
     let mut sources = options.sources;
@@ -2314,7 +2298,6 @@ mod tests {
                 &mut form,
                 EnvironmentCreateOptions {
                     presets: vec![],
-                    agents: vec![],
                     sources: Default::default(),
                     preview_base_domain: String::new(),
                     confidential_available: false,
@@ -2940,7 +2923,6 @@ mod tests {
             default_ttl_seconds: None,
             default_install_command: String::new(),
             default_startup_script: String::new(),
-            default_agents: Vec::new(),
             default_app_ports: Vec::new(),
             uses_protected_secret_bindings,
             official: false,
@@ -4053,7 +4035,6 @@ mod tests {
         let options = || EnvironmentCreateOptions {
             presets: vec![],
             preview_base_domain: String::new(),
-            agents: vec![],
             confidential_available: false,
             credit_refusal: None,
             sources: crate::view::EnvironmentSourceFieldsView {
@@ -4103,7 +4084,6 @@ mod tests {
         let options = || EnvironmentCreateOptions {
             presets: vec![],
             preview_base_domain: String::new(),
-            agents: vec![],
             confidential_available: false,
             credit_refusal: None,
             sources: crate::view::EnvironmentSourceFieldsView {
@@ -4181,7 +4161,6 @@ mod tests {
         let options = || EnvironmentCreateOptions {
             presets: vec![],
             preview_base_domain: String::new(),
-            agents: vec![],
             confidential_available: false,
             credit_refusal: None,
             sources: crate::view::EnvironmentSourceFieldsView {
@@ -4433,7 +4412,6 @@ mod tests {
                 default_ttl_seconds: Some(3_600),
                 default_install_command: "install-dependencies".to_owned(),
                 default_startup_script: "start-services".to_owned(),
-                default_agents: vec!["codex".to_owned()],
                 default_app_ports: vec![EnvironmentAppPortFormRow {
                     index: 0,
                     port: "3000".to_owned(),
@@ -4444,7 +4422,6 @@ mod tests {
                 uses_protected_secret_bindings: true,
                 official: false,
             }],
-            agents: Vec::new(),
             sources: Default::default(),
         };
 
@@ -4457,7 +4434,6 @@ mod tests {
         assert_eq!(submission.input.image, "example.test/workspace@sha256:abc");
         assert_eq!(submission.input.install_command, "install-dependencies");
         assert_eq!(submission.input.startup_script, "start-services");
-        assert_eq!(submission.input.agents, vec!["codex"]);
         let sources = submission.sources.as_ref().ok().unwrap();
         assert!(sources.selection.credentials.is_unset());
         assert_eq!(
@@ -4584,7 +4560,6 @@ mod tests {
             default_ttl_seconds: Some(3_600),
             default_install_command: String::new(),
             default_startup_script: String::new(),
-            default_agents: Vec::new(),
             default_app_ports: Vec::new(),
             uses_protected_secret_bindings: false,
             official: false,

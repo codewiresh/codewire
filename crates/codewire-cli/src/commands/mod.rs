@@ -562,11 +562,6 @@ pub(crate) struct InitArgs {
     install: Option<String>,
     #[arg(long, help = "Startup script")]
     startup: Option<String>,
-    #[arg(
-        long = "coding-agent",
-        help = "Coding agent (claude-code, codex, gemini-cli, aider)"
-    )]
-    coding_agent: Option<String>,
     #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
     env: Vec<String>,
     #[arg(long, default_value = "codewire.yaml", help = "Path to write")]

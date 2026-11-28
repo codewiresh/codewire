@@ -56,10 +56,6 @@ async fn require_org_role(
     }
 }
 
-fn valid_agent_type(agent: &str) -> bool {
-    crate::worker::agents::is_supported_agent(agent)
-}
-
 async fn insert_preset_db(
     pool: &PgPool,
     org_id: &str,
@@ -131,15 +127,6 @@ fn validate_preset_project_spec(spec: &codewire_project::ProjectSpec) -> AppResu
         ));
     }
     ensure_no_secret_delivery(spec)?;
-    for agent in &spec.agents.tools {
-        if !valid_agent_type(agent) {
-            return Err(coded_owned(
-                StatusCode::BAD_REQUEST,
-                "unsupported_agent",
-                format!("unsupported agent: {agent}"),
-            ));
-        }
-    }
     Ok(())
 }
 

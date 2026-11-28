@@ -53,9 +53,8 @@
     const hasAuthored = exactKeys(draft, ["version", "actor", "organization", "draft", "saved_at", "selections", "authored"]);
     if (!(hasAuthored || exactKeys(draft, ["version", "actor", "organization", "draft", "saved_at", "selections"])) || draft.version !== 1 || !actorId(draft.actor) || !organizationId(draft.organization) || !canonicalId(draft.draft) || !Number.isSafeInteger(draft.saved_at) || draft.saved_at < 0 || draft.saved_at > Date.now()) return false;
     const value = draft.selections;
-    if (!exactKeys(value, ["preset_id", "cpu", "memory", "disk", "ttl", "isolation_tier", "agents", "ports", "secret_project", "credential_profile", "include_org_secrets", "include_user_secrets"])) return false;
+    if (!exactKeys(value, ["preset_id", "cpu", "memory", "disk", "ttl", "isolation_tier", "ports", "secret_project", "credential_profile", "include_org_secrets", "include_user_secrets"])) return false;
     if (!(value.preset_id === "" || canonicalId(value.preset_id)) || !draftNumber(value.cpu, 100, 128000) || !draftNumber(value.memory, 128, 1048576) || !draftNumber(value.disk, 1, 16384) || !draftTtl(value.ttl) || !["standard", "confidential"].includes(value.isolation_tier)) return false;
-    if (!Array.isArray(value.agents) || value.agents.length > 6 || new Set(value.agents).size !== value.agents.length || value.agents.some((id) => !["claude-code", "codex", "gemini-cli", "kimi-code", "pi", "aider"].includes(id))) return false;
     if (!Array.isArray(value.ports) || value.ports.length > 16 || value.ports.some((port) => !exactKeys(port, ["port", "access"]) || !draftNumber(port.port, 1, 65535) || !["creator", "org_members", "public"].includes(port.access))) return false;
     if (!(value.secret_project === "" || canonicalId(value.secret_project)) || typeof value.credential_profile !== "string" || typeof value.include_org_secrets !== "boolean" || typeof value.include_user_secrets !== "boolean") return false;
     if (value.credential_profile !== "") {
@@ -132,7 +131,6 @@
       preset_id: draftFormValue(form, "preset_id"), cpu: draftFormValue(form, "cpu"),
       memory: draftFormValue(form, "memory"), disk: draftFormValue(form, "disk"),
       ttl: draftTtl(ttl) && !defaultTtl(ttl) ? ttl : "", isolation_tier: draftFormValue(form, "isolation_tier"),
-      agents: Array.from(form.querySelectorAll('[name="agent"]:checked'), (field) => field.value),
       ports: portRows.filter((row) => draftNumber(row.port.trim(), 1, 65535))
         .map((row) => ({ port: row.port.trim(), access: row.access })),
       secret_project: draftFormValue(form, "secret_project"), credential_profile: draftFormValue(form, "credential_profile"),
@@ -347,7 +345,7 @@
     state.controller = controller;
     const slot = form.querySelector("[data-create-optional-options]");
     const status = slot?.querySelector('[role="status"], [role="alert"]');
-    const loadingText = () => state.attempt ? `Choices did not load. Retrying (${state.attempt} of ${transientRetryDelays.length})…` : "Loading provider, secret, agent, and isolation choices…";
+    const loadingText = () => state.attempt ? `Choices did not load. Retrying (${state.attempt} of ${transientRetryDelays.length})…` : "Loading provider, secret, and isolation choices…";
     if (status) { status.textContent = loadingText(); status.setAttribute("role", "status"); }
     const retry = slot?.querySelector("[data-retry-create-options]");
     if (retry) retry.hidden = true;

@@ -223,12 +223,6 @@ fn differences(file: &PlatformDocument, saved: &Saved<'_>) -> Vec<Difference> {
             Route::NewSandbox,
         ),
         (
-            !f.agents.is_empty(),
-            f.agents == s.agents,
-            "agents",
-            Route::NewSandbox,
-        ),
-        (
             !f.skills.is_empty(),
             f.skills == s.skills,
             "skills",

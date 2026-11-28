@@ -140,7 +140,6 @@ export async function seedPinnedPreset(journey: EnvironmentJourney) {
          working_directory: "/workspace",
          install_command: "printf 'prepared-by-preset\\n'",
          startup_script: "printf 'started-by-preset\\n'",
-         agents: { tools: ["codex"] },
          application_ports: [{ port: 3000, label: "web", access: "creator" }],
          resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 10 },
        })})
@@ -174,7 +173,6 @@ export async function openConfiguredImageForm(page: Page, journey: EnvironmentJo
   await page.getByRole("textbox", { name: "Install command" }).fill("printf 'configured-explicitly\\n'");
   await page.getByLabel("Startup Script").fill("printf 'started-explicitly\\n'");
   await page.getByLabel("Delete after").fill("3600s");
-  await page.locator('input[name="agent"][value="codex"]').check();
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await page.getByLabel("Internal port", { exact: true }).fill("3000");
   await page.getByLabel("Preview label", { exact: true }).fill("web");

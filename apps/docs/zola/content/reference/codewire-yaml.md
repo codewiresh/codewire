@@ -1,16 +1,17 @@
 ---
 title: codewire.yaml keys
 description: Every key codewire.yaml accepts, with its type and limits.
-updated: 2026-11-19
+updated: 2026-11-28
 weight: 2
 ---
 
 How Codewire finds and uses the file is in
 [`codewire.yaml`](@/environments/codewire-yaml.md).
 
-Unknown keys are rejected. The same keys apply in `codewire.local.yaml` and
-in every file merged with repeated `--file`; see
-[Override files](@/environments/codewire-yaml.md#override-files).
+Unknown keys are rejected (legacy top-level `agents` and `install_agents` keys
+are silently ignored, because workspace images carry the agent tools). The same
+keys apply in `codewire.local.yaml` and in every file merged with repeated
+`--file`; see [Override files](@/environments/codewire-yaml.md#override-files).
 
 | Key | Type | Notes |
 | --- | --- | --- |
@@ -26,8 +27,7 @@ in every file merged with repeated `--file`; see
 | `network` | object | local VMs only: `policy: NAME`, the [network policy](@/networking/egress.md) to select at create: `open`, `locked` or a policy from `cw policy`; `--policy` overrides it. It names a policy and never holds rules |
 | `ports` | list | `port` with `label` and `access` for a preview; `host_port` and `guest_port` for a local VM port; on a local VM a `label` also serves the port at `https://{label}-{env}.cw.localhost` when the two form one DNS label |
 | `cpu`, `memory`, `disk` | quoted strings | `100m` to `256` CPUs; `128Mi` to `1Ti`; whole GiB from `1Gi` to `16384Gi` |
-| `agents` | object | `install: bool` and `tools: [ids]`; `claude-code` and `codex` are the agents Codewire manages |
-| `skills` | list | `source: repository` with `path` (relative to `/workspace`), or `source: user` with `name` (from `~/.codewire/skills`); optional `agents`; needs `agents.tools`. See [Agent skills](@/agents/skills.md) |
+| `skills` | list | `source: repository` with `path` (relative to `/workspace`), or `source: user` with `name` (from `~/.codewire/skills`); optional `agents` list to target specific agents (defaults to all supported agents). See [Agent skills](@/agents/skills.md) |
 | `mounts` | list | local VMs only: `source`, `destination`, `mode: copy|direct`, `read_only` (required for `direct`); a `direct` mount may be `/workspace` itself when it is the only workspace source |
 | `workspace.vm_only` | list | local VMs only: folders kept on the VM disk under a live mount; default `node_modules`, `target`, `.venv` |
 | `workspace.path_mode` | string | local VMs only: `mount`, `copy`, `clone` or `empty`, the default for `--path-mode`, which overrides it; with repositories, `mount` or `clone` |

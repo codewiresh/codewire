@@ -166,17 +166,16 @@ pub(crate) fn prepare_skill_snapshot(
     let mut total_bytes = 0_u64;
     let mut total_entries = 0_u64;
 
+    let default_agents: Vec<String> = codewire_project::CANONICAL_AGENT_IDS
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect();
     for (selection_index, selection) in project.skills.iter().enumerate() {
         let agents = if selection.agents.is_empty() {
-            &project.agents.tools
+            &default_agents
         } else {
             &selection.agents
         };
-        if agents.is_empty() {
-            return Err(SkillSnapshotPreparationError::MissingAgents(
-                selection.reference.clone(),
-            ));
-        }
         let name = Path::new(&selection.reference)
             .file_name()
             .and_then(|name| name.to_str())
@@ -664,8 +663,6 @@ fn workspace_error_is_not_found(error: &WorkspaceError) -> bool {
 pub enum SkillSnapshotPreparationError {
     #[error("native skill snapshot project is invalid")]
     InvalidProject,
-    #[error("skill {0:?} needs explicit agents or project agents")]
-    MissingAgents(String),
     #[error("skill reference {0:?} is invalid")]
     InvalidReference(String),
     #[error("repository skill {0:?} does not exist in a prepared workspace input")]
@@ -697,7 +694,7 @@ pub enum SkillSnapshotPreparationError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codewire_project::{AgentsSpec, SkillSelection};
+    use codewire_project::SkillSelection;
 
     #[cfg(target_os = "linux")]
     use crate::direct_share::admit_direct_share;
@@ -730,16 +727,56 @@ mod tests {
     fn project(skills: Vec<SkillSelection>) -> (ProjectSpec, Vec<u8>, String) {
         let project = ProjectSpec {
             image: "registry.example/codewire/workspace:latest".to_owned(),
-            agents: AgentsSpec {
-                install: None,
-                tools: vec!["codex".to_owned()],
-            },
             skills,
             ..Default::default()
         };
         let bytes = project.canonical_json().unwrap();
         let sha256 = codewire_vmm_guest_probe::Sha256Value::calculate(&bytes).to_string();
         (project, bytes, sha256)
+    }
+
+    #[test]
+    fn skill_without_explicit_agents_projects_to_all_supported_agents() {
+        let engine = private_temp();
+        let workspace = private_temp();
+        let user = private_temp();
+        let user_skill = user.path().join("shared-skill");
+        fs::create_dir_all(&user_skill).unwrap();
+        fs::write(user_skill.join("SKILL.md"), b"shared skill\n").unwrap();
+        let source = inspect_workspace(
+            workspace.path(),
+            WorkspaceSelection::Copy,
+            workspace_content_limit(u64::MAX),
+        )
+        .unwrap();
+        let workspace_plan = WorkspacePlan::local(&source).unwrap();
+        let (project, _, project_sha256) = project(vec![SkillSelection {
+            source: SkillSource::User,
+            reference: "shared-skill".to_owned(),
+            agents: Vec::new(),
+        }]);
+
+        let prepared = prepare_skill_snapshot(SkillSnapshotRequest {
+            engine_state_root: engine.path(),
+            vm_id: Uuid::new_v4(),
+            workspace_plan: &workspace_plan,
+            project: &project,
+            project_sha256: &project_sha256,
+            user_skills_root: user.path(),
+            forbidden_direct_roots: &[],
+            plan_generation: 1,
+            expected: None,
+        })
+        .unwrap()
+        .unwrap();
+        let projected_agents: Vec<&str> = prepared.plan().skills()[0]
+            .projections()
+            .iter()
+            .map(|projection| projection.agent())
+            .collect();
+        let mut expected: Vec<&str> = codewire_project::CANONICAL_AGENT_IDS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(projected_agents, expected);
     }
 
     #[test]

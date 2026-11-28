@@ -46,7 +46,7 @@ async function stage(name: string, operation: () => Promise<void>, started = Dat
 // row that start showed.
 const START_ROW = "Starting the Sandbox";
 const SETUP_ROWS = new Set(["Checking sidecar readiness", "Configuring environment", "Cloning repositories",
-  "Running install command", "Running startup script", "Checking agent tools", "Registering ports"]);
+  "Running install command", "Running startup script", "Registering ports"]);
 const startListRows = (page: Page) =>
   page.locator("[data-setup-progress] [data-setup-stages] > .cw-setup-stage > .cw-setup-row > .cw-setup-stage-label");
 
@@ -795,7 +795,6 @@ async function createFailingSetup(page: Page, slug: string, owned: OwnedUxSandbo
   await expect(page.getByLabel("Secret project", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
   await expect(page.getByLabel("Organization secrets", { exact: false })).not.toBeChecked();
-  for (const agent of await page.locator('input[name="agent"]').all()) await agent.uncheck();
   if ("install" in setup) {
     await page.locator("[data-create-runtime] > summary").click();
     await page.getByLabel("Install command", { exact: true }).fill(setup.install);
@@ -1050,7 +1049,6 @@ export async function runDevUxWalkthrough(page: Page, options: {
     await expect(page.getByLabel("Personal secrets", { exact: false })).not.toBeChecked();
     await expect(page.getByLabel("Organization secrets", { exact: false })).not.toBeChecked();
     await expect(page.getByLabel("Repository URL", { exact: true })).toHaveValue("");
-    for (const agent of await page.locator('input[name="agent"]').all()) await agent.uncheck();
   });
   // Time the backend start apart from the UI checks. The page opens its own
   // terminal once setup completes and the runtime is ready; New terminal is

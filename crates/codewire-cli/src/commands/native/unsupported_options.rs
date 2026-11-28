@@ -27,9 +27,6 @@ pub(super) fn reject_unsupported_native_create_options(args: &EnvCreateArgs) -> 
     if args.isolation.is_some() {
         unsupported.push("--isolation");
     }
-    if args.coding_agent.is_some() {
-        unsupported.push("--coding-agent");
-    }
     if !args.follow || args.no_wait {
         unsupported.push("asynchronous creation");
     }

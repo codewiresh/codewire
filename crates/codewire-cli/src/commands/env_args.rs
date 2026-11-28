@@ -130,11 +130,6 @@ pub(crate) struct EnvCreateArgs {
     pub(crate) install: Option<String>,
     #[arg(long, help = "Startup script")]
     pub(crate) startup: Option<String>,
-    #[arg(
-        long = "coding-agent",
-        help = "Coding agent (claude-code, codex, gemini-cli, aider)"
-    )]
-    pub(crate) coding_agent: Option<String>,
     #[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
     pub(crate) env: Vec<String>,
     #[arg(

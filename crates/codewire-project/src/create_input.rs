@@ -10,7 +10,7 @@ use std::fmt;
 use url::Url;
 
 use crate::{
-    AgentsSpec, ApplicationPort, PROJECT_SCHEMA_VERSION, ProjectSpec, RepositorySpec, ResourceSpec,
+    ApplicationPort, PROJECT_SCHEMA_VERSION, ProjectSpec, RepositorySpec, ResourceSpec,
     validate_repository_destinations,
 };
 
@@ -38,7 +38,6 @@ pub struct CreateInput {
     pub ttl: String,
     pub isolation_tier: String,
     pub repositories: Vec<RepositoryInput>,
-    pub agents: Vec<String>,
     pub app_ports: Vec<PortInput>,
     /// The form said which previews it wants, so none means none, not the
     /// preset's.
@@ -69,7 +68,6 @@ pub struct PresetDefaults {
     pub ttl_seconds: Option<i32>,
     pub install_command: String,
     pub startup_script: String,
-    pub agents: Vec<String>,
     pub app_ports: Vec<PortInput>,
 }
 
@@ -106,7 +104,7 @@ pub enum CreateField {
     Memory,
     Disk,
     Ttl,
-    /// The form as a whole: agents, isolation, the project.
+    /// The form as a whole: isolation, the project.
     Form,
     /// A preview row, by its index in [`CreateInput::app_ports`].
     PortNumber(usize),
@@ -122,7 +120,6 @@ pub enum CreateReason {
     NameTooLong,
     OutOfRange { minimum: i32, maximum: i32 },
     Lifetime,
-    UnsupportedAgent,
     ConfidentialUnavailable,
     IsolationTier,
     PortNumber,
@@ -157,7 +154,6 @@ impl fmt::Display for CreateError {
             CreateReason::Lifetime => {
                 "Enter a duration from 60 seconds to 365 days, such as 8h or 7d, or leave it empty."
             }
-            CreateReason::UnsupportedAgent => "One of the selected agents is not supported.",
             CreateReason::ConfidentialUnavailable => {
                 "Confidential Sandboxes are not available for this organization."
             }
@@ -187,7 +183,6 @@ impl PresetDefaults {
             ttl_seconds,
             install_command: spec.install_command,
             startup_script: spec.startup_script,
-            agents: spec.agents.tools,
             app_ports: spec
                 .application_ports
                 .into_iter()
@@ -232,9 +227,6 @@ impl CreateInput {
         }
         if self.startup_script.is_empty() {
             self.startup_script = preset.startup_script.clone();
-        }
-        if self.agents.is_empty() {
-            self.agents = preset.agents.clone();
         }
         if self.app_ports.is_empty() && !self.application_previews_explicit {
             self.app_ports = preset.app_ports.clone();
@@ -306,10 +298,6 @@ impl CreateInput {
             refuse(CreateField::Ttl, reason);
             None
         });
-        let agents = allowlisted_agents(&self.agents);
-        if agents.len() != self.agents.len() {
-            refuse(CreateField::Form, CreateReason::UnsupportedAgent);
-        }
         let isolation = match self.isolation_tier.trim() {
             "" | "standard" => Some(Isolation::Standard),
             "confidential" if confidential_available => Some(Isolation::Confidential),
@@ -382,10 +370,6 @@ impl CreateInput {
             working_directory,
             install_command: self.install_command.clone(),
             startup_script: self.startup_script.clone(),
-            agents: AgentsSpec {
-                install: None,
-                tools: agents,
-            },
             application_ports: ports,
             resources: ResourceSpec {
                 // The bounds above keep each value positive.
@@ -488,19 +472,6 @@ pub fn workspace_mount_path(value: &str) -> String {
         .unwrap_or(value)
         .trim_start_matches('/');
     format!("/workspace/{suffix}")
-}
-
-pub fn allowlisted_agents(values: &[String]) -> Vec<String> {
-    values
-        .iter()
-        .filter(|value| {
-            matches!(
-                value.as_str(),
-                "claude-code" | "codex" | "gemini-cli" | "kimi-code" | "pi" | "aider"
-            )
-        })
-        .cloned()
-        .collect()
 }
 
 pub fn valid_port_label(value: &str) -> bool {

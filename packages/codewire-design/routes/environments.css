@@ -81,7 +81,6 @@
 .cw-empty-inline { margin: 0; padding: var(--space-3); color: var(--fg-tertiary); font-size: var(--text-small); }
 .cw-create-panel .cw-empty-inline { padding: 0; }
 .cw-panel-help { margin: 0; color: var(--fg-tertiary); font-size: var(--text-small); line-height: var(--leading-body); }
-.cw-agent-pills { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .cw-runtime-options { padding: var(--space-4); }
 .cw-runtime-fields { display: grid; gap: var(--space-4); }
 .cw-workspace-mount { min-width: 0; }

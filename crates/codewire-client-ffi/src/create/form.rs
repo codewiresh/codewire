@@ -1,7 +1,7 @@
 //! The Create sheet's form: the dashboard's Create Sandbox fields, checked by
 //! the same rules (`codewire_project::create_input`) and sent as the same
 //! request (`codewire_project_proto::create_request`), so a preset alone
-//! creates what it creates on the dashboard. Agents are left out (#4341).
+//! creates what it creates on the dashboard.
 //! The journey is `ios-create` in `docs/journeys/ios-app.md`.
 
 use codewire_client::create_options::{
@@ -374,7 +374,6 @@ fn create_input(form: &CreateForm) -> CreateInput {
                 mount_path: repository.mount_path.clone(),
             })
             .collect(),
-        agents: Vec::new(),
         app_ports: form
             .ports
             .iter()

@@ -18,9 +18,6 @@ pub(crate) fn unsupported_project_fields(
     if spec.repositories.is_empty() && !has_local_mounts && spec.working_directory != "/workspace" {
         unsupported.push("working_directory");
     }
-    if spec.agents.install == Some(true) {
-        unsupported.push("agents");
-    }
     unsupported
 }
 

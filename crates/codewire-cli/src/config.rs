@@ -755,22 +755,6 @@ pub struct CurrentTargetConfig {
     pub name: String,
 }
 
-pub fn canonical_agent_id(raw: &str) -> String {
-    codewire_project::canonical_agent_id(raw)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| raw.trim())
-        .to_string()
-}
-
-pub fn display_agent_id(raw: &str) -> String {
-    codewire_project::display_agent_id(raw)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| raw.trim())
-        .to_string()
-}
-
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct MeshResolveOptions {
     pub mesh_url: Option<String>,

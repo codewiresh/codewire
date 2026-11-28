@@ -25,7 +25,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
     let working_directory_explicit = !raw.working_directory.trim().is_empty();
     let working_directory =
         normalize_working_directory(&raw.working_directory, &repositories, &mounts)?;
-    let agents = normalize_agents(raw.agents)?;
     let skills = normalize_skills(raw.skills)?;
     let (application_ports, host_ports) = normalize_ports(raw.ports)?;
     let resources = ResourceSpec {
@@ -49,7 +48,6 @@ pub(super) fn normalize_raw_project(raw: RawProject) -> Result<ProjectDocument, 
             install_command: command_value("install_command", &raw.install_command)?,
             startup_script: command_value("startup_script", &raw.startup_script)?,
             environment,
-            agents,
             skills,
             application_ports,
             resources,
@@ -100,7 +98,6 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
         spec.environment.len(),
         MAX_ENVIRONMENT_VALUES,
     )?;
-    enforce_count("agents", spec.agents.tools.len(), MAX_AGENTS)?;
     enforce_count("skills", spec.skills.len(), MAX_SKILLS)?;
     enforce_count("ports", spec.application_ports.len(), MAX_APPLICATION_PORTS)?;
 
@@ -128,13 +125,6 @@ pub(super) fn validate_project_spec(spec: &ProjectSpec) -> Result<(), ProjectErr
     }
     ensure_short_value("working_directory", &spec.working_directory)?;
     validate_workspace_path("working_directory", &spec.working_directory, true)?;
-
-    let mut agent_seen = BTreeSet::new();
-    for agent in &spec.agents.tools {
-        if canonical_agent_id(agent)? != Some(agent.as_str()) || !agent_seen.insert(agent) {
-            return invalid("agents", "must contain unique canonical agent identifiers");
-        }
-    }
 
     let mut previous_skill: Option<&SkillSelection> = None;
     for skill in &spec.skills {
@@ -296,28 +286,6 @@ fn normalize_working_directory(
         ([], [mount]) => Ok(mount.destination.clone()),
         _ => Ok(WORKSPACE_ROOT.to_string()),
     }
-}
-
-fn normalize_agents(agents: Option<RawAgentsBlock>) -> Result<AgentsSpec, ProjectError> {
-    let Some(RawAgentsBlock { install, tools }) = agents else {
-        return Ok(AgentsSpec::default());
-    };
-    enforce_count("agents", tools.len(), MAX_AGENTS)?;
-    let mut seen = BTreeSet::new();
-    let mut normalized = Vec::new();
-    for tool in tools {
-        let Some(tool) = canonical_agent_id(&tool)? else {
-            return invalid("agents", "agent identifier cannot be empty");
-        };
-        if !seen.insert(tool.to_string()) {
-            return invalid("agents", format!("duplicate agent {tool:?}"));
-        }
-        normalized.push(tool.to_string());
-    }
-    Ok(AgentsSpec {
-        install,
-        tools: normalized,
-    })
 }
 
 fn normalize_skills(skills: Vec<RawSkillBlock>) -> Result<Vec<SkillSelection>, ProjectError> {
@@ -667,6 +635,17 @@ pub fn destination_depths<S: AsRef<str>>(destinations: &[S]) -> Vec<usize> {
         })
         .collect()
 }
+
+/// Canonical identifiers of the agents whose skill directories Codewire
+/// projects declared skills into when a skill does not narrow `agents`.
+pub const CANONICAL_AGENT_IDS: [&str; 6] = [
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "kimi-code",
+    "pi",
+    "aider",
+];
 
 pub fn canonical_agent_id(raw: &str) -> Result<Option<&'static str>, ProjectError> {
     match raw.trim() {

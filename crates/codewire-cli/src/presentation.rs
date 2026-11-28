@@ -613,10 +613,6 @@ mod tests {
                 }],
                 working_directory: "/workspace/codewire".to_string(),
                 environment: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
-                agents: codewire_project::AgentsSpec {
-                    tools: vec!["codex".to_string()],
-                    ..Default::default()
-                },
                 resources: codewire_project::ResourceSpec {
                     cpu_millicores: Some(2000),
                     memory_mib: Some(4096),
@@ -637,7 +633,7 @@ mod tests {
             "/workspace/codewire"
         );
         assert_eq!(value["project_spec"]["environment"]["FOO"], "bar");
-        assert_eq!(value["project_spec"]["agents"]["tools"][0], "codex");
+        assert!(value["project_spec"].get("agents").is_none());
         for removed in ["image", "repos", "env_vars", "agents", "agent_env"] {
             assert!(
                 value.get(removed).is_none(),

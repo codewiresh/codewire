@@ -374,7 +374,7 @@ test.describe.serial("server-rendered environments", () => {
     expect(documentRequests).toBe(1);
   });
 
-  test("keeps image, repositories, mounts, protected secret boundary, agents, and runtime on one compact form", async ({ page, isMobile }) => {
+  test("keeps image, repositories, mounts, protected secret boundary, and runtime on one compact form", async ({ page, isMobile }) => {
     test.skip(!!isMobile, "desktop environment-create contract");
     await page.setViewportSize({ width: 1066, height: 1103 });
 
@@ -404,14 +404,13 @@ test.describe.serial("server-rendered environments", () => {
     await expect(page.getByLabel("Mount path").nth(1)).toHaveValue("secondary");
     await expect(page.getByRole("button", { name: "Analyze and generate from repo" })).toHaveCount(0);
 
-    await page.locator('input[name="agent"][value="codex"]').check();
+    await expect(page.locator('input[name="agent"]')).toHaveCount(0);
     await page.getByRole("button", { name: "Add", exact: true }).click();
     await page.getByLabel("Internal port", { exact: true }).fill("3000");
     await page.getByLabel("Preview label", { exact: true }).fill("web");
     await page.locator("[data-create-runtime] > summary").click();
     await page.getByRole("textbox", { name: "Install command" }).fill("bun install");
     await page.getByLabel("Startup Script").fill("bun run dev");
-    await expect(page.locator('input[name="agent"][value="codex"]')).toBeChecked();
     await expect(page.getByLabel("Internal port", { exact: true })).toHaveValue("3000");
     await expect(page.getByLabel("Preview label", { exact: true })).toHaveValue("web");
     await expect(page.getByRole("heading", { name: "Application secrets", exact: true })).toBeVisible();

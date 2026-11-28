@@ -42,7 +42,6 @@
     ["git_clone", "Cloning repositories"],
     ["install", "Running install command"],
     ["startup_script", "Running startup script"],
-    ["agent_validation", "Checking agent tools"],
     ["register_ports", "Registering ports"],
   ]);
   const STARTING = "Starting the Sandbox";

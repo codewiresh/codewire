@@ -366,7 +366,6 @@ pub(crate) fn validate_host_create(
         || args.image.is_some()
         || args.install.is_some()
         || args.startup.is_some()
-        || args.coding_agent.is_some()
         || !args.env.is_empty()
         || args.profile.is_some()
         || args.no_profile

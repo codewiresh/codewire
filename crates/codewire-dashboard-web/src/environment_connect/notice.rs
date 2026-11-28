@@ -82,11 +82,10 @@ pub(super) const NO_ROOM: &str = "No room to start this sandbox right now.";
 /// step's error, and that step in the words of the page's step list. The
 /// recorded `setup_phase` cannot name the step: it is the last checkpoint,
 /// which steps with nothing to do never advance.
-const FAILED_STEPS: [(&str, &str); 4] = [
+const FAILED_STEPS: [(&str, &str); 3] = [
     ("health check: ", "Checking sidecar readiness"),
     ("git clone: ", "Cloning repositories"),
     ("install: ", "Running install command"),
-    ("agent validation: ", "Checking agent tools"),
 ];
 
 /// What the page says of a recorded setup failure: the step it failed at, as

@@ -1922,7 +1922,6 @@ fn workspace_with_test_skills(environment: &mut EnvironmentRecord) -> WorkspaceG
     let mut project: codewire_project::ProjectSpec =
         serde_json::from_slice(environment.project_spec_json.as_deref().unwrap()).unwrap();
     project.install_command = "printf installed".to_owned();
-    project.agents.tools = vec!["codex".to_owned()];
     project.skills = vec![codewire_project::SkillSelection {
         source: codewire_project::SkillSource::User,
         reference: "rust".to_owned(),
@@ -3836,7 +3835,7 @@ fn canonical_project_setup_is_admitted_but_still_digest_bound() {
     .unwrap();
     project.startup_script = "printf changed".to_owned();
     assert!(validate_project_intent(&project.canonical_json().unwrap(), &digest, None).is_err());
-    project.agents.install = Some(true);
+    project.preset = "unsupported".to_owned();
     let bytes = project.canonical_json().unwrap();
     let digest = format!("{:x}", Sha256::digest(&bytes));
     assert!(validate_project_intent(&bytes, &digest, None).is_err());

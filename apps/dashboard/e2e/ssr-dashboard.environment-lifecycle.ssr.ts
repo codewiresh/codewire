@@ -244,7 +244,6 @@ test.describe.serial("server-rendered environment lifecycle", () => {
       working_directory: "/workspace",
       install_command: "printf 'configured-explicitly\\n'",
       startup_script: "printf 'started-explicitly\\n'",
-      agents: { tools: ["codex"] },
       application_ports: [{ port: 3000, label: "web", access: "creator" }],
       resources: { cpu_millicores: 1000, memory_mib: 2048, disk_gib: 120 },
     });

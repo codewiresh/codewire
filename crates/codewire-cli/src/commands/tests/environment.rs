@@ -726,8 +726,6 @@ fn env_create_parser_accepts_direct_create_flags() {
         "go mod download",
         "--startup",
         "go test ./...",
-        "--coding-agent",
-        "codex",
         "--env",
         "FOO=bar",
         "--no-wait",
@@ -751,7 +749,6 @@ fn env_create_parser_accepts_direct_create_flags() {
     assert_eq!(args.memory.as_deref(), Some("8gb"));
     assert_eq!(args.disk.as_deref(), Some("40gb"));
     assert_eq!(args.image.as_deref(), Some("workspace"));
-    assert_eq!(args.coding_agent.as_deref(), Some("codex"));
     assert!(args.no_wait);
     assert!(args.yes);
 
@@ -820,8 +817,6 @@ fn env_create_request_builds_one_canonical_project_spec() {
         "go mod download",
         "--startup",
         "go test ./...",
-        "--coding-agent",
-        "codex",
         "--env",
         "FOO=bar",
     ])
@@ -849,7 +844,6 @@ fn env_create_request_builds_one_canonical_project_spec() {
     assert_eq!(spec.install_command, "go mod download");
     assert_eq!(spec.startup_script, "go test ./...");
     assert_eq!(spec.environment["FOO"], "bar");
-    assert_eq!(spec.agents.tools, ["codex"]);
     assert!(spec.secrets.project.is_empty());
     let secrets = &spec.secrets;
     assert!(!secrets.organization);
@@ -909,7 +903,6 @@ credentials: {profile: platform:user/work}
     assert_eq!(request.project_spec.startup_script, "npm run dev");
     assert_eq!(request.project_spec.environment["LOG_LEVEL"], "debug");
     assert_eq!(request.project_spec.environment["KEEP"], "present");
-    assert_eq!(request.project_spec.agents.install, Some(false));
     assert_eq!(request.project_spec.application_ports[0].port, 8080);
     assert_eq!(request.project_spec.resources.cpu_millicores, Some(2000));
     assert_eq!(request.project_spec.resources.memory_mib, Some(8192));
@@ -1036,8 +1029,6 @@ fn direct_cli_and_codewire_yaml_produce_identical_portable_intent() {
         "cargo fetch",
         "--startup",
         "cargo test",
-        "--coding-agent",
-        "claude-code",
         "--env",
         "RUST_LOG=info",
         "--cpu",
@@ -1121,8 +1112,6 @@ fn init_command_parser_accepts_direct_flags() {
         "pnpm install",
         "--startup",
         "pnpm dev",
-        "--coding-agent",
-        "codex",
         "--env",
         "FOO=bar",
         "--file",
@@ -1139,7 +1128,6 @@ fn init_command_parser_accepts_direct_flags() {
     assert_eq!(args.image.as_deref(), Some("workspace"));
     assert_eq!(args.install.as_deref(), Some("pnpm install"));
     assert_eq!(args.startup.as_deref(), Some("pnpm dev"));
-    assert_eq!(args.coding_agent.as_deref(), Some("codex"));
     assert_eq!(args.env, vec!["FOO=bar"]);
     assert_eq!(args.file, PathBuf::from("project/codewire.yaml"));
     assert!(args.force);
@@ -1159,8 +1147,6 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
         "pnpm install".to_string(),
         "--startup".to_string(),
         "pnpm dev".to_string(),
-        "--coding-agent".to_string(),
-        "claude-code".to_string(),
         "--env".to_string(),
         "FOO=bar".to_string(),
         "--cpu".to_string(),
@@ -1198,7 +1184,6 @@ async fn init_command_writes_codewire_yaml_from_direct_flags() {
     assert!(spec.secrets.project.is_empty());
     assert!(!spec.secrets.organization);
     assert!(spec.secrets.user.is_none());
-    assert_eq!(spec.agents.tools, vec!["claude-code".to_string()]);
 }
 
 #[tokio::test]
@@ -1251,8 +1236,6 @@ fn init_command_builds_prepare_request_for_server_side_modes() {
         "4096",
         "--disk",
         "40",
-        "--coding-agent",
-        "codex",
         "--env",
         "FOO=bar",
     ])
@@ -1288,7 +1271,6 @@ fn init_command_builds_prepare_request_for_server_side_modes() {
     assert_eq!(request.draft.project_spec.resources.memory_mib, Some(4096));
     assert_eq!(request.draft.project_spec.resources.disk_gib, Some(40));
     assert_eq!(request.draft.project_spec.environment["FOO"], "bar");
-    assert_eq!(request.draft.project_spec.agents.tools, ["codex"]);
     assert!(request.draft.project_spec.secrets.project.is_empty());
 }
 
@@ -1494,10 +1476,6 @@ fn create_preset_request_from_environment_copies_one_canonical_spec() {
             install_command: "bun install".to_string(),
             startup_script: "bun dev".to_string(),
             environment: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
-            agents: codewire_project::AgentsSpec {
-                install: Some(true),
-                tools: vec!["claude-code".to_string()],
-            },
             application_ports: vec![codewire_project::ApplicationPort {
                 port: 8080,
                 label: "web".to_string(),
@@ -1527,7 +1505,6 @@ fn create_preset_request_from_environment_copies_one_canonical_spec() {
     assert_eq!(preset.project_spec.resources.cpu_millicores, Some(2000));
     assert_eq!(preset.project_spec.image, CANONICAL_WORKSPACE_IMAGE);
     assert_eq!(preset.project_spec.environment["FOO"], "bar");
-    assert_eq!(preset.project_spec.agents.tools, ["claude-code"]);
     assert_eq!(preset.project_spec.application_ports[0].port, 8080);
     assert!(!preset.project_spec.secrets.organization);
     assert_eq!(preset.project_spec.secrets.project, "prod");
@@ -1776,22 +1753,15 @@ fn env_create_sends_the_idle_suspend_from_the_file_or_the_flag() {
 }
 
 #[test]
-fn env_create_requires_canonical_agent_ids() {
-    let cli = Cli::try_parse_from(["cw", "create", "--coding-agent", "kimi-code"]).unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
-        panic!("expected env create command");
-    };
-    let request = env_create_request_from_args(&args).unwrap();
-    assert_eq!(request.project_spec.agents.tools, ["kimi-code"]);
-
-    let cli = Cli::try_parse_from(["cw", "create", "--coding-agent", "kimi"]).unwrap();
-    let (_, _, EnvCommand::Create(args)) = env_operation(cli) else {
-        panic!("expected env create command");
-    };
-    assert_eq!(
-        env_create_request_from_args(&args).unwrap_err().to_string(),
-        "invalid agents: unsupported agent \"kimi\""
-    );
+fn env_create_and_init_reject_removed_coding_agent_flag() {
+    for argv in [
+        ["cw", "create", "--coding-agent", "codex"].as_slice(),
+        ["cw", "init", "--coding-agent", "codex"].as_slice(),
+    ] {
+        let error = Cli::try_parse_from(argv).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("--coding-agent"));
+    }
 }
 
 #[test]
@@ -3423,7 +3393,6 @@ fn cloud_create_no_file_uses_only_the_flags() {
         request.project_spec.resources,
         codewire_project::ResourceSpec::default()
     );
-    assert!(request.project_spec.agents.tools.is_empty());
     assert_eq!(provenance.text(), "flags only (--no-file)");
     assert!(
         Cli::try_parse_from(["cw", "--cloud", "create", "--no-file", "--file", "x.yaml"]).is_err()

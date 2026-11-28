@@ -690,7 +690,6 @@ pub(crate) fn init_has_direct_yaml_inputs(args: &InitArgs) -> bool {
         || args.image.as_deref().and_then(trimmed_str).is_some()
         || args.install.as_deref().and_then(trimmed_str).is_some()
         || args.startup.as_deref().and_then(trimmed_str).is_some()
-        || args.coding_agent.as_deref().and_then(trimmed_str).is_some()
         || !args.env.is_empty()
 }
 
@@ -738,7 +737,6 @@ pub(crate) fn env_create_request_from_init_args(
         image: args.image.clone(),
         install: args.install.clone(),
         startup: args.startup.clone(),
-        coding_agent: args.coding_agent.clone(),
         env: args.env.clone(),
         profile: args.profile.clone(),
         no_profile: args.no_profile,

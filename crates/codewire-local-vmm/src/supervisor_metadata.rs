@@ -669,7 +669,6 @@ pub(crate) fn validate_project_intent(
         || format!("{:x}", Sha256::digest(canonical_json)) != expected_sha256
         || spec.image.is_empty()
         || !spec.preset.is_empty()
-        || spec.agents.install == Some(true)
     {
         return Err(());
     }

@@ -1,7 +1,7 @@
 ---
 title: Skills
 description: Give Claude Code and Codex in a local VM the same skills every time, from your project or from your own skill folder, and refresh them without recreating the VM.
-updated: 2026-10-26
+updated: 2026-11-28
 weight: 4
 aliases: ["/guides/skills"]
 ---
@@ -43,8 +43,6 @@ Check names and comments against the surrounding code.
 
 ```yaml
 version: 1
-agents:
-  tools: [claude-code, codex]
 skills:
   - source: repository
     path: skills-demo/.agents/skills/release-notes
@@ -52,15 +50,14 @@ skills:
     name: review-style
 ```
 
-Two rules, both easy to miss:
+One rule, easy to miss:
 
-- **`agents.tools` is required.** It names the agents that receive the
-  skills. Without it, the create fails with `create_skill_snapshot`.
 - **A repository `path` starts at `/workspace`,** not at the project folder.
   A project mounted at `/workspace/skills-demo` names its skill
   `skills-demo/.agents/skills/release-notes`.
 
-Add `agents: [codex]` to one skill to give it to one agent only.
+By default, each skill is projected to all supported agents. Add
+`agents: [codex]` to one skill to give it to one agent only.
 
 ## 3. Create the VM
 
@@ -69,10 +66,9 @@ cw create --local --name skills-demo
 cw info skills-demo
 ```
 
-`cw info` shows the agents and the snapshot:
+`cw info` shows the snapshot:
 
 ```text
-Agents:      claude-code, codex
 Skills:      2 snapshot(s), generation 1, plan 32c6555b145818a7654b6ed0d590ded3a5b5b20953ea37143142812d90901f17
 ```
 
@@ -108,6 +104,5 @@ A snapshot holds at most 64 MiB and 100,000 files.
 
 ## Related
 
-- [`codewire.yaml`](@/reference/codewire-yaml.md): the `skills` and
-  `agents` keys.
+- [`codewire.yaml`](@/reference/codewire-yaml.md): the `skills` key.
 - [Run and orchestrate](@/agents/run.md)

@@ -98,7 +98,6 @@ pub(crate) struct Selections {
     disk: String,
     ttl: String,
     isolation_tier: String,
-    agents: Vec<String>,
     ports: Vec<Preview>,
     secret_project: String,
     credential_profile: String,
@@ -175,13 +174,6 @@ impl SelectionDraft {
         if selections.isolation_tier == "confidential" && !form.confidential_available {
             return Err(());
         }
-        if selections
-            .agents
-            .iter()
-            .any(|id| !form.agents.iter().any(|agent| agent.id == id))
-        {
-            return Err(());
-        }
         form.draft_id.clone_from(&self.draft);
         form.preset_id.clone_from(&selections.preset_id);
         form.cpu.clone_from(&selections.cpu);
@@ -191,7 +183,6 @@ impl SelectionDraft {
         // A draft saved without its own lifetime follows the restored preset.
         form.follow_preset_ttl();
         form.isolation_tier.clone_from(&selections.isolation_tier);
-        form.selected_agents.clone_from(&selections.agents);
         form.app_ports = selections
             .ports
             .iter()
@@ -234,19 +225,6 @@ impl Selections {
             || !number(&self.disk, 1, 16_384)
             || !valid_ttl(&self.ttl)
             || !matches!(self.isolation_tier.as_str(), "standard" | "confidential")
-            || self.agents.len() > 6
-            || self.agents.iter().any(|id| {
-                !matches!(
-                    id.as_str(),
-                    "claude-code" | "codex" | "gemini-cli" | "kimi-code" | "pi" | "aider"
-                )
-            })
-            || self
-                .agents
-                .iter()
-                .collect::<std::collections::BTreeSet<_>>()
-                .len()
-                != self.agents.len()
             || self.ports.len() > 16
             || self.ports.iter().any(|port| {
                 !number(&port.port, 1, 65_535)
@@ -379,7 +357,7 @@ mod tests {
             "version": 1, "actor": ACTOR, "organization": ORG, "draft": DRAFT, "saved_at": NOW,
             "selections": {
                 "preset_id": "", "cpu": "1250", "memory": "3072", "disk": "17", "ttl": "8h",
-                "isolation_tier": "standard", "agents": ["codex"], "ports": [],
+                "isolation_tier": "standard", "ports": [],
                 "secret_project": "", "credential_profile": format!("{DRAFT}@9007199254740993"),
                 "include_org_secrets": false, "include_user_secrets": true
             }
@@ -521,8 +499,6 @@ mod tests {
             ("ttl", serde_json::json!("366d")),
             ("ttl", serde_json::json!("59s")),
             ("isolation_tier", serde_json::json!("unknown")),
-            ("agents", serde_json::json!(["codex", "codex"])),
-            ("agents", serde_json::json!(["custom-command"])),
             ("secret_project", serde_json::json!("project-name")),
             (
                 "credential_profile",

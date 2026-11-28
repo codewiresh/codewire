@@ -170,8 +170,7 @@ impl ProjectDocument {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProjectSpec {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -187,8 +186,6 @@ pub struct ProjectSpec {
     pub startup_script: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub environment: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "AgentsSpec::is_empty")]
-    pub agents: AgentsSpec,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -203,6 +200,72 @@ pub struct ProjectSpec {
     pub network: Option<NetworkBinding>,
 }
 
+/// Accepts and discards any legacy value on deserialize so persisted specs and
+/// older `codewire.yaml` files still load cleanly without emitting the field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct IgnoredLegacyField;
+
+impl<'de> Deserialize<'de> for IgnoredLegacyField {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let _ = serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ProjectSpecWire {
+            schema_version: u32,
+            #[serde(default)]
+            preset: String,
+            #[serde(default)]
+            image: String,
+            #[serde(default)]
+            repositories: Vec<RepositorySpec>,
+            working_directory: String,
+            #[serde(default)]
+            install_command: String,
+            #[serde(default)]
+            startup_script: String,
+            #[serde(default)]
+            environment: BTreeMap<String, String>,
+            #[serde(default, rename = "agents")]
+            _legacy_agents: IgnoredLegacyField,
+            #[serde(default)]
+            skills: Vec<SkillSelection>,
+            #[serde(default)]
+            application_ports: Vec<ApplicationPort>,
+            #[serde(default)]
+            resources: ResourceSpec,
+            #[serde(default)]
+            secrets: SecretBindings,
+            #[serde(default)]
+            credentials: Option<CredentialBinding>,
+            #[serde(default)]
+            network: Option<NetworkBinding>,
+        }
+        let wire = ProjectSpecWire::deserialize(deserializer)?;
+        Ok(Self {
+            schema_version: wire.schema_version,
+            preset: wire.preset,
+            image: wire.image,
+            repositories: wire.repositories,
+            working_directory: wire.working_directory,
+            install_command: wire.install_command,
+            startup_script: wire.startup_script,
+            environment: wire.environment,
+            skills: wire.skills,
+            application_ports: wire.application_ports,
+            resources: wire.resources,
+            secrets: wire.secrets,
+            credentials: wire.credentials,
+            network: wire.network,
+        })
+    }
+}
+
 impl Default for ProjectSpec {
     fn default() -> Self {
         Self {
@@ -214,7 +277,6 @@ impl Default for ProjectSpec {
             install_command: String::new(),
             startup_script: String::new(),
             environment: BTreeMap::new(),
-            agents: AgentsSpec::default(),
             skills: Vec::new(),
             application_ports: Vec::new(),
             resources: ResourceSpec::default(),
@@ -284,21 +346,6 @@ pub struct RepositorySpec {
     /// Canonical, direct OpenSSH host-key lines for this exact SSH source.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub known_hosts: Vec<String>,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AgentsSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
-}
-
-impl AgentsSpec {
-    pub fn is_empty(&self) -> bool {
-        self.install.is_none() && self.tools.is_empty()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -505,8 +552,10 @@ struct RawProject {
     startup_script: String,
     #[serde(default)]
     environment: BTreeMap<String, Option<String>>,
-    #[serde(default)]
-    agents: Option<RawAgentsBlock>,
+    #[serde(default, rename = "agents")]
+    _legacy_agents: IgnoredLegacyField,
+    #[serde(default, rename = "install_agents")]
+    _legacy_install_agents: IgnoredLegacyField,
     #[serde(default)]
     skills: Vec<RawSkillBlock>,
     #[serde(default)]
@@ -557,15 +606,6 @@ struct RawRepository {
     destination: String,
     #[serde(default)]
     known_hosts: Vec<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawAgentsBlock {
-    #[serde(default)]
-    install: Option<bool>,
-    #[serde(default)]
-    tools: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -799,8 +839,8 @@ fn null_environment_value(content: &str, key: &str) -> ProjectError {
 }
 
 pub use normalize::{
-    canonical_agent_id, destination_depths, destination_parents, display_agent_id, repository_name,
-    validate_repository_destinations,
+    CANONICAL_AGENT_IDS, canonical_agent_id, destination_depths, destination_parents,
+    display_agent_id, repository_name, validate_repository_destinations,
 };
 
 #[cfg(test)]

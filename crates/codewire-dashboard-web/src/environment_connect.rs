@@ -22,9 +22,8 @@ use crate::{
     state::AppState,
     transport::BrowserTransport,
     view::{
-        EnvironmentAgentView, EnvironmentPortRow, EnvironmentPresetOption,
-        EnvironmentResizeConfirmationView, EnvironmentResizeOperationView, EnvironmentRow,
-        EnvironmentTrustSummaryView,
+        EnvironmentPortRow, EnvironmentPresetOption, EnvironmentResizeConfirmationView,
+        EnvironmentResizeOperationView, EnvironmentRow, EnvironmentTrustSummaryView,
     },
 };
 
@@ -33,7 +32,6 @@ const UNARY_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) struct EnvironmentCreateOptions {
     pub(crate) presets: Vec<EnvironmentPresetOption>,
     pub(crate) preview_base_domain: String,
-    pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) confidential_available: bool,
     pub(crate) sources: crate::view::EnvironmentSourceFieldsView,
     /// Billing refuses cloud Sandboxes: the organization ran out of credit.
@@ -326,7 +324,6 @@ pub(crate) async fn create_options(
                 default_ttl_seconds: preset.default_ttl_seconds,
                 default_install_command: project_spec.install_command,
                 default_startup_script: project_spec.startup_script,
-                default_agents: project_spec.agents.tools,
                 default_app_ports: project_spec
                     .application_ports
                     .into_iter()
@@ -348,7 +345,6 @@ pub(crate) async fn create_options(
     Ok(EnvironmentCreateOptions {
         presets,
         preview_base_domain: validated_preview_domain(&setup.preview_base_domain),
-        agents: agent_catalog(),
         confidential_available,
         sources,
         credit_refusal: credit.and_then(|facts| facts.create_refusal()),
@@ -1160,20 +1156,6 @@ fn valid_assigned_preview_url(value: &str) -> bool {
                 && url.query().is_none()
                 && url.fragment().is_none()
         })
-}
-
-fn agent_catalog() -> Vec<EnvironmentAgentView> {
-    [
-        ("claude-code", "Claude Code"),
-        ("codex", "OpenAI Codex"),
-        ("gemini-cli", "Gemini CLI"),
-        ("kimi-code", "Kimi Code"),
-        ("pi", "Pi"),
-        ("aider", "Aider"),
-    ]
-    .into_iter()
-    .map(|(id, label)| EnvironmentAgentView { id, label })
-    .collect()
 }
 
 fn state_name(value: i32) -> &'static str {
@@ -2018,25 +2000,6 @@ mod tests {
             .unwrap()
             .user = Some(ProjectStoragePlacement::Local.into());
         assert!(source_summary(&environment).is_none());
-    }
-
-    #[test]
-    fn agent_catalog_contains_only_selectable_tools() {
-        let catalog = agent_catalog();
-        assert_eq!(
-            catalog
-                .iter()
-                .map(|agent| (agent.id, agent.label))
-                .collect::<Vec<_>>(),
-            vec![
-                ("claude-code", "Claude Code"),
-                ("codex", "OpenAI Codex"),
-                ("gemini-cli", "Gemini CLI"),
-                ("kimi-code", "Kimi Code"),
-                ("pi", "Pi"),
-                ("aider", "Aider"),
-            ]
-        );
     }
 
     #[test]

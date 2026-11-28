@@ -1563,7 +1563,6 @@ pub(crate) struct EnvironmentPresetOption {
     pub(crate) default_ttl_seconds: Option<i32>,
     pub(crate) default_install_command: String,
     pub(crate) default_startup_script: String,
-    pub(crate) default_agents: Vec<String>,
     pub(crate) default_app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) uses_protected_secret_bindings: bool,
     pub(crate) official: bool,
@@ -1598,12 +1597,6 @@ impl EnvironmentAppPortFormRow {
     pub(crate) fn access_selected(&self, value: &str) -> bool {
         self.access == value
     }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct EnvironmentAgentView {
-    pub(crate) id: &'static str,
-    pub(crate) label: &'static str,
 }
 
 /// Selection metadata only. No application value or provider material belongs
@@ -1843,10 +1836,8 @@ pub(crate) struct EnvironmentCreateFormView {
     pub(crate) confidential_available: bool,
     pub(crate) show_confidential_controls: bool,
     pub(crate) preview_base_domain: String,
-    pub(crate) selected_agents: Vec<String>,
     pub(crate) app_ports: Vec<EnvironmentAppPortFormRow>,
     pub(crate) presets: Vec<EnvironmentPresetOption>,
-    pub(crate) agents: Vec<EnvironmentAgentView>,
     pub(crate) sources: EnvironmentSourceFieldsView,
     pub(crate) repo_error: String,
     pub(crate) image_error: String,
@@ -1946,10 +1937,6 @@ impl EnvironmentCreateFormView {
 
     pub(crate) fn isolation_selected(&self, value: &str) -> bool {
         self.isolation_tier == value
-    }
-
-    pub(crate) fn agent_selected(&self, value: &str) -> bool {
-        self.selected_agents.iter().any(|agent| agent == value)
     }
 
     pub(crate) fn has_errors(&self) -> bool {

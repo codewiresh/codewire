@@ -6030,26 +6030,16 @@ working_directory: /workspace/github
     }
 
     #[test]
-    fn native_yaml_accepts_skill_projection_metadata_without_agent_installation() {
+    fn native_yaml_accepts_skills_and_ignores_legacy_agents_block() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join(".agents/skills/rust")).unwrap();
-        std::fs::write(
-            temp.path().join("codewire.yaml"),
-            "agents: {tools: [codex]}\nskills: [{source: repository, path: .agents/skills/rust}]\n",
-        )
-        .unwrap();
-        let project = yaml_in(temp.path()).unwrap();
-        assert_eq!(project.spec.agents.tools, vec!["codex"]);
-        assert_eq!(project.spec.agents.install, None);
-        assert_eq!(project.spec.skills.len(), 1);
-
         std::fs::write(
             temp.path().join("codewire.yaml"),
             "agents: {install: true, tools: [codex]}\nskills: [{source: repository, path: .agents/skills/rust}]\n",
         )
         .unwrap();
-        let error = yaml_in(temp.path()).unwrap_err();
-        assert!(error.to_string().contains("fields: agents"), "{error}");
+        let project = yaml_in(temp.path()).unwrap();
+        assert_eq!(project.spec.skills.len(), 1);
     }
 
     #[test]
@@ -6779,10 +6769,9 @@ working_directory: /workspace/github
         );
         spec.environment
             .insert("API_URL".to_owned(), "https://synthetic.invalid".to_owned());
-        spec.agents.tools = vec!["claude".to_owned(), "codex".to_owned()];
         let output = format_native_environment(&view, Some(&spec), &[], PLAIN_STYLE);
         assert!(output.contains(
-            "Working dir: /workspace\nAccess:      user/work (revision 2)\nInstall:     npm ci npm run build\nEnv vars:    API_URL, NODE_ENV\nAgents:      claude, codex\nDocker:      8Gi\n"
+            "Working dir: /workspace\nAccess:      user/work (revision 2)\nInstall:     npm ci npm run build\nEnv vars:    API_URL, NODE_ENV\nDocker:      8Gi\n"
         ), "{output}");
         assert!(!output.contains("synthetic-value-never-shown"));
         assert!(!output.contains("synthetic.invalid"));
@@ -6792,7 +6781,8 @@ working_directory: /workspace/github
             &[],
             PLAIN_STYLE,
         );
-        assert!(empty.contains("Install:     none\nEnv vars:    none\nAgents:      none\n"));
+        assert!(empty.contains("Install:     none\nEnv vars:    none\n"));
+        assert!(!empty.contains("Agents:"));
     }
 
     #[test]

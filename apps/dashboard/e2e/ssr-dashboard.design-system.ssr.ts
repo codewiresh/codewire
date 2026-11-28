@@ -370,15 +370,16 @@ test("single-line controls centre their capitals, not a line box", { tag: "@mobi
   const submit = page.locator(".cw-drawer-footer .cw-button");
   const docs = page.locator('[data-repository-name="codewiresh/docs"]');
   const pill = docs.locator(".cw-badge");
-  const chip = page.locator(".cw-toggle-chip > span").first();
   for (const [name, control, label] of [
     ["Create Sandbox button", submit, submit.locator(".cw-submit-idle")],
     ["Public pill", pill, pill],
     ["+ Add row action", docs, docs.locator("[data-github-repository-action]")],
-    ["agent chip", chip, chip],
   ] as const) {
     expect.soft(Math.abs(await capitalsOffset(control, label)), name).toBeLessThanOrEqual(0.75);
   }
+  await page.goto(`${origin}/reference/fixtures/components.html`);
+  const chip = page.locator(".cw-toggle-chip > span").first();
+  expect.soft(Math.abs(await capitalsOffset(chip, chip)), "toggle chip").toBeLessThanOrEqual(0.75);
 });
 
 // What drew a control's label, named when its capitals are off centre: the

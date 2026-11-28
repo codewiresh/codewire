@@ -15,7 +15,6 @@ use std::time::Duration;
 use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, is_authority_lost};
-use super::agents::agent_definition;
 use super::create::{CreateHandover, ReconciledRuntime};
 use super::env_data::{BackendRow, EnvironmentRow, load_backend_row, load_environment};
 use super::environment_auth::{WorkspaceCredentialScope, daemon_credential_for};
@@ -297,7 +296,6 @@ pub struct Inputs {
     pub working_directory: String,
     pub install_command: String,
     pub startup_script: String,
-    pub agents: Vec<String>,
     pub app_ports: Vec<(i32, String, String)>, // (port, label, access)
 }
 
@@ -403,10 +401,6 @@ pub trait SetupOps {
         &mut self,
         input: &Inputs,
         work_dir: &str,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
-    fn validate_agents(
-        &mut self,
-        input: &Inputs,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
     fn register_ports(
         &mut self,
@@ -591,42 +585,6 @@ impl<S: SetupStore, O: SetupOps> Runner<S, O> {
             }
         }
 
-        if input.setup_phase <= 5 && !input.agents.is_empty() {
-            let phase = input.setup_phase;
-            if !self.begin_phase(input, phase).await? {
-                return Ok(());
-            }
-            self.ops
-                .emit_log(&env_id, phase, "agent_validation", "started", "", None)
-                .await?;
-            if let Err(e) = self.ops.validate_agents(input).await {
-                if is_setup_control_flow(&e) {
-                    return Err(e);
-                }
-                self.ops
-                    .emit_log(
-                        &env_id,
-                        phase,
-                        "agent_validation",
-                        "failed",
-                        &format!("{e:#}"),
-                        Some(serde_json::json!({ "count": input.agents.len() })),
-                    )
-                    .await?;
-                return Err(anyhow::anyhow!("agent validation: {e:#}"));
-            }
-            self.finish_phase(
-                input,
-                phase,
-                6,
-                "agent_validation",
-                "completed",
-                "",
-                Some(serde_json::json!({ "count": input.agents.len() })),
-            )
-            .await?;
-        }
-
         if input.setup_phase <= 6 && !input.app_ports.is_empty() {
             let phase = input.setup_phase;
             if !self.begin_phase(input, phase).await? {
@@ -772,12 +730,10 @@ pub fn to_setup_inputs(env: &EnvironmentRow, backend: &BackendRow) -> Inputs {
         has_setup: !spec.repositories.is_empty()
             || !spec.install_command.is_empty()
             || !spec.startup_script.is_empty()
-            || !spec.agents.is_empty()
             || !spec.application_ports.is_empty(),
         working_directory: spec.working_directory.clone(),
         install_command: spec.install_command.clone(),
         startup_script: spec.startup_script.clone(),
-        agents: spec.agents.tools.clone(),
         // A project saved before the desktop's ports were reserved may still
         // list one. A create refuses it now; setup never registers it.
         app_ports: spec
@@ -2061,43 +2017,6 @@ impl SetupOps for WorkerSetupOps<'_> {
             &self.setup_env_vars(),
         )
         .await
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]
-    async fn validate_agents(&mut self, input: &Inputs) -> anyhow::Result<()> {
-        self.phase_authority
-            .ensure_active(self.active_phase)
-            .await?;
-        for agent_type in &input.agents {
-            if self.cancellation_requested() {
-                return Err(SetupActivityCancelled.into());
-            }
-            self.phase_authority
-                .ensure_active(self.active_phase)
-                .await?;
-            let agent = agent_definition(agent_type)
-                .ok_or_else(|| anyhow::anyhow!("unsupported configured agent: {agent_type}"))?;
-            let command = vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                format!("command -v {} >/dev/null 2>&1", agent.command),
-            ];
-            self.workspace_exec(
-                &input.namespace,
-                &input.environment_id,
-                &command,
-                "",
-                &BTreeMap::new(),
-            )
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "selected agent `{}` is unavailable in the workspace image; recreate this environment with a canonical agent-ready image. No runtime installation was attempted: {error:#}",
-                    agent.id,
-                )
-            })?;
-        }
-        Ok(())
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(environment_id = %input.environment_id))]

@@ -291,7 +291,7 @@ pub(crate) struct WorkspaceGenerationError;
 
 #[cfg(test)]
 mod tests {
-    use codewire_project::{AgentsSpec, SkillSelection, SkillSource};
+    use codewire_project::{SkillSelection, SkillSource};
     use codewire_vmm_guest_probe::{SkillSnapshot, SkillSnapshotSource};
     use sha2::{Digest as _, Sha256};
 
@@ -399,7 +399,6 @@ mod tests {
         let baseline = record();
         let mut built: ProjectSpec = serde_json::from_str(&baseline.project_spec_json).unwrap();
         built.install_command = "printf installed".to_owned();
-        built.agents.tools = vec!["codex".to_owned()];
         built.skills = vec![SkillSelection {
             source: SkillSource::User,
             reference: "rust".to_owned(),
@@ -493,7 +492,6 @@ mod tests {
                     .environment
                     .insert("PUBLIC_VALUE".into(), "changed".into());
             },
-            |project| project.agents.tools = vec!["codex".to_owned()],
             |project| project.resources.memory_mib = Some(16 * 1024),
             |project| {
                 project.repositories = vec![codewire_project::RepositorySpec {
@@ -553,10 +551,6 @@ mod tests {
         let baseline = record();
         let project = ProjectSpec {
             image: baseline.image.source_reference.clone(),
-            agents: AgentsSpec {
-                install: None,
-                tools: vec!["codex".to_owned()],
-            },
             skills: vec![SkillSelection {
                 source: SkillSource::User,
                 reference: "rust".to_owned(),

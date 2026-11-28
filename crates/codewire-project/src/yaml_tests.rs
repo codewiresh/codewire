@@ -25,7 +25,6 @@ startup_script: npm run dev -- --port "3000"
 environment:
   NODE_ENV: production
   QUOTED: "yes: no # not a comment"
-agents: {{install: false, tools: [claude-code, codex]}}
 skills:
   - {{source: repository, path: .agents/skills/rust, agents: [codex]}}
   - {{source: user, name: personal}}
@@ -90,7 +89,6 @@ fn keys_follow_the_schema_order_and_omit_empty_values() {
             "startup_script",
             "secrets",
             "environment",
-            "agents",
             "skills",
             "ports",
             "cpu",

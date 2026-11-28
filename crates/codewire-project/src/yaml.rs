@@ -7,9 +7,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::{
-    AgentsSpec, CredentialBinding, LocalMountMode, LocalProjectIntent, NetworkBinding,
-    ProjectDocument, ProjectError, ProjectSpec, RepositorySpec, SecretBindings, SkillSource,
-    WorkspacePathMode,
+    CredentialBinding, LocalMountMode, LocalProjectIntent, NetworkBinding, ProjectDocument,
+    ProjectError, ProjectSpec, RepositorySpec, SecretBindings, SkillSource, WorkspacePathMode,
 };
 
 impl ProjectDocument {
@@ -104,7 +103,6 @@ impl ProjectDocument {
             startup_script: &spec.startup_script,
             secrets: (!spec.secrets.is_empty()).then_some(&spec.secrets),
             environment: &spec.environment,
-            agents: (!spec.agents.is_empty()).then_some(&spec.agents),
             skills: spec
                 .skills
                 .iter()
@@ -204,8 +202,6 @@ struct YamlProject<'a> {
     secrets: Option<&'a SecretBindings>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     environment: &'a BTreeMap<String, String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    agents: Option<&'a AgentsSpec>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     skills: Vec<YamlSkill<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]

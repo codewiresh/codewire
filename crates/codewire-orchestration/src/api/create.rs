@@ -259,12 +259,6 @@ pub(crate) fn merge_project_spec_defaults(
     if explicit.environment.is_empty() {
         explicit.environment = defaults.environment.clone();
     }
-    if explicit.agents.install.is_none() {
-        explicit.agents.install = defaults.agents.install;
-    }
-    if explicit.agents.tools.is_empty() {
-        explicit.agents.tools = defaults.agents.tools.clone();
-    }
     if explicit.skills.is_empty() {
         explicit.skills = defaults.skills.clone();
     }
@@ -568,11 +562,6 @@ async fn admit_runtime_create(
         systemd_workspace: systemd.await?.is_some(),
         profile: profile.to_owned(),
     })
-}
-
-/// Mirrors `worker.ValidAgentType` via the shared agent registry.
-fn valid_agent_type(agent: &str) -> bool {
-    crate::worker::agents::is_supported_agent(agent)
 }
 
 /// Mirrors `generateShortID` (2 random bytes, hex).
@@ -1409,16 +1398,6 @@ pub(crate) async fn create_environment_core(
             // in insert_environment's transaction.
             let quota = admission_quota(pool, org_id).await?;
 
-            for agent in &body.project_spec.agents.tools {
-                if !valid_agent_type(agent) {
-                    return Err(super::environments::coded_owned(
-                        StatusCode::BAD_REQUEST,
-                        "unsupported_agent",
-                        format!("unsupported agent: {agent}"),
-                    ));
-                }
-            }
-
             let env = insert_environment(
                 pool,
                 InsertEnvironmentParams {
@@ -1663,7 +1642,6 @@ repositories:
 working_directory: /workspace/explicit
 install_command: caller-install
 environment: {CALLER: set}
-agents: {install: false}
 cpu: "1"
 "#,
         )
@@ -1679,7 +1657,6 @@ working_directory: /workspace/default
 install_command: default-install
 startup_script: cargo test
 environment: {DEFAULT_ONLY: ignored}
-agents: {install: true, tools: [codex]}
 skills: [{source: repository, path: .agents/skills/rust}]
 ports: [{port: 8080, label: api, access: private}]
 cpu: "4"
@@ -1703,8 +1680,6 @@ credentials: {profile: user/work}
         assert_eq!(explicit.startup_script, "cargo test");
         assert_eq!(explicit.environment.len(), 1);
         assert_eq!(explicit.environment["CALLER"], "set");
-        assert_eq!(explicit.agents.install, Some(false));
-        assert_eq!(explicit.agents.tools, ["codex"]);
         assert_eq!(explicit.application_ports[0].port, 8080);
         assert_eq!(explicit.resources.cpu_millicores, Some(1_000));
         assert_eq!(explicit.resources.memory_mib, Some(16 * 1_024));
@@ -2521,21 +2496,6 @@ credentials: {profile: user/work}
                 .contains("synthetic auto projection failure")
         );
         assert_eq!(failed_count, 0);
-    }
-
-    #[test]
-    fn create_accepts_every_curated_workspace_agent() {
-        for agent in [
-            "claude-code",
-            "codex",
-            "gemini-cli",
-            "kimi-code",
-            "pi",
-            "aider",
-        ] {
-            assert!(valid_agent_type(agent), "{agent}");
-        }
-        assert!(!valid_agent_type("not-an-agent"));
     }
 
     #[test]

@@ -155,9 +155,6 @@ impl SetupOps for Mock {
             .push((input.startup_script.clone(), wd.to_string()));
         self.call("run_startup_script")
     }
-    async fn validate_agents(&mut self, _input: &Inputs) -> anyhow::Result<()> {
-        self.call("validate_agents")
-    }
     async fn register_ports(&mut self, _input: &Inputs) -> anyhow::Result<()> {
         self.call("register_ports")
     }
@@ -179,7 +176,6 @@ fn full_inputs() -> Inputs {
         working_directory: "/workspace/app".into(),
         install_command: "npm ci".into(),
         startup_script: "npm start".into(),
-        agents: vec!["claude-code".into()],
         app_ports: vec![(3000, "web".into(), "public".into())],
         ttl_seconds: Some(7200),
         ..Default::default()
@@ -288,11 +284,10 @@ async fn run_executes_all_phases_in_order() {
             "clone_repos",
             "run_install",
             "run_startup_script",
-            "validate_agents",
             "register_ports"
         ]
     );
-    assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 7]);
     assert!(s.complete);
     assert_eq!(s.shutdown_ttl, Some(7200));
     assert!(input.setup_complete);
@@ -335,16 +330,8 @@ async fn run_resumes_from_recorded_phase() {
         .filter(|c| !c.starts_with("log:"))
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        ops,
-        [
-            "run_install",
-            "run_startup_script",
-            "validate_agents",
-            "register_ports"
-        ]
-    );
-    assert_eq!(s.phases, vec![4, 5, 6, 7]);
+    assert_eq!(ops, ["run_install", "run_startup_script", "register_ports"]);
+    assert_eq!(s.phases, vec![4, 5, 7]);
 }
 
 /// Retry setup (#4767): a setup that failed at install, run again from the
@@ -432,31 +419,7 @@ async fn startup_script_failure_is_warning_only() {
     let s = mock.state();
     assert!(s.complete);
     assert!(s.calls.contains(&"log:startup_script:warning".to_string()));
-    assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 6, 7]);
-}
-
-#[tokio::test]
-async fn unavailable_selected_agent_fails_setup_without_a_download() {
-    let mock = Mock::failing("validate_agents");
-    let mut runner = Runner {
-        store: mock.clone(),
-        ops: mock.clone(),
-    };
-    let mut input = full_inputs();
-    let error = runner.run(&mut input).await.unwrap_err();
-    assert!(
-        format!("{error:#}").starts_with("agent validation: validate_agents boom"),
-        "{error:#}"
-    );
-    let state = mock.state();
-    assert!(!state.complete);
-    assert_eq!(state.phases, vec![1, 2, 3, 4, 5]);
-    assert!(
-        state
-            .calls
-            .contains(&"log:agent_validation:failed".to_string())
-    );
-    assert!(!state.calls.iter().any(|call| call == "install_agents"));
+    assert_eq!(s.phases, vec![1, 2, 3, 4, 5, 7]);
 }
 
 #[tokio::test]
@@ -467,7 +430,6 @@ async fn authority_loss_escapes_every_runner_path_without_advancing() {
         "clone_repos",
         "run_install",
         "run_startup_script",
-        "validate_agents",
         "register_ports",
     ] {
         let mock = Mock::losing_authority(step);
@@ -508,7 +470,6 @@ async fn recovery_failure_escapes_every_runner_path_without_advancing() {
         "clone_repos",
         "run_install",
         "run_startup_script",
-        "validate_agents",
         "register_ports",
     ] {
         let mock = Mock::failing_recovery(step);
@@ -808,10 +769,6 @@ fn to_setup_inputs_consumes_the_canonical_project_spec() {
         }],
         working_directory: "/workspace/r".into(),
         environment: BTreeMap::from([("APP_MODE".into(), "test".into())]),
-        agents: codewire_project::AgentsSpec {
-            install: Some(true),
-            tools: vec!["codex".into()],
-        },
         application_ports: vec![
             codewire_project::ApplicationPort {
                 port: 8080,
@@ -838,7 +795,6 @@ fn to_setup_inputs_consumes_the_canonical_project_spec() {
     assert_eq!(input.repos[0].branch, "dev");
     assert_eq!(input.repos[0].mount_path, "/workspace/r");
     assert_eq!(input.working_directory, "/workspace/r");
-    assert_eq!(input.agents, vec!["codex".to_string()]);
     assert_eq!(
         input.app_ports,
         vec![(8080, "api".to_string(), String::new())]

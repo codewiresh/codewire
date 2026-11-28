@@ -10,11 +10,10 @@ use crate::output::Status;
 /// The prefix the setup worker puts before a failed step's error, and that
 /// step in the words of the setup's step list, as the dashboard says them
 /// (`codewire-dashboard-web`'s `environment_connect/notice.rs`).
-const FAILED_STEPS: [(&str, &str); 4] = [
+const FAILED_STEPS: [(&str, &str); 3] = [
     ("health check: ", "Checking sidecar readiness"),
     ("git clone: ", "Cloning repositories"),
     ("install: ", "Running install command"),
-    ("agent validation: ", "Checking agent tools"),
 ];
 
 /// What a running environment's setup means for a session launched now.
