@@ -2186,6 +2186,18 @@ mod tests {
         ) -> Result<Response<v1::DaemonAccess>, Status> {
             self.forbidden()
         }
+        async fn suspend_vm(
+            &self,
+            _: Request<v1::SuspendVmRequest>,
+        ) -> Result<Response<v1::SuspendVmResponse>, Status> {
+            self.forbidden()
+        }
+        async fn resume_vm(
+            &self,
+            _: Request<v1::ResumeVmRequest>,
+        ) -> Result<Response<v1::ResumeVmResponse>, Status> {
+            self.forbidden()
+        }
     }
 
     #[tokio::test]

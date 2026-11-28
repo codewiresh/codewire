@@ -342,7 +342,14 @@ impl SupervisorRpc {
                     "local environment runtime requires repair",
                 ));
             }
-            v1::EnvironmentState::Running => {}
+            v1::EnvironmentState::Running => {
+                if environment.suspended_at_unix_ms > 0 {
+                    return Ok(fixed_daemon_status(
+                        proto::EnvironmentDaemonState::Ready,
+                        "suspended; any use wakes it",
+                    ));
+                }
+            }
             v1::EnvironmentState::Unspecified => {
                 return Ok(fixed_daemon_status(
                     proto::EnvironmentDaemonState::Unhealthy,
@@ -787,6 +794,10 @@ fn public_environment(
         isolation_tier: proto::IsolationTier::Standard.into(),
         operation_generation: environment.generation,
         source_selection: public_source_selection(environment)?.into(),
+        suspended_at: (environment.suspended_at_unix_ms > 0)
+            .then(|| operation_timestamp(environment.suspended_at_unix_ms))
+            .transpose()?
+            .into(),
         ..Default::default()
     })
 }

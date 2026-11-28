@@ -24,6 +24,16 @@ impl super::RunnerState {
                 .cw_runtime_catalog_generation()
                 .unwrap_or_default()
                 .to_owned(),
+            suspended_at_unix_ms: self
+                .suspended
+                .as_ref()
+                .map_or(0, |suspended| suspended.suspended_at_unix_ms),
+            suspend_reason: self
+                .suspended
+                .as_ref()
+                .map(|suspended| suspended.reason.clone())
+                .unwrap_or_default(),
+            last_wake_duration_ms: self.last_wake_duration_ms.unwrap_or_default(),
         }
     }
 

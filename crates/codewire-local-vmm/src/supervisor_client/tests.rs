@@ -322,6 +322,20 @@ impl LocalSupervisorService for ProtocolPeer {
     ) -> Result<Response<v1::ManagedRuntime>, Status> {
         Err(Status::unimplemented("unused synthetic method"))
     }
+
+    async fn suspend_environment(
+        &self,
+        _: Request<v1::SuspendEnvironmentRequest>,
+    ) -> Result<Response<v1::SuspendEnvironmentResponse>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
+
+    async fn resume_environment(
+        &self,
+        _: Request<v1::ResumeEnvironmentRequest>,
+    ) -> Result<Response<v1::ResumeEnvironmentResponse>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
 }
 
 struct TestServer {

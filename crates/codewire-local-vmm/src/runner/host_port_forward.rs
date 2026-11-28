@@ -9,11 +9,12 @@
 //! runner log; the network worker never sees a host connection.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use codewire_daemon::DaemonAuthToken;
 use codewire_workspace_access::daemon::DaemonSessionClient;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use zeroize::Zeroizing;
 
@@ -21,6 +22,54 @@ use super::AcceptedHostPort;
 use crate::diagnostic_log::{self, DiagnosticLog, LogField};
 use crate::guest_loopback::{GuestLoopbackError, open_guest_loopback};
 use crate::hybrid_vsock::HybridVsockTarget;
+
+/// Coordinates automatic wake of a suspended VM when an inbound host-port
+/// connection arrives (#5529). When the VM is not suspended, checking
+/// `is_suspended` is a single atomic load with zero channel traffic.
+#[derive(Debug)]
+pub(crate) struct WakeHook {
+    suspended: AtomicBool,
+    wake_tx: mpsc::UnboundedSender<oneshot::Sender<Result<(), ()>>>,
+}
+
+impl WakeHook {
+    pub(crate) fn new() -> (
+        Arc<Self>,
+        mpsc::UnboundedReceiver<oneshot::Sender<Result<(), ()>>>,
+    ) {
+        let (wake_tx, wake_rx) = mpsc::unbounded_channel();
+        (
+            Arc::new(Self {
+                suspended: AtomicBool::new(false),
+                wake_tx,
+            }),
+            wake_rx,
+        )
+    }
+
+    pub(crate) fn set_suspended(&self, suspended: bool) {
+        self.suspended.store(suspended, Ordering::Release);
+    }
+
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspended.load(Ordering::Acquire)
+    }
+
+    /// Requests a wake and waits for the runner to finish resuming the VM.
+    pub(crate) async fn wake_if_suspended(&self) -> Result<(), GuestLoopbackError> {
+        if !self.is_suspended() {
+            return Ok(());
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.wake_tx
+            .send(reply_tx)
+            .map_err(|_| GuestLoopbackError::DaemonUnreachable)?;
+        match reply_rx.await {
+            Ok(Ok(())) => Ok(()),
+            _ => Err(GuestLoopbackError::DaemonUnreachable),
+        }
+    }
+}
 
 /// Host connections forwarded at once per VM, as many as one SSH connection
 /// may forward. A connection past it is closed.
@@ -62,24 +111,38 @@ pub(super) struct HostPortForwarder {
     route: DaemonRoute,
     client: Mutex<Option<DaemonSessionClient>>,
     slots: Arc<Semaphore>,
+    wake_hook: Option<Arc<WakeHook>>,
     log: Option<DiagnosticLog>,
 }
 
 impl HostPortForwarder {
-    pub(super) fn new(target: HybridVsockTarget, token: Zeroizing<String>) -> Arc<Self> {
-        Self::with_route(DaemonRoute::Hybrid { target, token })
+    pub(super) fn new(
+        target: HybridVsockTarget,
+        token: Zeroizing<String>,
+        wake_hook: Option<Arc<WakeHook>>,
+    ) -> Arc<Self> {
+        Self::with_route(DaemonRoute::Hybrid { target, token }, wake_hook)
     }
 
     #[cfg(test)]
     pub(super) fn connected(client: DaemonSessionClient) -> Arc<Self> {
-        Self::with_route(DaemonRoute::Connected(client))
+        Self::with_route(DaemonRoute::Connected(client), None)
     }
 
-    fn with_route(route: DaemonRoute) -> Arc<Self> {
+    #[cfg(test)]
+    pub(super) fn connected_with_wake(
+        client: DaemonSessionClient,
+        wake_hook: Arc<WakeHook>,
+    ) -> Arc<Self> {
+        Self::with_route(DaemonRoute::Connected(client), Some(wake_hook))
+    }
+
+    fn with_route(route: DaemonRoute, wake_hook: Option<Arc<WakeHook>>) -> Arc<Self> {
         Arc::new(Self {
             route,
             client: Mutex::new(None),
             slots: Arc::new(Semaphore::new(MAX_HOST_PORT_FORWARDS)),
+            wake_hook,
             log: DiagnosticLog::inherited(),
         })
     }
@@ -95,6 +158,12 @@ impl HostPortForwarder {
         let forwarder = Arc::clone(self);
         tasks.spawn(async move {
             let _slot = slot;
+            if let Some(wake) = forwarder.wake_hook.as_ref()
+                && let Err(error) = wake.wake_if_suspended().await
+            {
+                forwarder.record(guest_port, &ForwardFailure::Guest(error));
+                return;
+            }
             let outcome = match forwarder.client().await {
                 Ok(client) => carry(&client, accepted.stream, guest_port).await,
                 Err(error) => Err(error),

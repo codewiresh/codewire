@@ -1374,8 +1374,11 @@ async fn handle_unified_environment_info(
         UnifiedEnvironmentTarget::NativeLocal(name) => {
             let environment = get_native_environment(&name).await?;
             // Managed conversations are read only while the VM runs (#2982).
+            // Skip querying the guest daemon for attention rows while the VM is
+            // suspended, so `cw info` never wakes a sleeping VM (#5529).
             let attention = if environment.state
                 == codewire_local_vmm::control::v1::EnvironmentState::Running as i32
+                && environment.suspended_at_unix_ms == 0
             {
                 Some(
                     super::sessions::agents::managed_attention(
@@ -1752,17 +1755,15 @@ async fn handle_unified_environment_lifecycle(
             Box::pin(stop_native_environment(&name, args.output)).await
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        (UnifiedEnvironmentTarget::NativeLocal(_), UnifiedEnvironmentLifecycle::Suspend(_)) => {
-            anyhow::bail!(
-                "suspend applies to cloud sandboxes on the standard runtime; use `cw stop` for a local VM"
-            )
-        }
+        (
+            UnifiedEnvironmentTarget::NativeLocal(name),
+            UnifiedEnvironmentLifecycle::Suspend(args),
+        ) => Box::pin(suspend_native_environment(&name, args.output)).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        (UnifiedEnvironmentTarget::NativeLocal(_), UnifiedEnvironmentLifecycle::Resume(_)) => {
-            anyhow::bail!(
-                "resume applies to cloud sandboxes on the standard runtime; use `cw start` for a local VM"
-            )
-        }
+        (
+            UnifiedEnvironmentTarget::NativeLocal(name),
+            UnifiedEnvironmentLifecycle::Resume(args),
+        ) => Box::pin(resume_native_environment(&name, args.output)).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),

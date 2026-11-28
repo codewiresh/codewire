@@ -72,10 +72,13 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // 15: GetEgressRefusals reads the running generation's refusal log, and
 //     StartVm and ReplaceNetworkPolicy name the policy it is labelled with
 //     (#5058).
+// 16: SuspendVm and ResumeVm pause and resume a running Linux VM in memory
+//     (#5529); RunnerInfo carries suspended_at_unix_ms, suspend_reason, and
+//     last_wake_duration_ms.
 /// The protocol a runner speaks, and the only one [`RunnerClient`] admits.
 /// A local credential authority reports it for the brokers it starts, which
 /// connect as that client (#5238).
-pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 15;
+pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 16;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -101,6 +104,7 @@ mod error;
 pub use error::RunnerServiceError;
 mod events;
 mod network_policy;
+mod sleep;
 use events::RunnerEvents;
 pub(crate) use network_policy::policy_label;
 mod exit_cause;
@@ -391,6 +395,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
     ));
     let (adoption_tx, mut adoption_rx) = mpsc::channel::<AdoptionRequest>(1);
     let generation_access = GenerationAccessCell::new(config.environment_id);
+    let (wake_hook, wake_rx) = crate::runner::WakeHook::new();
     let service = RunnerRpc {
         state: Arc::new(Mutex::new(RunnerState {
             environment_id: config.environment_id,
@@ -399,6 +404,9 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
             generation_access: None,
             running: None,
             interception: None,
+            suspended: None,
+            last_wake_duration_ms: None,
+            wake_hook,
             generation,
             state: v1::EnvironmentState::Stopped,
             error_code: None,
@@ -414,6 +422,7 @@ pub async fn serve_runner(config: RunnerEntrypointConfig) -> Result<(), RunnerSe
         generation_access,
         shutdown: watch::channel(None).0,
     };
+    sleep::spawn_ingress_wake_loop(Arc::clone(&service.state), service.log.clone(), wake_rx);
     diagnostic_log::record(
         service.log.as_deref(),
         "runner_started",
@@ -553,6 +562,13 @@ struct RunnerState {
     running: Option<RunningVm>,
     /// What the running boot started with (#4912), from its supervisor.
     interception: Option<v1::Interception>,
+    /// Non-empty while the running Linux VM is suspended in memory (#5529).
+    suspended: Option<sleep::SuspendedVm>,
+    /// Elapsed milliseconds of the most recent wake from suspend (#5529).
+    last_wake_duration_ms: Option<u64>,
+    /// Shared with `RunningVm`'s host-port forwarder so inbound TCP wakes a
+    /// suspended VM transparently (#5529).
+    wake_hook: Arc<crate::runner::WakeHook>,
     generation: u64,
     state: v1::EnvironmentState,
     error_code: Option<&'static str>,
@@ -609,6 +625,7 @@ impl RunnerState {
             // A failed sidecar can leave the VMM owned for safe later cleanup.
             // That retained ownership must not keep bootstrap access active.
             self.generation_access = None;
+            self.clear_suspended();
         }
         let error_code = runner_exit_error_code(exit);
         self.exit = exit_cause::observed_exit(exit).or(self.exit);
@@ -1083,6 +1100,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             }
         };
         let network_started = std::time::Instant::now();
+        running.set_wake_hook(Arc::clone(&state.wake_hook));
         if let Err(error) = running
             .start_network_worker_with_mesh_credentials(
                 &worker_executable,
@@ -1238,6 +1256,14 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             state.cw_runtime_catalog_generation(),
         )?;
+        if state.running.is_some() {
+            if !discard_guest_state {
+                // Resume a suspended VM so graceful guest poweroff runs cleanly (#5529).
+                let _ = state.resume_if_suspended(self.log.as_deref()).await;
+            } else {
+                state.clear_suspended();
+            }
+        }
         if let Some(running) = state.running.as_mut() {
             let stopped = if discard_guest_state {
                 running.stop_discarding_guest_state().await
@@ -1261,6 +1287,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             }
         }
         state.running = None;
+        state.clear_suspended();
         state.state = v1::EnvironmentState::Stopped;
         state.error_code = None;
         self.events.publish(
@@ -1301,6 +1328,9 @@ impl EnvironmentRunnerService for RunnerRpc {
             None,
             state.cw_runtime_catalog_generation(),
         )?;
+        if state.running.is_some() {
+            let _ = state.resume_if_suspended(self.log.as_deref()).await;
+        }
         if let Some(running) = state.running.as_mut() {
             let exit = running
                 .stop()
@@ -1311,6 +1341,7 @@ impl EnvironmentRunnerService for RunnerRpc {
             }
         }
         state.running = None;
+        state.clear_suspended();
         let environment_id = state.environment_id;
         state
             .runner
@@ -1458,6 +1489,24 @@ impl EnvironmentRunnerService for RunnerRpc {
             .map(Response::new)
     }
 
+    async fn suspend_vm(
+        &self,
+        request: Request<v1::SuspendVmRequest>,
+    ) -> Result<Response<v1::SuspendVmResponse>, Status> {
+        self.suspend_vm_inner(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn resume_vm(
+        &self,
+        request: Request<v1::ResumeVmRequest>,
+    ) -> Result<Response<v1::ResumeVmResponse>, Status> {
+        self.resume_vm_inner(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
     async fn get_daemon_access(
         &self,
         _request: Request<v1::GetDaemonAccessRequest>,
@@ -1471,6 +1520,8 @@ impl EnvironmentRunnerService for RunnerRpc {
         if state.state != v1::EnvironmentState::Running {
             return Err(Status::failed_precondition("environment is not running"));
         }
+        // Wake a suspended VM before handing out daemon access (#5529).
+        state.resume_if_suspended(self.log.as_deref()).await?;
         let running = state
             .running
             .as_ref()
@@ -1742,6 +1793,7 @@ mod tests {
             ),
         )
         .unwrap();
+        let (wake_hook, _wake_rx) = crate::runner::WakeHook::new();
         let rpc = RunnerRpc {
             state: Arc::new(Mutex::new(RunnerState {
                 environment_id,
@@ -1750,6 +1802,9 @@ mod tests {
                 generation_access: None,
                 running: None,
                 interception: None,
+                suspended: None,
+                last_wake_duration_ms: None,
+                wake_hook,
                 generation: 1,
                 state: v1::EnvironmentState::Starting,
                 error_code: None,

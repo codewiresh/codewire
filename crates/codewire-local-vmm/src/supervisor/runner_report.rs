@@ -34,14 +34,29 @@ pub(super) async fn with_runner_report(
     })
     .await;
     if let Ok(Some(info)) = info {
-        environment.runner_exit = reported_exit(&environment, &info);
-        environment.egress_unavailable = reported_egress(&environment, &info);
-        environment.interception = reported_interception(&environment, &info);
-        environment.egress_refusals = reports_running(&environment, &info)
-            .then_some(info.egress_refusals)
-            .flatten();
+        apply_runner_info(&mut environment, &info);
     }
     environment
+}
+
+/// Copies live fields from `info` onto `environment` when identity and state
+/// match.
+pub(super) fn apply_runner_info(environment: &mut v1::Environment, info: &v1::RunnerInfo) {
+    environment.runner_exit = reported_exit(environment, info);
+    environment.egress_unavailable = reported_egress(environment, info);
+    environment.interception = reported_interception(environment, info);
+    environment.egress_refusals = reports_running(environment, info)
+        .then_some(info.egress_refusals)
+        .flatten();
+    if reports_running(environment, info) {
+        environment.suspended_at_unix_ms = info.suspended_at_unix_ms;
+        environment.suspend_reason = if info.suspended_at_unix_ms > 0 {
+            info.suspend_reason.clone()
+        } else {
+            String::new()
+        };
+        environment.last_wake_duration_ms = info.last_wake_duration_ms;
+    }
 }
 
 /// The egress `info` reports for a running `environment`: only from the same
@@ -252,5 +267,40 @@ mod tests {
                 "{other:?}"
             );
         }
+    }
+
+    #[test]
+    fn suspend_state_and_wake_duration_apply_only_to_matching_running_vm() {
+        let running = v1::EnvironmentState::Running as i32;
+        let mut environment = v1::Environment {
+            id: "0d8f6f28-5d3c-4f86-a5b1-6a2f6d0b7f3e".to_owned(),
+            state: running,
+            generation: 4,
+            ..Default::default()
+        };
+        let info = v1::RunnerInfo {
+            environment_id: environment.id.clone(),
+            state: running,
+            generation: 4,
+            suspended_at_unix_ms: 1_764_300_000_000,
+            suspend_reason: "user".to_owned(),
+            last_wake_duration_ms: 42,
+            ..Default::default()
+        };
+        apply_runner_info(&mut environment, &info);
+        assert_eq!(environment.suspended_at_unix_ms, 1_764_300_000_000);
+        assert_eq!(environment.suspend_reason, "user");
+        assert_eq!(environment.last_wake_duration_ms, 42);
+
+        let mut stale = v1::Environment {
+            id: environment.id.clone(),
+            state: running,
+            generation: 5,
+            ..Default::default()
+        };
+        apply_runner_info(&mut stale, &info);
+        assert_eq!(stale.suspended_at_unix_ms, 0);
+        assert!(stale.suspend_reason.is_empty());
+        assert_eq!(stale.last_wake_duration_ms, 0);
     }
 }

@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 29;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 30;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -101,6 +101,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         29,
         "remote session environment ID (#3609, slice 3): SshStreamOpen.session_environment_id carries the platform environment UUID checked by session@codewire.sh on a host peer's remote stream; an older supervisor checks the local UUID and refuses cw shell",
     ),
+    (
+        30,
+        "local Linux VM suspend and resume (#5529): SuspendEnvironment and ResumeEnvironment pause and resume a running Linux VM in memory (runner protocol 16), wake on access and host-port traffic, and report suspended_at_unix_ms, suspend_reason and last_wake_duration_ms on Environment; an older supervisor cannot suspend local VMs",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -137,10 +141,12 @@ pub enum SupervisorFeature {
     /// Remote SSH streams with their own budget, and `session@codewire.sh`
     /// on every stream (#3609).
     RemoteSsh,
+    /// Local Linux VM suspend and resume (`SuspendEnvironment`, `ResumeEnvironment`).
+    LocalSuspend,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Retire,
         Self::Ssh,
         Self::NetworkPolicies,
@@ -154,6 +160,8 @@ impl SupervisorFeature {
         Self::Desktop,
         Self::EgressRefusals,
         Self::ClearedStateDisk,
+        Self::RemoteSsh,
+        Self::LocalSuspend,
     ];
 
     /// The protocol that introduced it.
@@ -173,6 +181,7 @@ impl SupervisorFeature {
             Self::EgressRefusals => 26,
             Self::ClearedStateDisk => 27,
             Self::RemoteSsh => 29,
+            Self::LocalSuspend => 30,
         }
     }
 }
@@ -488,7 +497,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 29);
+        assert_eq!(info.protocol_version, 30);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

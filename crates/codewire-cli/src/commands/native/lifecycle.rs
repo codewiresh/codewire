@@ -357,6 +357,9 @@ pub(crate) async fn start_native_environment(
     let mut client = native_boot_client().await?;
     let environment = prepare_native_start(&mut client, name).await?;
     if environment.state == v1::EnvironmentState::Running as i32 {
+        if environment.suspended_at_unix_ms > 0 {
+            return resume_native_environment(&environment.name, output).await;
+        }
         return print_already(&environment, Already::Running, output);
     }
     admit_uncleared_boot(
@@ -632,6 +635,151 @@ pub(crate) async fn stop_native_environment(
             Ok(())
         }
     }
+}
+
+/// `cw suspend` on a local Linux VM: freezes the workload and pauses the VM in
+/// memory (#5529).
+pub(crate) async fn suspend_native_environment(
+    name: &str,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let caps = crate::commands::lifecycle_output::capabilities(output);
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    if environment.state != v1::EnvironmentState::Running as i32 {
+        anyhow::bail!(
+            "environment {} is {} and cannot be suspended; only a running VM can be suspended",
+            crate::commands::progress::terminal_text(&environment.name),
+            native_state_label(environment.state)
+        );
+    }
+    if environment.suspended_at_unix_ms > 0 {
+        return print_already(&environment, Already::Suspended, output);
+    }
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "suspend", &environment.name),
+    );
+    progress.begin("suspend", "Suspending the VM");
+    let response = match progress
+        .tick_while(client.suspend(&environment.name, &environment.id, "user"))
+        .await?
+    {
+        Ok(response) => {
+            progress.complete();
+            response
+        }
+        Err(status) => {
+            let stage = progress.fail();
+            return Err(lifecycle_failure(
+                "suspend",
+                &environment.name,
+                stage,
+                native_status(status),
+                true,
+            )
+            .await);
+        }
+    };
+    let suspended = response.environment.unwrap_or(environment);
+    if response.already_suspended {
+        return print_already(&suspended, Already::Suspended, output);
+    }
+    match output {
+        OutputFormat::Json => print_native_environment(&suspended, output),
+        OutputFormat::Text => {
+            suspend_result(&suspended).print(&caps);
+            Ok(())
+        }
+    }
+}
+
+/// `cw resume` on a local Linux VM: resumes a suspended VM in memory (#5529).
+pub(crate) async fn resume_native_environment(
+    name: &str,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let caps = crate::commands::lifecycle_output::capabilities(output);
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    if environment.state != v1::EnvironmentState::Running as i32 {
+        if environment.state == v1::EnvironmentState::Stopped as i32 {
+            anyhow::bail!(
+                "environment {} is stopped; start it with `cw --local start {}`",
+                crate::commands::progress::terminal_text(&environment.name),
+                crate::commands::progress::terminal_text(&environment.name)
+            );
+        }
+        anyhow::bail!(
+            "environment {} is {} and cannot be resumed",
+            crate::commands::progress::terminal_text(&environment.name),
+            native_state_label(environment.state)
+        );
+    }
+    if environment.suspended_at_unix_ms == 0 {
+        return print_already(&environment, Already::Running, output);
+    }
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "resume", &environment.name),
+    );
+    progress.begin("resume", "Resuming the VM");
+    let response = match progress
+        .tick_while(client.resume(&environment.name, &environment.id))
+        .await?
+    {
+        Ok(response) => {
+            progress.complete();
+            response
+        }
+        Err(status) => {
+            let stage = progress.fail();
+            return Err(lifecycle_failure(
+                "resume",
+                &environment.name,
+                stage,
+                native_status(status),
+                true,
+            )
+            .await);
+        }
+    };
+    let resumed = response.environment.unwrap_or(environment);
+    if response.already_running {
+        return print_already(&resumed, Already::Running, output);
+    }
+    match output {
+        OutputFormat::Json => print_native_environment(&resumed, output),
+        OutputFormat::Text => {
+            resume_result(&resumed, response.wake_duration_ms).print(&caps);
+            Ok(())
+        }
+    }
+}
+
+fn suspend_result(environment: &v1::Environment) -> ResultBlock {
+    let name = &environment.name;
+    ResultBlock::new(Status::Done, format!("Environment {name} suspended"))
+        .detail(format!(
+            "{} · processes and open files kept; any use wakes it",
+            location_label(VmLocation::Local)
+        ))
+        .next(environment_command(VmLocation::Local, "resume", name))
+}
+
+fn resume_result(environment: &v1::Environment, wake_duration_ms: u64) -> ResultBlock {
+    let name = &environment.name;
+    let detail = if wake_duration_ms > 0 {
+        format!(
+            "{} · resumed in {wake_duration_ms}ms",
+            location_label(VmLocation::Local)
+        )
+    } else {
+        location_label(VmLocation::Local).to_owned()
+    };
+    ResultBlock::new(Status::Done, format!("Environment {name} resumed"))
+        .detail(detail)
+        .next(next_shell_command(VmLocation::Local, name))
 }
 
 /// A stop or start that found the environment as asked: the one line both

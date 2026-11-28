@@ -1109,6 +1109,20 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
     ) -> Result<Response<v1::EgressRefusals>, Status> {
         self.unexpected_use()
     }
+
+    async fn suspend_vm(
+        &self,
+        _request: Request<v1::SuspendVmRequest>,
+    ) -> Result<Response<v1::SuspendVmResponse>, Status> {
+        self.unexpected_use()
+    }
+
+    async fn resume_vm(
+        &self,
+        _request: Request<v1::ResumeVmRequest>,
+    ) -> Result<Response<v1::ResumeVmResponse>, Status> {
+        self.unexpected_use()
+    }
 }
 
 fn spawn_test_runner_protocol_server(

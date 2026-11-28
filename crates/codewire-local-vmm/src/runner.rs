@@ -154,6 +154,7 @@ pub use checkpoint::{
     RestoreReport,
 };
 use host_port_forward::HostPortForwarder;
+pub(crate) use host_port_forward::WakeHook;
 use mesh_ingress_pass::MeshIngressPass;
 use progress::{
     NetworkProgressAttemptError, NetworkProgressGoal, wait_for_network_progress_attempt,
@@ -840,6 +841,7 @@ impl CloudHypervisorRunner {
             hybrid,
             network_worker: None,
             host_port_listeners: prepared.host_port_listeners,
+            wake_hook: None,
             restored,
             hosted_egress: prepared.hosted_egress,
             _lock: prepared.lock,
@@ -1382,6 +1384,9 @@ pub struct RunningVm {
     /// The bindings this generation publishes now: the boot set, then each
     /// applied `set_host_ports`.
     host_ports: Vec<HostPortBinding>,
+    /// Optional runner wake hook invoked when a published host port receives
+    /// traffic while the VM is suspended (#5529).
+    wake_hook: Option<Arc<WakeHook>>,
     /// What the guest reported when this boot resumed from a VM checkpoint.
     restored: Option<RestoreReport>,
     /// A standard Pod's hosted egress mode (#5602), which picks the guest
@@ -1432,6 +1437,10 @@ impl RunningVm {
 
     pub fn vm_id(&self) -> Uuid {
         self.request.vm_id
+    }
+
+    pub(crate) fn set_wake_hook(&mut self, hook: Arc<WakeHook>) {
+        self.wake_hook = Some(hook);
     }
 
     /// Converges this generation's published host ports to `bindings`. New
@@ -1731,8 +1740,11 @@ impl RunningVm {
                             .mesh
                             .as_ref()
                             .map(|attachment| attachment.guest_ports.as_slice());
-                        let forwarder =
-                            HostPortForwarder::new(self.hybrid.clone(), self.token.clone());
+                        let forwarder = HostPortForwarder::new(
+                            self.hybrid.clone(),
+                            self.token.clone(),
+                            self.wake_hook.clone(),
+                        );
                         if let Err(error) = start_ingress_forwarder(
                             &self.process,
                             &mut worker,

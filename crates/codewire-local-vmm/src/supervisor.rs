@@ -31,6 +31,7 @@ mod runner_report;
 mod runtime;
 mod runtime_move;
 mod seed_placeholders;
+mod sleep;
 mod snapshots;
 mod sources;
 mod ssh;
@@ -6029,14 +6030,20 @@ impl LocalSupervisorService for SupervisorRpc {
                 .await
                 .map_err(Status::from)?;
         }
-        let core = self.supervisor.core();
-        let environments = core
-            .state
-            .environments
-            .keys()
-            .map(|name| core.environment_proto(name))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Status::from)?;
+        let environments = {
+            let core = self.supervisor.core();
+            core.state
+                .environments
+                .keys()
+                .map(|name| core.environment_proto(name))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Status::from)?
+        };
+        let environments =
+            futures::future::join_all(environments.into_iter().map(|environment| {
+                runner_report::with_runner_report(&self.supervisor, environment)
+            }))
+            .await;
         Ok(Response::new(v1::ListEnvironmentsResponse { environments }))
     }
 
@@ -6102,6 +6109,24 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::EnvironmentSelector>,
     ) -> Result<Response<v1::Operation>, Status> {
         self.begin_start(request.into_inner()).await
+    }
+
+    async fn suspend_environment(
+        &self,
+        request: Request<v1::SuspendEnvironmentRequest>,
+    ) -> Result<Response<v1::SuspendEnvironmentResponse>, Status> {
+        self.suspend_environment_inner(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn resume_environment(
+        &self,
+        request: Request<v1::ResumeEnvironmentRequest>,
+    ) -> Result<Response<v1::ResumeEnvironmentResponse>, Status> {
+        self.resume_environment_inner(request.into_inner())
+            .await
+            .map(Response::new)
     }
 
     async fn stop_environment(

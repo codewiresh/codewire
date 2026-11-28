@@ -493,7 +493,8 @@ pub(crate) fn local_entry(
             restart: Default::default(),
             failed: None,
             stop_reason: None,
-            suspended: false,
+            suspended: environment.state == EnvironmentState::Running as i32
+                && environment.suspended_at_unix_ms > 0,
             hibernated: false,
             hibernate_reason: None,
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
@@ -1964,6 +1965,29 @@ mod tests {
         assert_eq!(state_cell(&failed.list, chrono::Utc::now()), "error");
         let json = serde_json::to_value(&failed.list).unwrap();
         assert!(json.get("suspended").is_none(), "{json}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_suspended_local_vm_says_so_in_the_state_cell_and_json() {
+        let mut environment = codewire_local_vmm::control::v1::Environment {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            name: "nap".into(),
+            state: codewire_local_vmm::control::v1::EnvironmentState::Running as i32,
+            ..Default::default()
+        };
+        let awake = local_entry(&environment, None);
+        assert_eq!(state_cell(&awake.list, chrono::Utc::now()), "running");
+        assert!(!awake.list.suspended);
+
+        environment.suspended_at_unix_ms = 1_764_300_000_000;
+        environment.suspend_reason = "user".into();
+        let suspended = local_entry(&environment, None);
+        assert_eq!(state_cell(&suspended.list, chrono::Utc::now()), "suspended");
+        assert!(suspended.list.suspended);
+        let json = serde_json::to_value(&suspended.list).unwrap();
+        assert_eq!(json["state"], "running");
+        assert_eq!(json["suspended"], true);
     }
 
     /// A hibernated sandbox reads `hibernated` or `hibernated (idle)` in

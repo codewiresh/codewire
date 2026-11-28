@@ -49,8 +49,8 @@ pub(crate) use profile::require_native_agent_profile;
 
 pub(crate) use lifecycle::{
     NativeCreated, local_vm_credentials, network_ref, print_native_created,
-    remove_native_environment, restart_native_environment, start_native_environment,
-    stop_native_environment,
+    remove_native_environment, restart_native_environment, resume_native_environment,
+    start_native_environment, stop_native_environment, suspend_native_environment,
 };
 pub(crate) use local_https::{
     HttpsReport, NativeHttpsView, handle_local_https, https_report, print_created_https,
@@ -2381,6 +2381,12 @@ pub(crate) struct NativeEnvironmentView {
     pub(crate) access_profile_revision: Option<u64>,
     pub(crate) generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) suspended_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) suspend_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_wake_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_selection: Option<sources::SourceView>,
 }
 
@@ -2394,11 +2400,26 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
     type Error = anyhow::Error;
 
     fn try_from(environment: &v1::Environment) -> anyhow::Result<Self> {
+        let is_suspended = environment.state == v1::EnvironmentState::Running as i32
+            && environment.suspended_at_unix_ms > 0;
+        let state = if is_suspended {
+            "suspended".to_owned()
+        } else {
+            native_state_label(environment.state).to_owned()
+        };
+        let suspended_at = is_suspended
+            .then(|| format_unix_ms_rfc3339(environment.suspended_at_unix_ms))
+            .flatten();
+        let suspend_reason = is_suspended
+            .then(|| trimmed_str(&environment.suspend_reason).map(str::to_owned))
+            .flatten();
+        let last_wake_duration_ms =
+            (environment.last_wake_duration_ms > 0).then_some(environment.last_wake_duration_ms);
         Ok(Self {
             id: environment.id.clone(),
             name: environment.name.clone(),
             backend: NATIVE_BACKEND.to_owned(),
-            state: native_state_label(environment.state).to_owned(),
+            state,
             selected: environment.selected,
             cpu: environment.vcpus,
             memory: format_binary_mib(environment.memory_mib),
@@ -2431,6 +2452,9 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
                 && environment.access_profile_revision > 0)
                 .then_some(environment.access_profile_revision),
             generation: environment.generation,
+            suspended_at,
+            suspend_reason,
+            last_wake_duration_ms,
             source_selection: sources::source_view(environment)?,
             network_policy: environment.network_policy.as_ref().map(network_policy_text),
             policy_note: policy_view::PolicyNote::of(environment.network_policy.as_ref()),
@@ -2447,6 +2471,11 @@ pub(crate) fn native_state_label(state: i32) -> &'static str {
         Ok(v1::EnvironmentState::Orphaned) => "orphaned",
         _ => "unavailable",
     }
+}
+
+fn format_unix_ms_rfc3339(unix_ms: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(unix_ms)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 fn format_binary_mib(memory_mib: u32) -> String {
@@ -6532,6 +6561,9 @@ working_directory: /workspace/github
             access_profile: "user/work".to_owned(),
             access_profile_revision: Some(2),
             generation: 7,
+            suspended_at: None,
+            suspend_reason: None,
+            last_wake_duration_ms: None,
             source_selection: None,
         };
 
@@ -6544,6 +6576,27 @@ working_directory: /workspace/github
         assert!(output.contains("Access:      user/work (revision 2)\n"));
         assert!(output.contains("Docker:      8Gi\n"));
         assert!(!output.contains("Install:"));
+
+        let suspended_env = v1::Environment {
+            id: Uuid::new_v4().to_string(),
+            name: "nap".to_owned(),
+            state: v1::EnvironmentState::Running as i32,
+            vcpus: 2,
+            memory_mib: 4096,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            generation: 2,
+            suspended_at_unix_ms: 1_764_300_000_000,
+            suspend_reason: "user".to_owned(),
+            last_wake_duration_ms: 18,
+            ..Default::default()
+        };
+        let suspended_view = NativeEnvironmentView::try_from(&suspended_env).unwrap();
+        assert_eq!(suspended_view.state, "suspended");
+        let suspended_text = format_native_environment(&suspended_view, None, &[], PLAIN_STYLE);
+        assert!(suspended_text.contains("State:       suspended\n"));
+        assert!(suspended_text.contains("SuspendedAt: "));
+        assert!(suspended_text.contains("SuspendReason: user\n"));
+        assert!(suspended_text.contains("LastWake:    18ms\n"));
 
         let mut spec = codewire_project::ProjectSpec {
             install_command: "npm ci\nnpm run build".to_owned(),

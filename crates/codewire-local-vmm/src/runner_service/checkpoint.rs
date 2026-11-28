@@ -61,6 +61,8 @@ impl RunnerRpc {
                     "a VM checkpoint is taken only of the running generation",
                 ));
             }
+            // A checkpoint freezes/pauses/thaws the guest; wake first if paused (#5529).
+            state.resume_if_suspended(None).await?;
             let (vmm_version, vmm_sha256) = state.runner.vmm_identity();
             let abi = state
                 .runner

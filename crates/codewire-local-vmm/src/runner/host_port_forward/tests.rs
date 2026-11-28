@@ -70,3 +70,47 @@ async fn a_host_connection_with_nothing_listening_is_closed() {
     let mut byte = [0_u8; 1];
     assert_eq!(host.read(&mut byte).await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn a_host_connection_wakes_a_suspended_vm_before_forwarding() {
+    let temp = tempfile::tempdir().unwrap();
+    let client = in_process_daemon(temp.path()).await;
+    let (wake_hook, mut wake_rx) = WakeHook::new();
+    wake_hook.set_suspended(true);
+    let forwarder = HostPortForwarder::connected_with_wake(client, Arc::clone(&wake_hook));
+    let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let guest_port = server.local_addr().unwrap().port();
+    let (accepted, mut host) = host_connection().await;
+    let mut tasks = JoinSet::new();
+    forwarder.forward(
+        AcceptedHostPort {
+            binding: crate::host_port::HostPortBinding::new(18_081, guest_port).unwrap(),
+            stream: accepted,
+        },
+        &mut tasks,
+    );
+
+    // The forwarder must ask the runner to wake before connecting to the guest.
+    let reply = tokio::time::timeout(HANG_GUARD, wake_rx.recv())
+        .await
+        .expect("wake request timed out")
+        .expect("wake channel closed");
+    wake_hook.set_suspended(false);
+    reply.send(Ok(())).unwrap();
+
+    let (mut served, _) = tokio::time::timeout(HANG_GUARD, server.accept())
+        .await
+        .expect("guest server did not receive forwarded connection")
+        .unwrap();
+    host.write_all(b"wake").await.unwrap();
+    let mut buffer = [0_u8; 4];
+    served.read_exact(&mut buffer).await.unwrap();
+    assert_eq!(&buffer, b"wake");
+    drop(host);
+    drop(served);
+    tokio::time::timeout(HANG_GUARD, tasks.join_next())
+        .await
+        .expect("forward did not finish")
+        .unwrap()
+        .unwrap();
+}

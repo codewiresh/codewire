@@ -16,6 +16,12 @@ service LocalSupervisorService {
   rpc StartEnvironment(EnvironmentSelector) returns (Operation);
   rpc StopEnvironment(EnvironmentSelector) returns (Operation);
   rpc RestartEnvironment(EnvironmentSelector) returns (Operation);
+  // Pause a running Linux VM in memory, keeping its processes and sockets
+  // (#5529, protocol 30). Idempotent when already suspended.
+  rpc SuspendEnvironment(SuspendEnvironmentRequest) returns (SuspendEnvironmentResponse);
+  // Resume a suspended Linux VM (#5529, protocol 30). Idempotent when already
+  // running.
+  rpc ResumeEnvironment(ResumeEnvironmentRequest) returns (ResumeEnvironmentResponse);
   rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
   rpc UpdateEnvironmentSources(UpdateEnvironmentSourcesRequest) returns (Operation);
@@ -574,6 +580,59 @@ service EnvironmentRunnerService {
   // Runner protocol 15 (#5058): the running generation's refusal log. Any
   // other generation, or a VM that isn't running, is FAILED_PRECONDITION.
   rpc GetEgressRefusals(GetEgressRefusalsRequest) returns (EgressRefusals);
+  // Runner protocol 16 (#5529): freeze the guest workload and pause the VM in
+  // memory (Linux only). Idempotent when already suspended.
+  rpc SuspendVm(SuspendVmRequest) returns (SuspendVmResponse);
+  // Runner protocol 16 (#5529): resume a paused VM and thaw its workload
+  // (Linux only). Idempotent when already running.
+  rpc ResumeVm(ResumeVmRequest) returns (ResumeVmResponse);
+}
+
+message SuspendEnvironmentRequest {
+  string name = 1;
+  string environment_id = 2;
+  // "user" or "idle"; empty defaults to "user".
+  string reason = 3;
+}
+
+message SuspendEnvironmentResponse {
+  Environment environment = 1;
+  bool already_suspended = 2;
+}
+
+message ResumeEnvironmentRequest {
+  string name = 1;
+  string environment_id = 2;
+}
+
+message ResumeEnvironmentResponse {
+  Environment environment = 1;
+  bool already_running = 2;
+  uint64 wake_duration_ms = 3;
+}
+
+message SuspendVmRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+  string operation_id = 3;
+  // "user" or "idle"; empty defaults to "user".
+  string reason = 4;
+}
+
+message SuspendVmResponse {
+  RunnerInfo runner = 1;
+  bool already_suspended = 2;
+}
+
+message ResumeVmRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+}
+
+message ResumeVmResponse {
+  RunnerInfo runner = 1;
+  bool already_running = 2;
+  uint64 wake_duration_ms = 3;
 }
 
 message GetEgressRefusalsRequest {
@@ -1040,6 +1099,12 @@ message Environment {
   // Read from the running VM's runner when the environment is shown
   // (#5058); absent when nothing was refused.
   EgressRefusalSummary egress_refusals = 32;
+  // Nonzero while the running VM is suspended in memory (#5529, protocol 30).
+  int64 suspended_at_unix_ms = 33;
+  // "user" or "idle" while suspended; empty otherwise.
+  string suspend_reason = 34;
+  // How long the most recent wake from suspend took, in milliseconds.
+  uint64 last_wake_duration_ms = 35;
 }
 
 message ListEnvironmentsRequest {}
@@ -1161,6 +1226,12 @@ message RunnerInfo {
   Interception interception = 9;
   // Absent unless the running VM refused something (#5058).
   EgressRefusalSummary egress_refusals = 10;
+  // Nonzero while the running VM is suspended in memory (#5529, runner protocol 16).
+  int64 suspended_at_unix_ms = 11;
+  // "user" or "idle" while suspended; empty otherwise.
+  string suspend_reason = 12;
+  // How long the most recent wake from suspend took, in milliseconds.
+  uint64 last_wake_duration_ms = 13;
 }
 
 // The VM's egress broker is past its deadline, so its network worker refuses

@@ -707,6 +707,50 @@ impl NativeSupervisorClient {
         }
     }
 
+    /// Pause a running Linux local VM in memory (#5529, protocol 30).
+    pub async fn suspend(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+        reason: &str,
+    ) -> Result<v1::SuspendEnvironmentResponse, Status> {
+        if !self.supports(SupervisorFeature::LocalSuspend) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which cannot suspend local VMs; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(self
+            .inner
+            .suspend_environment(v1::SuspendEnvironmentRequest {
+                name: name.to_owned(),
+                environment_id: environment_id.to_owned(),
+                reason: reason.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
+    /// Resume a suspended Linux local VM (#5529, protocol 30).
+    pub async fn resume(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+    ) -> Result<v1::ResumeEnvironmentResponse, Status> {
+        if !self.supports(SupervisorFeature::LocalSuspend) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which cannot resume local VMs; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(self
+            .inner
+            .resume_environment(v1::ResumeEnvironmentRequest {
+                name: name.to_owned(),
+                environment_id: environment_id.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
     pub async fn managed_runtime(
         &mut self,
         name: &str,

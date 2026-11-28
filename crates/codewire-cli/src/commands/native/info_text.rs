@@ -63,6 +63,21 @@ pub(super) fn format_native_environment(
         output.push_str(&format!("Attention:   {row}\n"));
     }
     output.push_str(&format!("Generation:  {}\n", view.generation));
+    if let Some(suspended_at) = &view.suspended_at {
+        output.push_str(&format!("SuspendedAt: {suspended_at}\n"));
+    }
+    if let Some(reason) = &view.suspend_reason {
+        output.push_str(&format!("SuspendReason: {reason}\n"));
+    }
+    if view.suspended_at.is_some() {
+        output.push_str(&format!(
+            "Notice:      Suspended; any connection or `cw --local resume {}` wakes it.\n",
+            view.name
+        ));
+    }
+    if let Some(wake_ms) = view.last_wake_duration_ms {
+        output.push_str(&format!("LastWake:    {wake_ms}ms\n"));
+    }
     output.push_str(&sources::format_source_view(
         view.source_selection.as_ref(),
         &view.error.credentials_note(style),
