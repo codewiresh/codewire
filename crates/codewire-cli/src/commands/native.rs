@@ -672,8 +672,31 @@ pub(crate) async fn create_native_environment(
         eprintln!("{warning}");
     }
     let NativeProjectPlan {
-        spec, local_mounts, ..
+        spec,
+        local_mounts,
+        idle_suspend_seconds: yaml_idle_suspend,
+        idle_hibernate_seconds: yaml_idle_hibernate,
+        ..
     } = project;
+    let idle_suspend_seconds = match args.idle_suspend.as_deref() {
+        Some(value) => codewire_project::parse_idle_suspend(value)?,
+        None => yaml_idle_suspend.unwrap_or(0),
+    };
+    let idle_hibernate_seconds = match args.idle_hibernate.as_deref() {
+        Some(value) => codewire_project::parse_idle_hibernate(value)?,
+        None => yaml_idle_hibernate.unwrap_or(0),
+    };
+    codewire_project::validate_idle_hibernate_after_suspend(
+        idle_suspend_seconds,
+        idle_hibernate_seconds,
+    )?;
+    let idle_suspend_seconds =
+        u32::try_from(idle_suspend_seconds).context("idle suspend timeout must not be negative")?;
+    let idle_hibernate_seconds = u32::try_from(idle_hibernate_seconds)
+        .context("idle hibernate timeout must not be negative")?;
+    if idle_suspend_seconds > 0 || idle_hibernate_seconds > 0 {
+        client.require_local_idle_sleep().map_err(native_status)?;
+    }
     let (policy, spec) = lifecycle::CreatePolicy::take(args.policy.as_deref(), spec);
     let context = lifecycle::CreateContext {
         credentials: crate::commands::lifecycle_output::credential_ref(
@@ -729,6 +752,8 @@ pub(crate) async fn create_native_environment(
         implicit_vm_only,
         network_policy: policy.reference(),
         snapshot: None,
+        idle_suspend_seconds,
+        idle_hibernate_seconds,
     };
     lifecycle::require_policy_selection(&client, &request.network_policy)?;
     crate::commands::lifecycle_output::print_context(
@@ -940,6 +965,8 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
         disk_bytes: None,
         working_directory_explicit: false,
         path_mode: None,
+        idle_suspend_seconds: None,
+        idle_hibernate_seconds: None,
     };
     let mut requests = Vec::new();
     for name in &names {
@@ -990,6 +1017,8 @@ async fn create_from_snapshot(globals: &Globals, args: EnvCreateArgs) -> anyhow:
                 (vcpus, memory_mib),
                 &account,
             )),
+            idle_suspend_seconds: 0,
+            idle_hibernate_seconds: 0,
         });
     }
     if matches!(args.output, OutputFormat::Text) {
@@ -1594,7 +1623,63 @@ pub(crate) async fn handle_native_environment_update(
 ) -> anyhow::Result<()> {
     reject_unsupported_native_update_options(&args)?;
     sources::validate_update_args(&args)?;
+    let idle_suspend = args
+        .idle_suspend
+        .as_deref()
+        .map(codewire_project::parse_idle_suspend)
+        .transpose()?;
+    let idle_hibernate = args
+        .idle_hibernate
+        .as_deref()
+        .map(codewire_project::parse_idle_hibernate)
+        .transpose()?;
+    if let (Some(suspend), Some(hibernate)) = (idle_suspend, idle_hibernate) {
+        codewire_project::validate_idle_hibernate_after_suspend(suspend, hibernate)?;
+    }
     let mut supervisor = native_boot_client().await?;
+    if idle_suspend.is_some() || idle_hibernate.is_some() {
+        let suspend_u32 = idle_suspend
+            .map(u32::try_from)
+            .transpose()
+            .context("idle suspend timeout must not be negative")?;
+        let hibernate_u32 = idle_hibernate
+            .map(u32::try_from)
+            .transpose()
+            .context("idle hibernate timeout must not be negative")?;
+        let updated = supervisor
+            .update_idle_policy(&args.environment, "", suspend_u32, hibernate_u32)
+            .await
+            .map_err(native_status)?;
+        match args.output {
+            OutputFormat::Json => {
+                let view = NativeEnvironmentView::try_from(&updated)?;
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            }
+            OutputFormat::Text => {
+                if let Some(seconds) = idle_suspend {
+                    print!(
+                        "{}",
+                        super::environment::idle_suspend::format_env_idle_suspend_text(
+                            &updated.name,
+                            seconds,
+                        )
+                    );
+                }
+                if let Some(seconds) = idle_hibernate {
+                    print!(
+                        "{}",
+                        super::environment::idle_hibernate::format_env_idle_hibernate_text(
+                            &updated.name,
+                            seconds,
+                        )
+                    );
+                }
+            }
+        }
+        if args.policy.is_none() && !sources::selects_sources(&args) {
+            return Ok(());
+        }
+    }
     if let Some(policy) = args.policy.as_deref() {
         let updated = supervisor
             .update_environment_network_policy(&args.environment, policy)
@@ -2381,6 +2466,10 @@ pub(crate) struct NativeEnvironmentView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) access_profile_revision: Option<u64>,
     pub(crate) generation: u64,
+    pub(crate) idle_suspend_seconds: u32,
+    pub(crate) idle_hibernate_seconds: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) idle_hibernate_skip_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) suspended_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2436,6 +2525,8 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
             .then(|| format_binary_bytes(environment.hibernate_memory_bytes));
         let hibernate_fallback_reason =
             trimmed_str(&environment.hibernate_fallback_reason).map(str::to_owned);
+        let idle_hibernate_skip_reason =
+            trimmed_str(&environment.idle_hibernate_skip_reason).map(str::to_owned);
         let last_wake_duration_ms =
             (environment.last_wake_duration_ms > 0).then_some(environment.last_wake_duration_ms);
         Ok(Self {
@@ -2475,6 +2566,9 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
                 && environment.access_profile_revision > 0)
                 .then_some(environment.access_profile_revision),
             generation: environment.generation,
+            idle_suspend_seconds: environment.idle_suspend_seconds,
+            idle_hibernate_seconds: environment.idle_hibernate_seconds,
+            idle_hibernate_skip_reason,
             suspended_at,
             suspend_reason,
             hibernated_at,
@@ -3198,6 +3292,8 @@ struct NativeProjectPlan {
     working_directory_explicit: bool,
     /// `workspace.path_mode`, which `--path-mode` overrides.
     path_mode: Option<PathModeArg>,
+    idle_suspend_seconds: Option<i32>,
+    idle_hibernate_seconds: Option<i32>,
 }
 
 /// Where a local create's configuration comes from and its project
@@ -3386,6 +3482,8 @@ fn native_codewire_yaml(
         disk_bytes,
         working_directory_explicit,
         path_mode,
+        idle_suspend_seconds: document.idle_suspend_seconds,
+        idle_hibernate_seconds: document.idle_hibernate_seconds,
     })
 }
 
@@ -6588,6 +6686,9 @@ working_directory: /workspace/github
             access_profile: "user/work".to_owned(),
             access_profile_revision: Some(2),
             generation: 7,
+            idle_suspend_seconds: 900,
+            idle_hibernate_seconds: 21_600,
+            idle_hibernate_skip_reason: None,
             suspended_at: None,
             suspend_reason: None,
             hibernated_at: None,
@@ -6606,6 +6707,8 @@ working_directory: /workspace/github
         ));
         assert!(output.contains("Access:      user/work (revision 2)\n"));
         assert!(output.contains("Docker:      8Gi\n"));
+        assert!(output.contains("IdleSuspend: 15m\n"));
+        assert!(output.contains("IdleHibernate: 6h\n"));
         assert!(!output.contains("Install:"));
 
         let suspended_env = v1::Environment {

@@ -1426,6 +1426,11 @@ impl fmt::Debug for RunningVm {
 }
 
 impl RunningVm {
+    /// Live VMM process ID, for host-side idle CPU sampling (#5529).
+    pub(crate) fn vmm_pid(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     /// When the host first received each guest boot stage (#4242).
     pub(crate) fn stage_times(&self) -> &GuestStageTimes {
         &self.stage_times

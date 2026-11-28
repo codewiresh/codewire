@@ -15,7 +15,7 @@ use crate::control::v1;
 // Bump for every detached-supervisor behavior change, even if the protobuf
 // message layout itself remains wire-compatible. Linux and Darwin serve the
 // same shared supervisor; Darwin's former stopped-state dispatcher was 8.
-pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 31;
+pub const NATIVE_SUPERVISOR_PROTOCOL_VERSION: u32 = 32;
 /// The oldest supervisor protocol this cw works with: v0.3.388's (#2826). After a cw
 /// update, a supervisor in [minimum, current] keeps serving its VMs; only an
 /// idle older one is replaced (`supervisor_upgrade`).
@@ -109,6 +109,10 @@ pub const SUPERVISOR_PROTOCOL_CHANGES: &[(u32, &str)] = &[
         31,
         "local Linux VM hibernate and restore (#5529): HibernateEnvironment writes guest memory and device state to disk and ends the VMM (runner protocol 17), restores on start/resume/access with clean cold-boot fallback on unrestorable images, and reports hibernated_at_unix_ms, hibernate_reason, hibernate_memory_bytes and hibernate_fallback_reason on Environment; an older supervisor cannot hibernate local VMs",
     ),
+    (
+        32,
+        "local Linux VM idle suspend and hibernate policy (#5529): UpdateEnvironmentIdlePolicy and CreateEnvironmentRequest/Environment idle_suspend_seconds, idle_hibernate_seconds and idle_hibernate_skip_reason persist per-VM idle sleep settings and monitor VMM CPU (runner protocol 18), guest daemon activity and inbound host-port/SSH/HTTPS traffic without waking sleeping VMs; an older supervisor ignores idle sleep settings",
+    ),
 ];
 
 /// A supervisor capability newer than the minimum protocol.
@@ -149,10 +153,12 @@ pub enum SupervisorFeature {
     LocalSuspend,
     /// Local Linux VM hibernate and restore (`HibernateEnvironment`, restore on start/access).
     LocalHibernate,
+    /// Local Linux VM idle suspend and hibernate policy (`UpdateEnvironmentIdlePolicy`).
+    LocalIdleSleep,
 }
 
 impl SupervisorFeature {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Retire,
         Self::Ssh,
         Self::NetworkPolicies,
@@ -169,6 +175,7 @@ impl SupervisorFeature {
         Self::RemoteSsh,
         Self::LocalSuspend,
         Self::LocalHibernate,
+        Self::LocalIdleSleep,
     ];
 
     /// The protocol that introduced it.
@@ -190,6 +197,7 @@ impl SupervisorFeature {
             Self::RemoteSsh => 29,
             Self::LocalSuspend => 30,
             Self::LocalHibernate => 31,
+            Self::LocalIdleSleep => 32,
         }
     }
 }
@@ -505,7 +513,7 @@ mod tests {
     fn compatibility_requires_the_expected_configuration_but_not_host_effects() {
         let config = test_config();
         let info = supervisor_info(&config);
-        assert_eq!(info.protocol_version, 31);
+        assert_eq!(info.protocol_version, 32);
         assert!(admit_supervisor_info(&info, None).is_ok());
         assert!(admit_supervisor_info(&info, Some(&config.configuration_digest())).is_ok());
         assert!(matches!(

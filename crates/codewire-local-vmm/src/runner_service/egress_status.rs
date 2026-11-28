@@ -34,6 +34,12 @@ impl super::RunnerState {
                 .map(|suspended| suspended.reason.clone())
                 .unwrap_or_default(),
             last_wake_duration_ms: self.last_wake_duration_ms.unwrap_or_default(),
+            vmm_pid: self
+                .running
+                .as_ref()
+                .and_then(RunningVm::vmm_pid)
+                .unwrap_or_default(),
+            last_host_port_activity_unix_ms: self.wake_hook.last_activity_unix_ms(),
         }
     }
 

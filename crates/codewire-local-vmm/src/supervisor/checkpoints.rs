@@ -516,6 +516,9 @@ impl LocalCheckpointService for SupervisorRpc {
         self.start_drains()?;
         let request = request.into_inner();
         let supervisor = Arc::clone(&self.supervisor);
+        if let Ok(env) = supervisor.environment(&request.environment) {
+            supervisor.idle_tracker.note_activity(env.id);
+        }
         // In a task of its own: a dropped request never cuts a capture short
         // while it holds the source's lease.
         tokio::spawn(async move { capture(&supervisor, request).await })

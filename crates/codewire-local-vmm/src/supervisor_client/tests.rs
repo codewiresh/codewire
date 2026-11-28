@@ -343,6 +343,13 @@ impl LocalSupervisorService for ProtocolPeer {
     ) -> Result<Response<v1::HibernateEnvironmentResponse>, Status> {
         Err(Status::unimplemented("unused synthetic method"))
     }
+
+    async fn update_environment_idle_policy(
+        &self,
+        _: Request<v1::UpdateEnvironmentIdlePolicyRequest>,
+    ) -> Result<Response<v1::Environment>, Status> {
+        Err(Status::unimplemented("unused synthetic method"))
+    }
 }
 
 struct TestServer {

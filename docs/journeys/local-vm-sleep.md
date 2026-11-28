@@ -16,11 +16,11 @@ Updated 2026-11-28.
 
 | ID | Linux host | Mac |
 | --- | --- | --- |
-| `sleep-by-hand` | not yet observed | does not apply: Linux only (`#5529`) |
-| `sleep-wake-on-access` | not yet observed | does not apply: Linux only (`#5529`) |
-| `sleep-hibernate` | not yet observed | does not apply: Linux only (`#5529`) |
-| `sleep-idle-policy` | not yet observed | does not apply: Linux only (`#5529`) |
-| `sleep-restore-fallback` | not yet observed | does not apply: Linux only (`#5529`) |
+| `sleep-by-hand` | observed 2026-11-28 | does not apply: Linux only (`#5529`) |
+| `sleep-wake-on-access` | observed 2026-11-28 | does not apply: Linux only (`#5529`) |
+| `sleep-hibernate` | observed 2026-11-28 | does not apply: Linux only (`#5529`) |
+| `sleep-idle-policy` | observed 2026-11-28 | does not apply: Linux only (`#5529`) |
+| `sleep-restore-fallback` | observed 2026-11-28 | does not apply: Linux only (`#5529`) |
 
 ## Before the walk
 
@@ -83,7 +83,7 @@ Updated 2026-11-28.
     waking it.
 - **Gotchas:** avoid running `cw exec` while verifying `suspended`/`hibernated`,
   since `cw exec` wakes the VM.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on Linux x86_64 KVM (Cloud Hypervisor v54, built `cw`, 1 GiB VM `nap`, host load 63.4–69.4). Suspend took 127 ms (56 ms at load 13.3); idempotent second suspend exited 0; `cw ls` and `cw info` preserved `suspended` across a 5 s hold. Resume took 2 ms VM-side (88 ms CLI) with the same VMM PID and `counter` resuming (`22 -> 29 -> 41`); second resume exited 0. Hibernate took 2.0 s, exited the VMM, and reclaimed +1.07 GiB host RAM; second hibernate exited 0. `cw start` restored in 10.2 s with `counter` continuing (`41 -> 81`) and guest clock within 0 s of host. Direct hibernate from `suspended` took 1.4 s; `cw stop` from `hibernated` discarded the memory image and cold-booted with no `counter`; all three verbs refused cleanly on `stopped`; `cw rm --yes` removed a hibernated VM without waking it.
 
 ## `sleep-wake-on-access`: automatic wake on `cw run`, `cw shell`, `cw exec`, `ssh`, and host ports
 
@@ -109,7 +109,7 @@ Updated 2026-11-28.
     after a single restore.
 - **Gotchas:** wait for any previous session's output to quiet if testing with
   idle timers enabled.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on Linux x86_64 KVM (Cloud Hypervisor v54, built `cw`, 1 GiB VM `nap`, host load 22.1–23.6). From `suspended`, `cw exec`, `cw run --detach`, and `curl` to published loopback port `127.0.0.1:18090` (HTTP 200) all woke `nap` automatically while keeping the same VMM PID (`4128769`) and continuing `counter`. From `hibernated`, `cw exec` restored in 8.9 s (`counter` `24 -> 60`), `cw run --detach` restored in 9.1 s, and two simultaneous HTTP requests to `127.0.0.1:18090` both returned HTTP 200 in 6.9 s after one coalesced restore.
 
 ## `sleep-hibernate`: memory reclamation, mounted folders, Docker, and supervisor restart
 
@@ -136,7 +136,7 @@ Updated 2026-11-28.
     Docker container are all intact.
 - **Gotchas:** pull any Docker image before hibernating so image pull traffic
   does not interfere with timing.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on Linux x86_64 KVM (Cloud Hypervisor v54, built `cw`, 1 GiB VMs, host load 24.4–69.4). Under default `--path-mode mount`, hibernate took 2.0 s, exited the VMM, reclaimed +1.07 GiB RAM, reported `HibernateMemory: 1Gi`, survived killing and restarting the supervisor while hibernated, and restored in 10.2 s with `/workspace/work-mount/keep.txt`, `counter`, and guest clock (0 s skew) intact. Under `--path-mode empty`, hibernate took 1.2 s and restored with `/workspace/empty-keep.txt` and `counter` intact. (Walked with `--no-docker`; Docker container continuity across hibernate was not separately exercised in this pass.)
 
 ## `sleep-idle-policy`: `--idle-suspend`, `--idle-hibernate`, and active-work guards
 
@@ -173,7 +173,7 @@ Updated 2026-11-28.
     `nap`, and `nap` stays `running`.
 - **Gotchas:** remember to stop each busy session before measuring the next
   idle window.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on Linux x86_64 KVM (Cloud Hypervisor v54, built `cw`, 1 GiB VM `nap`, host load 10.8–15.7) using real production timeouts (`--idle-suspend 5m --idle-hibernate 10m`). Creating with `--idle-suspend 10m --idle-hibernate 10m` was refused naming both `idle_hibernate` and `idle_suspend (10m)`. While polling `cw ls` every 10 s (verifying `cw ls` neither resets the idle clock nor wakes a hibernating VM), `nap` automatically transitioned to `suspended (idle)` at `303 s` and to `hibernated (idle)` at `604 s`, then restored in 6.8 s with `counter` continuing (`21 -> 2993`). Under both a 5 m 30 s CPU burn (`331 s`) and a 5 m 30 s minimal-CPU turn-heartbeat session printing every 30 s (`330 s`), `nap` stayed `running` throughout. `cw update nap --idle-suspend off --idle-hibernate off` updated `IdleSuspend: off` / `IdleHibernate: off` without restarting (same VMM PID and generation), and `cw update nap --idle-suspend 15m --idle-hibernate 6h` while `suspended` updated both settings without waking `nap`.
 
 ## `sleep-restore-fallback`: unrestorable memory image cold-boots cleanly with notice
 
@@ -202,4 +202,4 @@ Updated 2026-11-28.
     clears the fallback notice.
 - **Gotchas:** make sure the file write in step 1 is synced before hibernating
   (the hibernate hook flushes guest disks automatically).
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on Linux x86_64 KVM (Cloud Hypervisor v54, built `cw`, 1 GiB VM `nap-fb`). Truncating `checkpoints/in/memory-ranges` caused `cw start` to delete the unusable image, cold-boot cleanly from disks, keep `/workspace/work-mount/fallback-check.txt` (`hello-fallback`) with `counter` gone, and surface the `damaged-memory-file` fallback notice in both `cw start` and `cw info`. Tampering `vmm_sha256` in `hibernate/record.json` and waking via `cw resume` similarly cold-booted cleanly with the `vmm-digest-mismatch` notice; a subsequent `cw stop && cw start` cleared the notice.

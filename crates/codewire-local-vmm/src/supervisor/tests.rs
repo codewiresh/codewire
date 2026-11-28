@@ -3521,6 +3521,8 @@ async fn native_create_rejects_each_unpinned_platform_source_before_state_mutati
         let request_id = Uuid::new_v4();
         let request = v1::CreateEnvironmentRequest {
             snapshot: None,
+            idle_suspend_seconds: 0,
+            idle_hibernate_seconds: 0,
             network_policy: String::new(),
             implicit_vm_only: Vec::new(),
             name: name.clone(),
@@ -3985,6 +3987,8 @@ fn create_journal_reconstructs_exact_canonical_project_intent() {
     let project_spec_sha256 = format!("{:x}", Sha256::digest(&project_spec_json));
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "dev".to_owned(),
@@ -4328,6 +4332,8 @@ fn create_journal_reconstructs_copy_mounts_and_accepts_explicit_direct_shape() {
     let project_spec_json = project.canonical_json().unwrap();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "copy".to_owned(),
@@ -4413,6 +4419,8 @@ async fn create_preparation_admits_an_explicit_copy_mount_without_an_implicit_pa
     let project_spec_json = project.canonical_json().unwrap();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "copy".to_owned(),
@@ -4480,6 +4488,8 @@ async fn create_preparation_binds_an_explicit_direct_mount_for_durable_replay() 
     let project_spec_json = project.canonical_json().unwrap();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "direct".to_owned(),
@@ -4605,6 +4615,8 @@ async fn create_copies_the_implicit_source_without_its_kept_paths() {
     let project_spec_json = project.canonical_json().unwrap();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: vec!["node_modules".to_owned(), ".venv".to_owned()],
         name: "copy".to_owned(),
@@ -4706,6 +4718,8 @@ async fn create_revalidates_a_direct_share_before_its_first_lifecycle_effect() {
     let fixture = project_environment_with_access();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "new-environment".to_owned(),
@@ -4781,6 +4795,8 @@ async fn replayed_create_quarantines_its_live_runner_when_private_roots_are_unre
     let environment_id = environment.id;
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "dev".to_owned(),
@@ -6945,6 +6961,8 @@ async fn recovering_create_waits_at_its_latest_checkpoint_for_the_owner_authorit
     let workspace_plan = environment.workspace_plan.clone();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: environment.name.clone(),
@@ -9206,6 +9224,8 @@ async fn content_collection_retains_bundles_owned_by_pending_creates() {
     let request_id = Uuid::new_v4();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "pending".to_owned(),

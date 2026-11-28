@@ -247,8 +247,11 @@ pub(super) fn selects_sources(args: &EnvUpdateArgs) -> bool {
 pub(super) fn validate_update_args(args: &EnvUpdateArgs) -> anyhow::Result<()> {
     trimmed_required(&args.environment, "environment")?;
     anyhow::ensure!(
-        selects_sources(args) || args.policy.is_some(),
-        "select --secrets, --profile, --user-secrets, --org-secrets, --clear-secrets, --clear-profile, or --policy"
+        selects_sources(args)
+            || args.policy.is_some()
+            || args.idle_suspend.is_some()
+            || args.idle_hibernate.is_some(),
+        "select --secrets, --profile, --user-secrets, --org-secrets, --clear-secrets, --clear-profile, --policy, --idle-suspend, or --idle-hibernate"
     );
     anyhow::ensure!(
         !(args.clear_secrets

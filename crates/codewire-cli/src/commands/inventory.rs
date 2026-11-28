@@ -495,6 +495,10 @@ pub(crate) fn local_entry(
             stop_reason: None,
             suspended: environment.state == EnvironmentState::Running as i32
                 && environment.suspended_at_unix_ms > 0,
+            suspend_reason: (environment.state == EnvironmentState::Running as i32
+                && environment.suspended_at_unix_ms > 0)
+                .then(|| trimmed_str(&environment.suspend_reason).map(str::to_owned))
+                .flatten(),
             hibernated: environment.state == EnvironmentState::Stopped as i32
                 && environment.hibernated_at_unix_ms > 0,
             hibernate_reason: (environment.state == EnvironmentState::Stopped as i32
@@ -548,6 +552,7 @@ pub(crate) fn cloud_entry(
             failed,
             stop_reason: environment.stop_reason.clone(),
             suspended: environment.suspended(),
+            suspend_reason: None,
             hibernated: environment.hibernated(),
             hibernate_reason: environment
                 .hibernated()
@@ -611,6 +616,7 @@ fn host_entry(
             failed: None,
             stop_reason: None,
             suspended: false,
+            suspend_reason: None,
             hibernated: false,
             hibernate_reason: None,
             daemon_health,
@@ -1219,7 +1225,11 @@ fn state_cell(entry: &UnifiedEnvironmentListEntry, now: chrono::DateTime<chrono:
             super::collaboration::time_ago_at(&failed.at, now)
         )
     } else if entry.suspended {
-        "suspended".to_owned()
+        if entry.suspend_reason.as_deref() == Some("idle") {
+            "suspended (idle)".to_owned()
+        } else {
+            "suspended".to_owned()
+        }
     } else if entry.hibernated {
         if entry.hibernate_reason.as_deref() == Some("idle") {
             "hibernated (idle)".to_owned()
@@ -1353,6 +1363,7 @@ mod tests {
             failed: None,
             stop_reason: None,
             suspended: false,
+            suspend_reason: None,
             hibernated: false,
             hibernate_reason: None,
             daemon_health: String::new(),

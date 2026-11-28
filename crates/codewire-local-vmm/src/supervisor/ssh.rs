@@ -310,7 +310,23 @@ fn replaces_vm(operation: &OperationRecord, environment_id: Uuid) -> bool {
 /// and SCP are offered only by a daemon whose file operations act as the
 /// workload user, and port forwarding only by one that connects inside the
 /// workload's network namespace.
+#[cfg(test)]
 pub(super) fn serve(
+    daemon: DaemonSessionClient,
+    features: DaemonFeatures,
+    host_key: PrivateKey,
+    inbound: impl Stream<Item = Result<v1::SshStreamFrame, Status>> + Send + Unpin + 'static,
+    operations: broadcast::Receiver<OperationRecord>,
+    opened: OpenedSshStream,
+    permit: SshStreamPermit,
+) -> SshFrames {
+    serve_with_activity(
+        daemon, features, host_key, inbound, operations, opened, permit, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn serve_with_activity(
     daemon: DaemonSessionClient,
     features: DaemonFeatures,
     host_key: PrivateKey,
@@ -318,6 +334,7 @@ pub(super) fn serve(
     mut operations: broadcast::Receiver<OperationRecord>,
     opened: OpenedSshStream,
     permit: SshStreamPermit,
+    on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
 ) -> SshFrames {
     let environment_id = opened.environment_id;
     let (outbound, frames) = mpsc::channel(QUEUED_FRAMES);
@@ -367,12 +384,16 @@ pub(super) fn serve(
         };
         // Everything the server writes reaches the client before the stream
         // ends: the server side closes when its session ends.
+        let egress_activity = on_activity.clone();
         let egress = async move {
             let mut buffer = vec![0; FRAME_BYTES];
             loop {
                 match from_server.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
                     Ok(read) => {
+                        if let Some(note) = egress_activity.as_ref() {
+                            note();
+                        }
                         let frame = v1::SshStreamFrame {
                             frame: Some(Frame::Data(buffer[..read].to_vec())),
                         };
@@ -383,12 +404,16 @@ pub(super) fn serve(
                 }
             }
         };
+        let ingress_activity = on_activity;
         let ingress = async move {
             while let Some(Ok(frame)) = inbound.next().await {
                 // Only data follows the opening frame.
                 let Some(Frame::Data(bytes)) = frame.frame else {
                     break;
                 };
+                if let Some(note) = ingress_activity.as_ref() {
+                    note();
+                }
                 if to_server.write_all(&bytes).await.is_err() {
                     break;
                 }

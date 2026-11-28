@@ -23,6 +23,7 @@ mod halt;
 use halt::{HaltReason, fatal_drain_error};
 mod hibernate;
 mod hibernate_ports;
+mod idle_sleep;
 mod local_https;
 mod managed_runtime;
 mod metadata;
@@ -596,6 +597,9 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         Arc::clone(&service.supervisor).run_idle_runner_reaper(),
     ));
     drop(tokio::spawn(
+        Arc::clone(&service.supervisor).run_idle_sleep_monitor(),
+    ));
+    drop(tokio::spawn(
         Arc::clone(&service.supervisor).run_idle_exit(connections),
     ));
     // Nothing pending was admitted by this process, so every drain recovers.
@@ -931,6 +935,8 @@ struct Supervisor {
     /// `cw ls` / `cw info` reads never see a stale awake state while the
     /// runner mutex is held (#5529).
     hibernating: std::sync::Mutex<HashMap<Uuid, (i64, String)>>,
+    /// Per-VM activity clock for `--idle-suspend` / `--idle-hibernate` (#5529).
+    idle_tracker: Arc<idle_sleep::IdleTracker>,
 }
 
 impl Supervisor {
@@ -948,6 +954,7 @@ impl Supervisor {
             collection_ended: tokio::sync::Notify::new(),
             hibernate_port_wakers: hibernate_ports::HibernatePortWakers::default(),
             hibernating: std::sync::Mutex::default(),
+            idle_tracker: Arc::new(idle_sleep::IdleTracker::default()),
         })
     }
 
@@ -2694,6 +2701,19 @@ impl Supervisor {
                         .map_err(|error| {
                             SupervisorError::NetworkPolicySelection(error.to_string())
                         })?;
+                    if request.idle_suspend_seconds > 0 || request.idle_hibernate_seconds > 0 {
+                        let engine_root = self.config.engine_root();
+                        let policy = idle_sleep::IdlePolicy::new(
+                            request.idle_suspend_seconds,
+                            request.idle_hibernate_seconds,
+                        );
+                        idle_sleep::write_policy(&engine_root, environment_id, &policy).map_err(
+                            |source| SupervisorError::Io {
+                                path: engine_root,
+                                source,
+                            },
+                        )?;
+                    }
                     let recorded = |environment: &EnvironmentRecord| {
                         Ok::<_, SupervisorError>(
                             environment.id == environment_id
@@ -4642,6 +4662,9 @@ impl Supervisor {
             cw_runtime,
         )
         .await?;
+        self.idle_tracker
+            .note_started(environment.id, booted_generation);
+        idle_sleep::clear_skip_reason(&engine_root, environment.id);
         Ok(booted_generation)
     }
 
@@ -4830,7 +4853,9 @@ impl Supervisor {
         }
         let environment = self.environment(name)?;
         self.hibernate_port_wakers.release(environment.id).await;
+        self.idle_tracker.forget(environment.id);
         hibernate::clear_all(&self.config.engine_root(), environment.id);
+        idle_sleep::clear_skip_reason(&self.config.engine_root(), environment.id);
         self.stop_environment_broker_if_present(&environment)
             .await?;
         if self.core().incompatible_runners.contains(&environment.id) {
@@ -5415,7 +5440,9 @@ impl Supervisor {
         // restarting a broker whose runner is gone (#2924).
         let environment = self.environment(name)?;
         self.hibernate_port_wakers.release(environment.id).await;
+        self.idle_tracker.forget(environment.id);
         hibernate::clear_all(&self.config.engine_root(), environment.id);
+        idle_sleep::clear_skip_reason(&self.config.engine_root(), environment.id);
         self.stop_environment_broker_if_present(&environment)
             .await?;
         if self.environment(name)?.runner.is_none() {
@@ -6091,6 +6118,10 @@ impl LocalSupervisorService for SupervisorRpc {
         request.mesh =
             canonicalize_mesh_attachment_proto(request.mesh.as_ref()).map_err(Status::from)?;
         let request_id = validate_create(&request).map_err(Status::from)?;
+        idle_sleep::validate_idle_policy(
+            request.idle_suspend_seconds,
+            request.idle_hibernate_seconds,
+        )?;
         network_policies::check_selectable(&self.network_policies, &request.network_policy)?;
         self.start_drains()?;
         let lease = self
@@ -6345,6 +6376,15 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<v1::HibernateEnvironmentRequest>,
     ) -> Result<Response<v1::HibernateEnvironmentResponse>, Status> {
         self.hibernate_environment_inner(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn update_environment_idle_policy(
+        &self,
+        request: Request<v1::UpdateEnvironmentIdlePolicyRequest>,
+    ) -> Result<Response<v1::Environment>, Status> {
+        self.update_environment_idle_policy_inner(request.into_inner())
             .await
             .map(Response::new)
     }
@@ -7208,8 +7248,17 @@ impl LocalSupervisorService for SupervisorRpc {
             .map_err(|_| Status::internal("local environment SSH host key is unavailable"))?;
         let daemon = ssh::daemon_client(access).await?;
         let features = ssh::DaemonFeatures::read(&daemon).await;
-        Ok(Response::new(ssh::serve(
-            daemon, features, host_key, inbound, operations, opened, permit,
+        self.supervisor.idle_tracker.note_activity(id);
+        let tracker = Arc::clone(&self.supervisor.idle_tracker);
+        Ok(Response::new(ssh::serve_with_activity(
+            daemon,
+            features,
+            host_key,
+            inbound,
+            operations,
+            opened,
+            permit,
+            Some(Arc::new(move || tracker.note_activity(id))),
         )))
     }
 
@@ -8469,6 +8518,24 @@ fn create_operation_payload(
                 request.network_policy.clone().into(),
             );
     }
+    if request.idle_suspend_seconds > 0 {
+        payload
+            .as_object_mut()
+            .expect("create payload is an object")
+            .insert(
+                "idle_suspend_seconds".to_owned(),
+                request.idle_suspend_seconds.into(),
+            );
+    }
+    if request.idle_hibernate_seconds > 0 {
+        payload
+            .as_object_mut()
+            .expect("create payload is an object")
+            .insert(
+                "idle_hibernate_seconds".to_owned(),
+                request.idle_hibernate_seconds.into(),
+            );
+    }
     // Likewise only a restore adds `snapshot` (#3046).
     snapshots::journal_payload(&mut payload, request)?;
     Ok(payload)
@@ -8484,13 +8551,34 @@ fn create_request_from_operation(
         .payload
         .as_object()
         .filter(|fields| {
-            let optional = ["network_policy", "snapshot"]
-                .into_iter()
-                .filter(|key| fields.contains_key(*key))
-                .count();
+            let optional = [
+                "network_policy",
+                "snapshot",
+                "idle_suspend_seconds",
+                "idle_hibernate_seconds",
+            ]
+            .into_iter()
+            .filter(|key| fields.contains_key(*key))
+            .count();
             fields.len() == 16 + optional
         })
         .ok_or(SupervisorError::InvalidState)?;
+    let idle_suspend_seconds = match fields.get("idle_suspend_seconds") {
+        None => 0,
+        Some(value) => value
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .ok_or(SupervisorError::InvalidState)?,
+    };
+    let idle_hibernate_seconds = match fields.get("idle_hibernate_seconds") {
+        None => 0,
+        Some(value) => value
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .ok_or(SupervisorError::InvalidState)?,
+    };
     let network_policy = match fields.get("network_policy") {
         None => String::new(),
         Some(value) => value
@@ -8600,6 +8688,8 @@ fn create_request_from_operation(
     };
     let request = v1::CreateEnvironmentRequest {
         snapshot: snapshots::from_payload(fields)?,
+        idle_suspend_seconds,
+        idle_hibernate_seconds,
         network_policy,
         name,
         source_path,

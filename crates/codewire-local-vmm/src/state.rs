@@ -917,7 +917,8 @@ pub(crate) const CHECKPOINTS_DIRECTORY: &str = "checkpoints";
 /// VMM's Landlock write directory.
 pub(crate) const HIBERNATE_DIRECTORY: &str = "hibernate";
 /// Regular 0600 files owned by the supervisor inside `vms/<id>/hibernate`.
-pub(crate) const HIBERNATE_FILES: [&str; 3] = ["record.json", "generation", "fallback.json"];
+pub(crate) const HIBERNATE_FILES: [&str; 4] =
+    ["record.json", "generation", "fallback.json", "idle.json"];
 /// `checkpoints/out-<operation>`: one capture the VMM and the runner write.
 pub(crate) const CHECKPOINT_OUT_PREFIX: &str = "out-";
 /// `checkpoints/in`: the VM checkpoint this boot restored from, which its

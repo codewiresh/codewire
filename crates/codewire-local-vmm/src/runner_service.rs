@@ -80,7 +80,7 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 /// The protocol a runner speaks, and the only one [`RunnerClient`] admits.
 /// A local credential authority reports it for the brokers it starts, which
 /// connect as that client (#5238).
-pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 17;
+pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 18;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =

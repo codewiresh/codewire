@@ -25,6 +25,9 @@ service LocalSupervisorService {
   // Hibernate a running or suspended Linux VM to disk and end its VMM
   // (#5529, protocol 31). Idempotent when already hibernated.
   rpc HibernateEnvironment(HibernateEnvironmentRequest) returns (HibernateEnvironmentResponse);
+  // Update idle suspend / hibernate timeouts on a local Linux VM in any state
+  // without restarting or waking it (#5529, protocol 32).
+  rpc UpdateEnvironmentIdlePolicy(UpdateEnvironmentIdlePolicyRequest) returns (Environment);
   rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
   rpc UpdateEnvironmentSources(UpdateEnvironmentSourcesRequest) returns (Operation);
@@ -607,6 +610,15 @@ message HibernateEnvironmentResponse {
   bool already_hibernated = 2;
 }
 
+message UpdateEnvironmentIdlePolicyRequest {
+  string name = 1;
+  string environment_id = 2;
+  // Absent leaves the setting unchanged; 0 disables it.
+  optional uint32 idle_suspend_seconds = 3;
+  // Absent leaves the setting unchanged; 0 disables it.
+  optional uint32 idle_hibernate_seconds = 4;
+}
+
 message HibernateVmRequest {
   string environment_id = 1;
   uint64 generation = 2;
@@ -931,6 +943,10 @@ message CreateEnvironmentRequest {
   // exactly. Every source, credential, host port and Mesh choice comes from
   // this request, never from the snapshot.
   SnapshotRestore snapshot = 20;
+  // Idle suspend timeout in seconds (0 disables; #5529, protocol 32).
+  uint32 idle_suspend_seconds = 21;
+  // Idle hibernate timeout in seconds (0 disables; #5529, protocol 32).
+  uint32 idle_hibernate_seconds = 22;
 }
 
 // What a create from a local disk snapshot takes from it.
@@ -1152,6 +1168,13 @@ message Environment {
   // Set when the most recent start could not restore from hibernate and fell
   // back to a clean cold boot from disks; cleared on the next start or stop.
   string hibernate_fallback_reason = 39;
+  // Configured idle suspend timeout in seconds (0 = off; #5529, protocol 32).
+  uint32 idle_suspend_seconds = 40;
+  // Configured idle hibernate timeout in seconds (0 = off; #5529, protocol 32).
+  uint32 idle_hibernate_seconds = 41;
+  // Non-empty when an automatic idle hibernate was skipped (e.g. insufficient
+  // free disk space on the state root).
+  string idle_hibernate_skip_reason = 42;
 }
 
 message ListEnvironmentsRequest {}
@@ -1279,6 +1302,12 @@ message RunnerInfo {
   string suspend_reason = 12;
   // How long the most recent wake from suspend took, in milliseconds.
   uint64 last_wake_duration_ms = 13;
+  // Live VMM process ID while running, for host-side idle CPU sampling
+  // (#5529, runner protocol 18). Zero when not running.
+  uint32 vmm_pid = 14;
+  // Unix timestamp in milliseconds of the most recent inbound host-port
+  // connection or forwarded bytes (#5529, runner protocol 18).
+  int64 last_host_port_activity_unix_ms = 15;
 }
 
 // The VM's egress broker is past its deadline, so its network worker refuses

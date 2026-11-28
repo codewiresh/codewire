@@ -259,6 +259,9 @@ impl EnvironmentRecord {
             hibernate_reason: String::new(),
             hibernate_memory_bytes: 0,
             hibernate_fallback_reason: String::new(),
+            idle_suspend_seconds: 0,
+            idle_hibernate_seconds: 0,
+            idle_hibernate_skip_reason: String::new(),
         }
     }
 

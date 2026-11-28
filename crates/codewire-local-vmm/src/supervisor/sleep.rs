@@ -110,6 +110,163 @@ impl Supervisor {
         self.core().complete_operation(&completed, &result)?;
         Ok(env_proto)
     }
+
+    /// Hibernates `name` while the caller already holds `quiet_lease(name)`,
+    /// shared by manual `HibernateEnvironment` and the idle sleep monitor.
+    pub(super) async fn hibernate_environment_under_lease(
+        &self,
+        name: &str,
+        expected_environment_id: Option<Uuid>,
+        reason: &str,
+    ) -> Result<v1::HibernateEnvironmentResponse, Status> {
+        self.reconcile(name).await.map_err(Status::from)?;
+        let environment = self.environment(name).map_err(Status::from)?;
+        require_expected_environment(&environment, expected_environment_id)?;
+        let engine_root = self.config.engine_root();
+        if environment.state == StoredEnvironmentState::Stopped {
+            if hibernate::is_hibernated(&engine_root, environment.id) {
+                let mut shown = self.core().environment_proto(name).map_err(Status::from)?;
+                hibernate::apply_to_environment(&engine_root, &mut shown);
+                return Ok(v1::HibernateEnvironmentResponse {
+                    environment: Some(shown),
+                    already_hibernated: true,
+                });
+            }
+            return Err(Status::failed_precondition(
+                "environment must be running or suspended to hibernate",
+            ));
+        }
+        if environment.state != StoredEnvironmentState::Running {
+            return Err(Status::failed_precondition(format!(
+                "environment {name} is {} and cannot be hibernated",
+                environment.state.as_str()
+            )));
+        }
+        if environment.staging_workspace_generation.is_some()
+            || environment.staging_artifact_generation.is_some()
+            || environment
+                .cw_runtime
+                .as_ref()
+                .is_some_and(|binding| binding.staging_catalog_generation.is_some())
+        {
+            return Err(Status::failed_precondition(format!(
+                "{name} has an unfinished workspace or runtime change; restart it first (`cw restart {name}`)"
+            )));
+        }
+        let artifact_generation = artifact_generation_for_boot(&environment, false)
+            .map_err(Status::from)?
+            .to_owned();
+        let engine = PrivateRoot::open(&engine_root)
+            .map_err(|error| Status::from(SupervisorError::from(error)))?;
+        RuntimeArtifactStore::create(&engine)
+            .map_err(artifact_store_error)
+            .map_err(Status::from)?
+            .open_generation(&artifact_generation)
+            .await
+            .map_err(artifact_store_error)
+            .map_err(Status::from)?
+            .require_guest_checkpoint_abi()
+            .map_err(|_| {
+                Status::failed_precondition(format!(
+                    "{name} runs a guest without VM sleep support; restart it once (`cw restart {name}`) to enable hibernate"
+                ))
+            })?;
+        let space_root = engine_root.clone();
+        let memory_mib = environment.memory_mib;
+        tokio::task::spawn_blocking(move || {
+            hibernate::require_hibernate_space(&space_root, memory_mib)
+        })
+        .await
+        .map_err(|_| Status::internal("hibernate disk space check failed"))??;
+
+        let _hibernating_guard = self.begin_hibernating(environment.id, reason);
+        let operation_id = Uuid::new_v4();
+        let mut client = self
+            .runner_client_for_artifact(name, &artifact_generation)
+            .await
+            .map_err(Status::from)?;
+        let reply = client
+            .hibernate_vm(environment.id, environment.generation, operation_id)
+            .await?;
+        let boot = reply
+            .boot
+            .as_ref()
+            .ok_or_else(|| Status::internal("runner returned no boot bindings for hibernate"))?;
+        let opt = |value: &str| (!value.is_empty()).then(|| value.to_owned());
+        let record = hibernate::LocalHibernateRecord {
+            schema_version: 1,
+            restore_generation: environment.generation,
+            operation_id,
+            environment_id: environment.id,
+            vsock_cid: reply.vsock_cid,
+            vmm_sha256: reply.vmm_sha256,
+            artifact_generation,
+            root_generation: reply.root_generation,
+            config_sha256: reply.config_sha256,
+            state_sha256: reply.state_sha256,
+            memory_bytes: reply.memory_bytes,
+            setup_disk_bytes: (reply.setup_disk_bytes != 0).then_some(reply.setup_disk_bytes),
+            vcpus: environment.vcpus,
+            memory_mib: environment.memory_mib,
+            disk_bytes: environment.disk_bytes,
+            docker_disk_bytes: environment.docker_disk_bytes,
+            skill_snapshot_sha256: opt(&boot.skill_snapshot_sha256),
+            environment_projection_sha256: opt(&boot.environment_projection_sha256),
+            managed_credential_clients: boot.managed_credential_clients.clone(),
+            docker: boot.docker,
+            cw_runtime_catalog_generation: opt(&boot.cw_runtime_catalog_generation),
+            daemon_vsock_port: boot.daemon_vsock_port,
+            intercept: boot.intercept,
+            host_cpu: checkpoints::local::host_identity().cpu,
+            hibernated_at_unix_ms: hibernate::now_unix_ms(),
+            hibernate_reason: reason.to_owned(),
+        };
+        let write_root = engine_root.clone();
+        let write_record = record.clone();
+        tokio::task::spawn_blocking(move || hibernate::write_record(&write_root, &write_record))
+            .await
+            .map_err(|_| Status::internal("hibernate metadata task failed"))?
+            .map_err(|error| {
+                Status::internal(format!("failed to persist hibernate metadata: {error}"))
+            })?;
+
+        // Flip durable state to Stopped immediately after persisting the
+        // hibernate record so concurrent `cw ls` / `cw info` readers observe
+        // `hibernated` instead of a transient `running` state while the
+        // broker and runner retire.
+        self.update_environment(name, |env| {
+            env.state = StoredEnvironmentState::Stopped;
+            Ok(())
+        })
+        .map_err(Status::from)?;
+
+        // Stop any broker and retire the runner immediately so the host
+        // reclaims all VMM, sidecar, and runner memory.
+        let _ = self.stop_environment_broker_if_present(&environment).await;
+        self.retire_existing_runner(name)
+            .await
+            .map_err(Status::from)?;
+        self.idle_tracker.forget(environment.id);
+        idle_sleep::clear_skip_reason(&engine_root, environment.id);
+        if !environment.host_ports.is_empty()
+            && let Some(supervisor) = self.this.upgrade()
+        {
+            self.hibernate_port_wakers
+                .arm(
+                    supervisor,
+                    environment.id,
+                    name.to_owned(),
+                    &environment.host_ports,
+                )
+                .await;
+        }
+        let mut shown = self.core().environment_proto(name).map_err(Status::from)?;
+        hibernate::apply_to_environment(&engine_root, &mut shown);
+        Ok(v1::HibernateEnvironmentResponse {
+            environment: Some(shown),
+            already_hibernated: false,
+        })
+    }
 }
 
 impl SupervisorRpc {
@@ -235,6 +392,9 @@ impl SupervisorRpc {
         let reply = client
             .resume_vm(environment.id, environment.generation)
             .await?;
+        if !reply.already_running {
+            self.supervisor.idle_tracker.note_activity(environment.id);
+        }
         let mut shown = self
             .supervisor
             .core()
@@ -265,166 +425,53 @@ impl SupervisorRpc {
             .await
             .map_err(Status::from)?;
         self.supervisor
-            .reconcile(&name)
+            .hibernate_environment_under_lease(&name, expected_environment_id, reason)
+            .await
+    }
+
+    pub(super) async fn update_environment_idle_policy_inner(
+        &self,
+        request: v1::UpdateEnvironmentIdlePolicyRequest,
+    ) -> Result<v1::Environment, Status> {
+        let name = validate_sleep_name(&request.name)?;
+        let expected_environment_id = optional_expected_environment_id(&request.environment_id)?;
+        if request.idle_suspend_seconds.is_none() && request.idle_hibernate_seconds.is_none() {
+            return Err(Status::invalid_argument(
+                "specify idle_suspend_seconds or idle_hibernate_seconds",
+            ));
+        }
+        self.start_drains()?;
+        let _lease = self
+            .supervisor
+            .quiet_lease(&name)
             .await
             .map_err(Status::from)?;
         let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
         let engine_root = self.supervisor.config.engine_root();
-        if environment.state == StoredEnvironmentState::Stopped {
-            if hibernate::is_hibernated(&engine_root, environment.id) {
-                let mut shown = self
-                    .supervisor
-                    .core()
-                    .environment_proto(&name)
-                    .map_err(Status::from)?;
-                hibernate::apply_to_environment(&engine_root, &mut shown);
-                return Ok(v1::HibernateEnvironmentResponse {
-                    environment: Some(shown),
-                    already_hibernated: true,
-                });
-            }
-            return Err(Status::failed_precondition(
-                "environment must be running or suspended to hibernate",
-            ));
-        }
-        if environment.state != StoredEnvironmentState::Running {
-            return Err(Status::failed_precondition(format!(
-                "environment {name} is {} and cannot be hibernated",
-                environment.state.as_str()
-            )));
-        }
-        if environment.staging_workspace_generation.is_some()
-            || environment.staging_artifact_generation.is_some()
-            || environment
-                .cw_runtime
-                .as_ref()
-                .is_some_and(|binding| binding.staging_catalog_generation.is_some())
-        {
-            return Err(Status::failed_precondition(format!(
-                "{name} has an unfinished workspace or runtime change; restart it first (`cw restart {name}`)"
-            )));
-        }
-        let artifact_generation = artifact_generation_for_boot(&environment, false)
-            .map_err(Status::from)?
-            .to_owned();
-        let engine = PrivateRoot::open(&engine_root)
-            .map_err(|error| Status::from(SupervisorError::from(error)))?;
-        RuntimeArtifactStore::create(&engine)
-            .map_err(artifact_store_error)
-            .map_err(Status::from)?
-            .open_generation(&artifact_generation)
-            .await
-            .map_err(artifact_store_error)
-            .map_err(Status::from)?
-            .require_guest_checkpoint_abi()
-            .map_err(|_| {
-                Status::failed_precondition(format!(
-                    "{name} runs a guest without VM sleep support; restart it once (`cw restart {name}`) to enable hibernate"
-                ))
-            })?;
-        let space_root = engine_root.clone();
-        let memory_mib = environment.memory_mib;
+        let current = idle_sleep::read_policy(&engine_root, environment.id);
+        let next_suspend = request
+            .idle_suspend_seconds
+            .unwrap_or(current.idle_suspend_seconds);
+        let next_hibernate = request
+            .idle_hibernate_seconds
+            .unwrap_or(current.idle_hibernate_seconds);
+        idle_sleep::validate_idle_policy(next_suspend, next_hibernate)?;
+        let updated = idle_sleep::IdlePolicy::new(next_suspend, next_hibernate);
+        let write_root = engine_root.clone();
+        let env_id = environment.id;
         tokio::task::spawn_blocking(move || {
-            hibernate::require_hibernate_space(&space_root, memory_mib)
+            idle_sleep::write_policy(&write_root, env_id, &updated)
         })
         .await
-        .map_err(|_| Status::internal("hibernate disk space check failed"))??;
-
-        let _hibernating_guard = self.supervisor.begin_hibernating(environment.id, reason);
-        let operation_id = Uuid::new_v4();
-        let mut client = self
-            .supervisor
-            .runner_client_for_artifact(&name, &artifact_generation)
-            .await
-            .map_err(Status::from)?;
-        let reply = client
-            .hibernate_vm(environment.id, environment.generation, operation_id)
-            .await?;
-        let boot = reply
-            .boot
-            .as_ref()
-            .ok_or_else(|| Status::internal("runner returned no boot bindings for hibernate"))?;
-        let opt = |value: &str| (!value.is_empty()).then(|| value.to_owned());
-        let record = hibernate::LocalHibernateRecord {
-            schema_version: 1,
-            restore_generation: environment.generation,
-            operation_id,
-            environment_id: environment.id,
-            vsock_cid: reply.vsock_cid,
-            vmm_sha256: reply.vmm_sha256,
-            artifact_generation,
-            root_generation: reply.root_generation,
-            config_sha256: reply.config_sha256,
-            state_sha256: reply.state_sha256,
-            memory_bytes: reply.memory_bytes,
-            setup_disk_bytes: (reply.setup_disk_bytes != 0).then_some(reply.setup_disk_bytes),
-            vcpus: environment.vcpus,
-            memory_mib: environment.memory_mib,
-            disk_bytes: environment.disk_bytes,
-            docker_disk_bytes: environment.docker_disk_bytes,
-            skill_snapshot_sha256: opt(&boot.skill_snapshot_sha256),
-            environment_projection_sha256: opt(&boot.environment_projection_sha256),
-            managed_credential_clients: boot.managed_credential_clients.clone(),
-            docker: boot.docker,
-            cw_runtime_catalog_generation: opt(&boot.cw_runtime_catalog_generation),
-            daemon_vsock_port: boot.daemon_vsock_port,
-            intercept: boot.intercept,
-            host_cpu: checkpoints::local::host_identity().cpu,
-            hibernated_at_unix_ms: hibernate::now_unix_ms(),
-            hibernate_reason: reason.to_owned(),
-        };
-        let write_root = engine_root.clone();
-        let write_record = record.clone();
-        tokio::task::spawn_blocking(move || hibernate::write_record(&write_root, &write_record))
-            .await
-            .map_err(|_| Status::internal("hibernate metadata task failed"))?
-            .map_err(|error| {
-                Status::internal(format!("failed to persist hibernate metadata: {error}"))
-            })?;
-
-        // Flip durable state to Stopped immediately after persisting the
-        // hibernate record so concurrent `cw ls` / `cw info` readers observe
-        // `hibernated` instead of a transient `running` state while the
-        // broker and runner retire.
-        self.supervisor
-            .update_environment(&name, |env| {
-                env.state = StoredEnvironmentState::Stopped;
-                Ok(())
-            })
-            .map_err(Status::from)?;
-
-        // Stop any broker and retire the runner immediately so the host
-        // reclaims all VMM, sidecar, and runner memory.
-        let _ = self
-            .supervisor
-            .stop_environment_broker_if_present(&environment)
-            .await;
-        self.supervisor
-            .retire_existing_runner(&name)
-            .await
-            .map_err(Status::from)?;
-        if !environment.host_ports.is_empty() {
-            self.supervisor
-                .hibernate_port_wakers
-                .arm(
-                    Arc::clone(&self.supervisor),
-                    environment.id,
-                    name.clone(),
-                    &environment.host_ports,
-                )
-                .await;
-        }
-        let mut shown = self
+        .map_err(|_| Status::internal("idle policy write task failed"))?
+        .map_err(|error| Status::internal(format!("failed to persist idle policy: {error}")))?;
+        let shown = self
             .supervisor
             .core()
             .environment_proto(&name)
             .map_err(Status::from)?;
-        hibernate::apply_to_environment(&engine_root, &mut shown);
-        Ok(v1::HibernateEnvironmentResponse {
-            environment: Some(shown),
-            already_hibernated: false,
-        })
+        Ok(runner_report::with_runner_report(&self.supervisor, shown).await)
     }
 }
 

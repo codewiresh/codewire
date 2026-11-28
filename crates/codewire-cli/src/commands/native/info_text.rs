@@ -63,6 +63,21 @@ pub(super) fn format_native_environment(
         output.push_str(&format!("Attention:   {row}\n"));
     }
     output.push_str(&format!("Generation:  {}\n", view.generation));
+    output.push_str(&format!(
+        "IdleSuspend: {}\n",
+        codewire_project::format_idle_suspend(
+            i32::try_from(view.idle_suspend_seconds).unwrap_or(0)
+        )
+    ));
+    output.push_str(&format!(
+        "IdleHibernate: {}\n",
+        codewire_project::format_idle_hibernate(
+            i32::try_from(view.idle_hibernate_seconds).unwrap_or(0)
+        )
+    ));
+    if let Some(skip) = &view.idle_hibernate_skip_reason {
+        output.push_str(&format!("Notice:      Idle hibernate skipped: {skip}\n"));
+    }
     if let Some(suspended_at) = &view.suspended_at {
         output.push_str(&format!("SuspendedAt: {suspended_at}\n"));
     }

@@ -371,6 +371,10 @@ impl Routes for SupervisorRoutes {
     }
 
     async fn daemon(&self, route: &Route) -> Option<DaemonSessionClient> {
+        self.rpc
+            .supervisor
+            .idle_tracker
+            .note_activity(route.environment_id);
         let generation = self.running_generation(route)?;
         let cached = self
             .clients

@@ -162,7 +162,7 @@ fn vm_dir(engine_root: &Path, environment_id: Uuid) -> PathBuf {
     engine_root.join("vms").join(environment_id.to_string())
 }
 
-fn hibernate_dir(engine_root: &Path, environment_id: Uuid) -> PathBuf {
+pub(in crate::supervisor) fn hibernate_dir(engine_root: &Path, environment_id: Uuid) -> PathBuf {
     vm_dir(engine_root, environment_id).join(HIBERNATE_DIRECTORY)
 }
 
@@ -338,11 +338,13 @@ pub(in crate::supervisor) fn clear_all(engine_root: &Path, environment_id: Uuid)
 }
 
 /// Populates `hibernated_at_unix_ms`, `hibernate_reason`,
-/// `hibernate_memory_bytes`, and `hibernate_fallback_reason` on `environment`.
+/// `hibernate_memory_bytes`, `hibernate_fallback_reason`, and idle sleep
+/// policy fields on `environment`.
 pub(in crate::supervisor) fn apply_to_environment(
     engine_root: &Path,
     environment: &mut v1::Environment,
 ) {
+    super::idle_sleep::apply_to_environment(engine_root, environment);
     let Ok(id) = Uuid::parse_str(&environment.id) else {
         return;
     };
@@ -500,7 +502,11 @@ fn admit_restore_inner(
     Ok(record)
 }
 
-fn write_private_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+pub(in crate::supervisor) fn write_private_atomic(
+    dir: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> io::Result<()> {
     let staged = dir.join(format!(".{name}.tmp"));
     let _ = fs::remove_file(&staged);
     let mut file = fs::OpenOptions::new()
@@ -516,19 +522,19 @@ fn write_private_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> 
     Ok(())
 }
 
-fn sync_dir(path: &Path) -> io::Result<()> {
+pub(in crate::supervisor) fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
-fn remove_dir_if_empty(path: &Path) {
+pub(in crate::supervisor) fn remove_dir_if_empty(path: &Path) {
     let _ = fs::remove_dir(path);
 }
 
-fn path_io(error: crate::host::path::PathError) -> io::Error {
+pub(in crate::supervisor) fn path_io(error: crate::host::path::PathError) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-fn read_regular_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+pub(in crate::supervisor) fn read_regular_nofollow(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_file() {
         return Err(io::Error::new(

@@ -774,6 +774,43 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
+    /// Update idle suspend / hibernate timeouts on a local Linux VM without
+    /// restarting or waking it (#5529, protocol 32).
+    pub async fn update_idle_policy(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+        idle_suspend_seconds: Option<u32>,
+        idle_hibernate_seconds: Option<u32>,
+    ) -> Result<v1::Environment, Status> {
+        if !self.supports(SupervisorFeature::LocalIdleSleep) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which does not support local idle sleep; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(self
+            .inner
+            .update_environment_idle_policy(v1::UpdateEnvironmentIdlePolicyRequest {
+                name: name.to_owned(),
+                environment_id: environment_id.to_owned(),
+                idle_suspend_seconds,
+                idle_hibernate_seconds,
+            })
+            .await?
+            .into_inner())
+    }
+
+    /// Requires a supervisor that supports local Linux VM idle sleep (#5529,
+    /// protocol 32) before creating an environment with idle sleep settings.
+    pub fn require_local_idle_sleep(&self) -> Result<(), Status> {
+        if !self.supports(SupervisorFeature::LocalIdleSleep) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which does not support local idle sleep; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn managed_runtime(
         &mut self,
         name: &str,

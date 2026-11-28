@@ -9,7 +9,7 @@ mod create_request;
 mod host_placement;
 pub(crate) mod idle_hibernate;
 mod idle_stop;
-mod idle_suspend;
+pub(crate) mod idle_suspend;
 pub(crate) mod info;
 pub(crate) mod lifecycle;
 mod platform_create;
@@ -1278,6 +1278,9 @@ pub(crate) struct UnifiedEnvironmentListEntry {
     /// A running sandbox whose VM is paused; `state` stays `running` (#5529).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub(crate) suspended: bool,
+    /// Why a local VM suspended: `idle` or `user` (#5529).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) suspend_reason: Option<String>,
     /// A stopped `standard` sandbox with a saved hibernate memory image;
     /// `state` stays `stopped` (#6647).
     #[serde(skip_serializing_if = "std::ops::Not::not")]

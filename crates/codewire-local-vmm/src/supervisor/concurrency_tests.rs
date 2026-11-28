@@ -50,6 +50,8 @@ fn stuck_create(
     let environment_id = environment.id;
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: name.to_owned(),
@@ -764,6 +766,8 @@ async fn a_create_reaching_its_journal_after_a_retire_began_is_refused() {
     let request_id = Uuid::new_v4();
     let request = v1::CreateEnvironmentRequest {
         snapshot: None,
+        idle_suspend_seconds: 0,
+        idle_hibernate_seconds: 0,
         network_policy: String::new(),
         implicit_vm_only: Vec::new(),
         name: "new".to_owned(),
