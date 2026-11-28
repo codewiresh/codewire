@@ -3482,6 +3482,134 @@ test("Agent tab refuses launch without account identity and uses accountId from 
   expect(launched[0].account_id).toBe("account-real");
 });
 
+test("Agent tab hydrates reply and settles out of Working when legacy turn_end arrives without deltas (#6715)", async ({ page }) => {
+  await transport(page);
+  const driverId = "88888888-8888-4888-8888-888888888888";
+  const agentSessionId = `session-${driverId}`;
+  const msgId = "99999999-9999-4999-8999-999999999999";
+  await page.route("**/_fragments/agents", async (route) => {
+    await route.fulfill({ json: { accountId: "account-a", supportedAgents: [], sessions: [] } });
+  });
+  await page.route("**/_actions/agents/launch", async (route) => {
+    await route.fulfill({
+      json: {
+        requestId: driverId,
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        messageId: msgId,
+        phase: "completed",
+        state: "running",
+        reason: "",
+      },
+    });
+  });
+  await page.route(`**/_fragments/agents/${agentSessionId}*`, async (route) => {
+    await route.fulfill({
+      json: {
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        current: { phase: "idle" },
+        messages: [
+          {
+            id: msgId,
+            text: "test are u there?",
+            state: "completed",
+            result: "Yes, I'm here. What do you want to work on?",
+            error: null,
+          },
+        ],
+      },
+    });
+  });
+  await page.route(`**/_events/agents/${agentSessionId}`, async (route) => {
+    const sse = [
+      `id: 10\nevent: turn_start\ndata: ${JSON.stringify({ v: 1, t: "turn_start", msg: msgId, legacy: true })}\n\n`,
+      `id: 20\nevent: turn_end\ndata: ${JSON.stringify({ v: 1, t: "turn_end", msg: msgId, state: "completed", legacy: true })}\n\n`,
+    ].join("");
+    await route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" },
+      body: sse,
+    });
+  });
+
+  await openFixture(page);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="agent"]').click();
+  const agentPanel = page.locator("[data-agent-tab-panel]:not([hidden])");
+  await agentPanel.locator("[data-agent-input]").fill("test are u there?");
+  await agentPanel.locator("[data-agent-send]").click();
+
+  await expect(agentPanel.locator(".cw-agent-prose")).toContainText("Yes, I'm here. What do you want to work on?");
+  await expect(agentPanel.locator(".cw-agent-activity")).toHaveAttribute("data-busy", "false");
+  await expect(agentPanel.locator("[data-agent-stop]")).toBeHidden();
+});
+
+test("Agent tab reconciles durable turn state on SSE resync instead of hanging at Working (#6715)", async ({ page }) => {
+  await transport(page);
+  const driverId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const agentSessionId = `session-${driverId}`;
+  const msgId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await page.route("**/_fragments/agents", async (route) => {
+    await route.fulfill({ json: { accountId: "account-a", supportedAgents: [], sessions: [] } });
+  });
+  await page.route("**/_actions/agents/launch", async (route) => {
+    await route.fulfill({
+      json: {
+        requestId: driverId,
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        messageId: msgId,
+        phase: "completed",
+        state: "running",
+        reason: "",
+      },
+    });
+  });
+  await page.route(`**/_fragments/agents/${agentSessionId}*`, async (route) => {
+    await route.fulfill({
+      json: {
+        sessionId: agentSessionId,
+        driverId,
+        launchGeneration: 1,
+        current: { phase: "idle" },
+        messages: [
+          {
+            id: msgId,
+            text: "Summarize status",
+            state: "completed",
+            result: "Recovered after resync.",
+            error: null,
+          },
+        ],
+      },
+    });
+  });
+  await page.route(`**/_events/agents/${agentSessionId}`, async (route) => {
+    const sse = [
+      `id: 10\nevent: turn_start\ndata: ${JSON.stringify({ v: 1, t: "turn_start", msg: msgId })}\n\n`,
+      `id: 500\nevent: resync\ndata: ${JSON.stringify({ nextOffset: 500 })}\n\n`,
+    ].join("");
+    await route.fulfill({
+      status: 200,
+      headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-store" },
+      body: sse,
+    });
+  });
+
+  await openFixture(page);
+  await page.locator('[data-home-tab-panel]:not([hidden]) [data-home-open="agent"]').click();
+  const agentPanel = page.locator("[data-agent-tab-panel]:not([hidden])");
+  await agentPanel.locator("[data-agent-input]").fill("Summarize status");
+  await agentPanel.locator("[data-agent-send]").click();
+
+  await expect(agentPanel.locator(".cw-agent-prose")).toContainText("Recovered after resync.");
+  await expect(agentPanel.locator(".cw-agent-activity")).toHaveAttribute("data-busy", "false");
+  await expect(agentPanel.locator("[data-agent-stop]")).toBeHidden();
+});
+
 // Status reads the page made, counted as the browser sends them.
 function readinessReads(page: Page) {
   const reads: string[] = [];

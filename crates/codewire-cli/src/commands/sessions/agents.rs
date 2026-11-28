@@ -3104,6 +3104,10 @@ struct ActiveTurn {
     interrupts: Vec<String>,
     usage: Option<Value>,
     acknowledged: bool,
+    /// True once at least one `delta` stream event has been emitted for this
+    /// turn, so `finish_turn` emits the final reply as a fallback delta only
+    /// when a provider completes without partial streaming events.
+    streamed_delta: bool,
     /// Why the turn failed before it ended, already free of credential
     /// material: noel's latest failed assistant message, or the refusal or
     /// final error Codex reported. A Codex turn with a failure the driver
@@ -3844,6 +3848,7 @@ impl Driver {
                 interrupts: Vec::new(),
                 usage: None,
                 acknowledged: false,
+                streamed_delta: false,
                 failure: None,
             });
             self.state.phase = DriverPhase::Busy;
@@ -4298,13 +4303,14 @@ impl Driver {
             }
             "item/agentMessage/delta" => {
                 if let (Some(delta), Some(active)) =
-                    (stream_events::codex_delta(&params), self.active.as_ref())
+                    (stream_events::codex_delta(&params), self.active.as_mut())
                 {
                     let turn = params.get("turnId").and_then(Value::as_str);
                     if turn.is_none()
                         || active.turn_id.is_none()
                         || active.turn_id.as_deref() == turn
                     {
+                        active.streamed_delta = true;
                         stream_events::emit_delta(&active.message_id, delta);
                     }
                 }
@@ -4495,10 +4501,11 @@ impl Driver {
             "stream_event" => {
                 if let (Some(event), Some(active)) = (
                     stream_events::claude_stream_event(&value),
-                    self.active.as_ref(),
+                    self.active.as_mut(),
                 ) {
                     match event {
                         stream_events::ClaudeStreamEvent::Delta(text) => {
+                            active.streamed_delta = true;
                             stream_events::emit_delta(&active.message_id, &text);
                         }
                         stream_events::ClaudeStreamEvent::ToolStart { id, kind, label } => {
@@ -4705,6 +4712,7 @@ impl Driver {
                     }
                     stream_events::AgyStreamEvent::Delta(delta) => {
                         if let Some(active) = self.active.as_mut() {
+                            active.streamed_delta = true;
                             stream_events::emit_delta(&active.message_id, &delta);
                             active.texts.push(delta);
                         }
@@ -4749,11 +4757,6 @@ impl Driver {
                     .get("response")
                     .and_then(Value::as_str)
                     .filter(|s| !s.is_empty());
-                if active.texts.is_empty()
-                    && let Some(final_response) = response
-                {
-                    stream_events::emit_delta(&active.message_id, final_response);
-                }
                 let text = response
                     .map(str::to_owned)
                     .or_else(|| (!active.texts.is_empty()).then(|| active.texts.concat()));
@@ -4842,6 +4845,11 @@ impl Driver {
             _ => {}
         }
         self.persist_state()?;
+        if !active.streamed_delta
+            && let Some(reply) = main.result.as_deref().filter(|reply| !reply.is_empty())
+        {
+            stream_events::emit_delta(&main.id, reply);
+        }
         stream_events::emit_turn_end(
             &main.id,
             main.state.name(),
@@ -4911,7 +4919,15 @@ impl Driver {
                     );
                 }
             }) {
-                Ok(record) if record.state.is_terminal() => self.notify_parent(&record).await,
+                Ok(record) if record.state.is_terminal() => {
+                    stream_events::emit_turn_end(
+                        &record.id,
+                        record.state.name(),
+                        record.error.as_deref(),
+                        None,
+                    );
+                    self.notify_parent(&record).await;
+                }
                 Ok(record) => log(format!(
                     "message {} stays {}",
                     record.id,
@@ -5660,6 +5676,7 @@ mod tests {
             interrupts: Vec::new(),
             usage: None,
             acknowledged: true,
+            streamed_delta: false,
             failure: None,
         };
         assert!(control_targets_turn(&record, &active));

@@ -18,6 +18,10 @@ use sha2::{Digest, Sha256};
 use crate::{Config, CredentialBridgeTransport, execution::ProcessExecution};
 
 pub(crate) const IMAGE: &str = "/codewire/bin/cw";
+/// Sealed runtime catalog mount inside a `standard` VM workspace container
+/// (`codewire_vmm_guest_probe::cw_runtime::CW_RUNTIME_ROOT`). The fixed
+/// `/codewire/bin/cw` launcher execs `<RUNTIME_ROOT>/<sha256>/cw` in place.
+const RUNTIME_ROOT: &str = "/run/codewire-runtime/cw";
 pub(crate) const HOME: &str = "/home/codewire";
 pub(crate) const STATE: &str = "/home/codewire/.local/state/codewire/platform-managed-agents-v1";
 const MAX_IMAGE: u64 = 256 * 1024 * 1024;
@@ -278,8 +282,15 @@ pub(crate) fn peer_packet(origin: &Origin, session: &str) -> Value {
 /// next Start seam. Here the independently admitted original support hash is
 /// compared against this fixed running image, with all reads held and bounded.
 pub(crate) struct ImagePin {
+    path: std::path::PathBuf,
     file: File,
     stamp: Stamp,
+    /// When the daemon runs from a `standard` VM sealed runtime payload under
+    /// [`RUNTIME_ROOT`], keep the fixed `/codewire/bin/cw` launcher pinned too
+    /// because launch projection and `Origin::command()` invoke it.
+    launcher: Option<(std::path::PathBuf, File, Stamp)>,
+    exe_path: std::path::PathBuf,
+    owner_uid: u32,
 }
 
 type Stamp = (u64, u64, u32, u32, u32, u64, u64, i64, i64, i64, i64);
@@ -299,13 +310,116 @@ fn stamp(m: &std::fs::Metadata) -> Stamp {
     )
 }
 
-fn safe_image(m: &std::fs::Metadata) -> bool {
+fn safe_image_for(m: &std::fs::Metadata, owner_uid: u32) -> bool {
     m.is_file()
-        && m.uid() == 0
+        && m.uid() == owner_uid
         && m.nlink() == 1
         && m.mode() & 0o6022 == 0
         && m.mode() & 0o111 != 0
         && (4..=MAX_IMAGE).contains(&m.len())
+}
+
+fn verify_dir_for(path: &Path, owner_uid: u32) -> Result<(), Error> {
+    let m = std::fs::symlink_metadata(path).map_err(|_| Error::Refused)?;
+    if !m.is_dir() || m.uid() != owner_uid || m.mode() & 0o022 != 0 {
+        return Err(Error::Refused);
+    }
+    Ok(())
+}
+
+fn verify_ancestors_for(path: &Path, root: &Path, owner_uid: u32) -> Result<(), Error> {
+    let Some(parent) = path.parent() else {
+        return Err(Error::Refused);
+    };
+    let relative = parent.strip_prefix(root).map_err(|_| Error::Refused)?;
+    let mut current = root.to_path_buf();
+    verify_dir_for(&current, owner_uid)?;
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => current.push(part),
+            _ => return Err(Error::Refused),
+        }
+        verify_dir_for(&current, owner_uid)?;
+    }
+    Ok(())
+}
+
+fn open_verified_file(
+    path: &Path,
+    root: &Path,
+    owner_uid: u32,
+) -> Result<(File, std::fs::Metadata), Error> {
+    verify_ancestors_for(path, root, owner_uid)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| Error::Refused)?;
+    let meta = file.metadata().map_err(|_| Error::Refused)?;
+    if !safe_image_for(&meta, owner_uid) {
+        return Err(Error::Refused);
+    }
+    Ok((file, meta))
+}
+
+fn hash_bounded_file(file: &mut File, expected_len: u64) -> Result<[u8; 32], Error> {
+    let mut hash = Sha256::new();
+    let mut bytes = [0; 64 * 1024];
+    let mut count = 0_u64;
+    loop {
+        let n = file.read(&mut bytes).map_err(|_| Error::Refused)?;
+        if n == 0 {
+            break;
+        }
+        count = count.checked_add(n as u64).ok_or(Error::Refused)?;
+        if count > MAX_IMAGE {
+            return Err(Error::Refused);
+        }
+        hash.update(&bytes[..n]);
+    }
+    if count != expected_len {
+        return Err(Error::Refused);
+    }
+    Ok(hash.finalize().into())
+}
+
+fn is_lower_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn hex_sha256(digest: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+/// Resolves a sealed `standard` VM runtime payload path of the exact shape
+/// `<runtime_root>/<64-lower-hex>/cw`. Rejects any other path, extra segments,
+/// or traversal components.
+fn runtime_catalog_payload(
+    exe_link: &Path,
+    runtime_root: &Path,
+) -> Option<(std::path::PathBuf, String)> {
+    let relative = exe_link.strip_prefix(runtime_root).ok()?;
+    let mut parts = relative.components();
+    let digest = match parts.next()? {
+        std::path::Component::Normal(part) => part.to_str()?,
+        _ => return None,
+    };
+    let leaf = match parts.next()? {
+        std::path::Component::Normal(part) => part.to_str()?,
+        _ => return None,
+    };
+    if parts.next().is_some() || leaf != "cw" || !is_lower_sha256_hex(digest) {
+        return None;
+    }
+    Some((runtime_root.join(digest).join("cw"), digest.to_owned()))
 }
 
 pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(), Error> {
@@ -342,107 +456,124 @@ pub(crate) fn validate_selection(config: &Config, origin: &Origin) -> Result<(),
 
 impl ImagePin {
     pub(crate) fn identity() -> Result<([u8; 32], u64), Error> {
-        for path in ["/", "/codewire", "/codewire/bin"] {
-            let m = std::fs::symlink_metadata(path).map_err(|_| Error::Refused)?;
-            if !m.is_dir() || m.uid() != 0 || m.mode() & 0o022 != 0 {
-                return Err(Error::Refused);
-            }
-        }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(IMAGE)
-            .map_err(|_| Error::Refused)?;
-        let before = file.metadata().map_err(|_| Error::Refused)?;
-        if !safe_image(&before)
-            || stamp(&before)
-                != stamp(&std::fs::metadata("/proc/self/exe").map_err(|_| Error::Refused)?)
-        {
-            return Err(Error::Refused);
-        }
-        let mut hash = Sha256::new();
-        let mut bytes = [0; 64 * 1024];
-        let mut count = 0;
-        loop {
-            let n = file.read(&mut bytes).map_err(|_| Error::Refused)?;
-            if n == 0 {
-                break;
-            }
-            count += n as u64;
-            if count > MAX_IMAGE {
-                return Err(Error::Refused);
-            }
-            hash.update(&bytes[..n]);
-        }
-        let pin = Self {
-            file,
-            stamp: stamp(&before),
-        };
-        pin.check()?;
-        if count != before.len() {
-            return Err(Error::Refused);
-        }
-        Ok((hash.finalize().into(), count))
+        let exe_link = std::fs::read_link("/proc/self/exe").map_err(|_| Error::Refused)?;
+        let (_pin, hash, size) = Self::open_running(
+            Path::new("/"),
+            Path::new(IMAGE),
+            Path::new(RUNTIME_ROOT),
+            Path::new("/proc/self/exe"),
+            &exe_link,
+            0,
+            None,
+        )?;
+        Ok((hash, size))
     }
+
     pub(crate) fn admit(config: &Config, origin: &Origin) -> Result<Self, Error> {
         validate_selection(config, origin)?;
         if unsafe { libc::geteuid() } != 1000 || unsafe { libc::getegid() } != 1000 {
             return Err(Error::Refused);
         }
-        // The fixed image ancestry cannot be replaced by a workload owner.
-        for path in ["/", "/codewire", "/codewire/bin"] {
-            let meta = std::fs::symlink_metadata(path).map_err(|_| Error::Refused)?;
-            if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
-                return Err(Error::Refused);
-            }
-        }
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(IMAGE)
-            .map_err(|_| Error::Refused)?;
-        let meta = file.metadata().map_err(|_| Error::Refused)?;
-        let running = std::fs::metadata("/proc/self/exe").map_err(|_| Error::Refused)?;
-        if !safe_image(&meta)
-            || stamp(&meta) != stamp(&running)
-            || meta.len() != origin.support_image_size
-        {
-            return Err(Error::Refused);
-        }
-        let mut hash = Sha256::new();
-        let mut buffer = [0; 64 * 1024];
-        let mut total = 0_u64;
-        loop {
-            let count = file.read(&mut buffer).map_err(|_| Error::Refused)?;
-            if count == 0 {
-                break;
-            }
-            total = total.checked_add(count as u64).ok_or(Error::Refused)?;
-            if total > MAX_IMAGE {
-                return Err(Error::Refused);
-            }
-            hash.update(&buffer[..count]);
-        }
-        let actual: [u8; 32] = hash.finalize().into();
+        let exe_link = std::fs::read_link("/proc/self/exe").map_err(|_| Error::Refused)?;
+        let (pin, actual, total) = Self::open_running(
+            Path::new("/"),
+            Path::new(IMAGE),
+            Path::new(RUNTIME_ROOT),
+            Path::new("/proc/self/exe"),
+            &exe_link,
+            0,
+            Some(origin.support_image_size),
+        )?;
         if total != origin.support_image_size || actual != origin.support_image_sha256 {
             return Err(Error::Refused);
         }
-        let pin = Self {
-            file,
-            stamp: stamp(&meta),
+        Ok(pin)
+    }
+
+    fn open_running(
+        root: &Path,
+        image_path: &Path,
+        runtime_root: &Path,
+        exe_path: &Path,
+        exe_link: &Path,
+        owner_uid: u32,
+        expected_size: Option<u64>,
+    ) -> Result<(Self, [u8; 32], u64), Error> {
+        // The fixed `/codewire/bin/cw` path is always verified (direct daemon
+        // binary on Kata Pods, or the sealed runtime launcher on `standard`
+        // VM Pods where launch projection and `Origin::command()` invoke it).
+        let (mut image_file, image_meta) = open_verified_file(image_path, root, owner_uid)?;
+        let running = std::fs::metadata(exe_path).map_err(|_| Error::Refused)?;
+        let (pin, hash, size) = if stamp(&image_meta) == stamp(&running) {
+            if expected_size.is_some_and(|size| image_meta.len() != size) {
+                return Err(Error::Refused);
+            }
+            let hash = hash_bounded_file(&mut image_file, image_meta.len())?;
+            let size = image_meta.len();
+            let pin = Self {
+                path: image_path.to_path_buf(),
+                file: image_file,
+                stamp: stamp(&image_meta),
+                launcher: None,
+                exe_path: exe_path.to_path_buf(),
+                owner_uid,
+            };
+            (pin, hash, size)
+        } else {
+            // `standard` VM Pods bind-mount the tiny runtime launcher at
+            // `/codewire/bin/cw` and exec the sealed payload from
+            // `/run/codewire-runtime/cw/<sha256>/cw`. Admit only that exact
+            // sealed layout and verify the payload's SHA-256 matches its
+            // directory name.
+            let Some((payload_path, expected_hex)) =
+                runtime_catalog_payload(exe_link, runtime_root)
+            else {
+                return Err(Error::Refused);
+            };
+            let (mut payload_file, payload_meta) =
+                open_verified_file(&payload_path, root, owner_uid)?;
+            if stamp(&payload_meta) != stamp(&running)
+                || expected_size.is_some_and(|size| payload_meta.len() != size)
+            {
+                return Err(Error::Refused);
+            }
+            let hash = hash_bounded_file(&mut payload_file, payload_meta.len())?;
+            if hex_sha256(&hash) != expected_hex {
+                return Err(Error::Refused);
+            }
+            let size = payload_meta.len();
+            let pin = Self {
+                path: payload_path,
+                file: payload_file,
+                stamp: stamp(&payload_meta),
+                launcher: Some((image_path.to_path_buf(), image_file, stamp(&image_meta))),
+                exe_path: exe_path.to_path_buf(),
+                owner_uid,
+            };
+            (pin, hash, size)
         };
         pin.check()?;
-        Ok(pin)
+        Ok((pin, hash, size))
     }
 
     pub(crate) fn check(&self) -> Result<(), Error> {
         for meta in [
             self.file.metadata().map_err(|_| Error::Unknown)?,
-            std::fs::symlink_metadata(IMAGE).map_err(|_| Error::Unknown)?,
-            std::fs::metadata("/proc/self/exe").map_err(|_| Error::Unknown)?,
+            std::fs::symlink_metadata(&self.path).map_err(|_| Error::Unknown)?,
+            std::fs::metadata(&self.exe_path).map_err(|_| Error::Unknown)?,
         ] {
-            if !safe_image(&meta) || stamp(&meta) != self.stamp {
+            if !safe_image_for(&meta, self.owner_uid) || stamp(&meta) != self.stamp {
                 return Err(Error::Unknown);
+            }
+        }
+        if let Some((launcher_path, launcher_file, launcher_stamp)) = &self.launcher {
+            for meta in [
+                launcher_file.metadata().map_err(|_| Error::Unknown)?,
+                std::fs::symlink_metadata(launcher_path).map_err(|_| Error::Unknown)?,
+            ] {
+                if !safe_image_for(&meta, self.owner_uid) || stamp(&meta) != *launcher_stamp {
+                    return Err(Error::Unknown);
+                }
             }
         }
         Ok(())
@@ -759,5 +890,179 @@ mod tests {
             assert_eq!(serde_json::from_str::<Route>(wire).unwrap(), route);
         }
         assert!(serde_json::from_str::<Route>("\"open_ai\"").is_err());
+    }
+
+    #[test]
+    fn image_pin_admits_direct_kata_image_and_standard_vm_runtime_catalog_payload() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Run inside a private directory under `/tmp` where every ancestor we
+        // create is owned by the current UID (and `/` + `/tmp` may be owned by
+        // root, so test `runtime_catalog_payload` + file/launcher checks directly
+        // and verify `open_running` via a mock root-like tree when uid == 0 or
+        // via a dedicated fixture rooted at the current user's directory).
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let image_dir = root.join("codewire/bin");
+        let runtime_root = root.join("run/codewire-runtime/cw");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        std::fs::create_dir_all(&runtime_root).unwrap();
+
+        let payload_bytes = b"#!/bin/sh\necho standard-vm-cw-payload\n";
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let payload_hex = hex_sha256(&payload_digest);
+        let payload_dir = runtime_root.join(&payload_hex);
+        std::fs::create_dir_all(&payload_dir).unwrap();
+
+        let launcher_path = image_dir.join("cw");
+        let payload_path = payload_dir.join("cw");
+        std::fs::write(&launcher_path, b"#!/bin/sh\nexec payload\n").unwrap();
+        std::fs::write(&payload_path, payload_bytes).unwrap();
+        std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&payload_path, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Pure path grammar tests for `runtime_catalog_payload`.
+        assert_eq!(
+            runtime_catalog_payload(&payload_path, &runtime_root),
+            Some((payload_path.clone(), payload_hex.clone()))
+        );
+        assert_eq!(
+            runtime_catalog_payload(&runtime_root.join("cw"), &runtime_root),
+            None
+        );
+        assert_eq!(
+            runtime_catalog_payload(&runtime_root.join("not-hex/cw"), &runtime_root),
+            None
+        );
+        assert_eq!(
+            runtime_catalog_payload(
+                &runtime_root.join(format!("{}/other", payload_hex)),
+                &runtime_root
+            ),
+            None
+        );
+        assert_eq!(
+            runtime_catalog_payload(
+                &runtime_root.join(format!("{}/sub/cw", payload_hex)),
+                &runtime_root
+            ),
+            None
+        );
+        assert_eq!(
+            runtime_catalog_payload(
+                &runtime_root.join(format!("{}/cw", payload_hex.to_uppercase())),
+                &runtime_root
+            ),
+            None
+        );
+        assert_eq!(
+            runtime_catalog_payload(Path::new("/usr/local/bin/cw"), &runtime_root),
+            None
+        );
+
+        let uid = unsafe { libc::geteuid() };
+        // Ensure fixture root and directories are not group/other writable.
+        for dir in [
+            root,
+            &root.join("codewire"),
+            &image_dir,
+            &root.join("run"),
+            &root.join("run/codewire-runtime"),
+            &runtime_root,
+            &payload_dir,
+        ] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // Case 1: Kata layout (`/codewire/bin/cw` == `/proc/self/exe`).
+        let (pin, hash, size) = ImagePin::open_running(
+            root,
+            &launcher_path,
+            &runtime_root,
+            &launcher_path,
+            &launcher_path,
+            uid,
+            None,
+        )
+        .expect("Kata direct image must be admitted");
+        assert_eq!(size, 23);
+        assert_eq!(
+            hash,
+            <[u8; 32]>::from(Sha256::digest(b"#!/bin/sh\nexec payload\n"))
+        );
+        assert!(pin.launcher.is_none());
+        pin.check().unwrap();
+
+        // Case 2: Standard VM layout (launcher at `/codewire/bin/cw`,
+        // running binary at `/run/codewire-runtime/cw/<sha256>/cw`).
+        let (pin, hash, size) = ImagePin::open_running(
+            root,
+            &launcher_path,
+            &runtime_root,
+            &payload_path,
+            &payload_path,
+            uid,
+            Some(payload_bytes.len() as u64),
+        )
+        .expect("Standard VM sealed runtime payload must be admitted");
+        assert_eq!(hash, payload_digest);
+        assert_eq!(size, payload_bytes.len() as u64);
+        assert!(pin.launcher.is_some());
+        pin.check().unwrap();
+
+        // Case 3: Digest mismatch between directory name and file contents is refused.
+        let wrong_hex = "a".repeat(64);
+        let wrong_dir = runtime_root.join(&wrong_hex);
+        std::fs::create_dir_all(&wrong_dir).unwrap();
+        std::fs::set_permissions(&wrong_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let wrong_path = wrong_dir.join("cw");
+        std::fs::write(&wrong_path, payload_bytes).unwrap();
+        std::fs::set_permissions(&wrong_path, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(matches!(
+            ImagePin::open_running(
+                root,
+                &launcher_path,
+                &runtime_root,
+                &wrong_path,
+                &wrong_path,
+                uid,
+                None
+            ),
+            Err(Error::Refused)
+        ));
+
+        // Case 4: Arbitrary path outside `runtime_root` is refused.
+        let rogue = root.join("rogue-cw");
+        std::fs::write(&rogue, payload_bytes).unwrap();
+        std::fs::set_permissions(&rogue, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(matches!(
+            ImagePin::open_running(
+                root,
+                &launcher_path,
+                &runtime_root,
+                &rogue,
+                &rogue,
+                uid,
+                None
+            ),
+            Err(Error::Refused)
+        ));
+
+        // Case 5: Group/other writable binary is refused, and replacing the
+        // launcher invalidates an already-admitted pin's `check()`.
+        std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(matches!(pin.check(), Err(Error::Unknown)));
+        assert!(matches!(
+            ImagePin::open_running(
+                root,
+                &launcher_path,
+                &runtime_root,
+                &payload_path,
+                &payload_path,
+                uid,
+                None
+            ),
+            Err(Error::Refused)
+        ));
     }
 }

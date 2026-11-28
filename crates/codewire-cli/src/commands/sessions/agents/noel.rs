@@ -900,6 +900,7 @@ impl Driver {
             interrupts: Vec::new(),
             usage: None,
             acknowledged: true,
+            streamed_delta: false,
             failure: None,
         });
         self.state.phase = DriverPhase::Busy;
@@ -929,6 +930,7 @@ impl Driver {
             interrupts: aside.interrupts,
             usage: None,
             acknowledged: true,
+            streamed_delta: false,
             failure: None,
         });
         self.finish_turn(status, result, error, None).await
@@ -1656,6 +1658,7 @@ mod tests {
                 interrupts: Vec::new(),
                 usage: None,
                 acknowledged: false,
+                streamed_delta: false,
                 failure: None,
             });
             self.driver.state.active_message_id = Some(record.id.clone());

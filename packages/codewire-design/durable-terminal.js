@@ -1391,6 +1391,72 @@
         scrollThreadIfNearBottom();
       }
 
+      const TERMINAL_AGENT_STATES = new Set(["completed", "error", "failed", "interrupted", "unknown"]);
+
+      async function fetchAgentThread() {
+        if (!tab.agentSession || tab.disposed) return null;
+        try {
+          const query = new URLSearchParams({
+            driver_id: tab.agentSession.driverId,
+            launch_generation: String(tab.agentSession.launchGeneration),
+          });
+          const res = await fetch(
+            `${basePrefix}/_fragments/agents/${encodeURIComponent(tab.agentSession.sessionId)}?${query}`,
+            { credentials: "same-origin", headers: { Accept: "application/json" } },
+          );
+          if (!res.ok || tab.disposed) return null;
+          return await res.json();
+        } catch {
+          return null;
+        }
+      }
+
+      async function hydrateAndSettleTurn(turn, msgId, fallbackState, fallbackError, forceHydrate) {
+        if (!turn || turn.settled) return;
+        if (!forceHydrate && turn.text) {
+          settleTurn(turn, fallbackState, fallbackError);
+          return;
+        }
+        if (turn.hydrating) return;
+        turn.hydrating = true;
+        try {
+          const data = await fetchAgentThread();
+          if (tab.disposed || turn.settled) return;
+          const messages = Array.isArray(data?.messages) ? data.messages : [];
+          const match = messages.find((m) => m && m.id === msgId) || messages[messages.length - 1];
+          if (match) {
+            if (match.result && !turn.text) turn.text = match.result;
+            settleTurn(
+              turn,
+              TERMINAL_AGENT_STATES.has(match.state) ? match.state : fallbackState,
+              match.error || fallbackError,
+            );
+            return;
+          }
+          settleTurn(turn, fallbackState, fallbackError);
+        } finally {
+          turn.hydrating = false;
+        }
+      }
+
+      async function reconcileActiveTurn() {
+        const turn = activeTurn;
+        if (!turn || turn.settled || turn.reconciling || !tab.agentSession || tab.disposed) return;
+        turn.reconciling = true;
+        try {
+          const data = await fetchAgentThread();
+          if (tab.disposed || turn.settled) return;
+          const messages = Array.isArray(data?.messages) ? data.messages : [];
+          const match = messages.find((m) => m && m.id === turn.messageId);
+          if (match && (TERMINAL_AGENT_STATES.has(match.state) || match.result || match.error)) {
+            if (match.result && !turn.text) turn.text = match.result;
+            settleTurn(turn, match.state || "completed", match.error);
+          }
+        } finally {
+          turn.reconciling = false;
+        }
+      }
+
       function attachAgentStream(sessionId) {
         if (tab.eventSource) {
           tab.eventSource.close();
@@ -1445,7 +1511,23 @@
           const data = parseData(event);
           if (!data || isSettledMessage(data.msg)) return;
           const turn = resolveTurn(data.msg);
-          settleTurn(turn, data.state || "completed", data.error);
+          void hydrateAndSettleTurn(
+            turn,
+            data.msg,
+            data.state || "completed",
+            data.error,
+            Boolean(data.legacy),
+          );
+        });
+        source.addEventListener("resync", () => {
+          if (tab.busy && activeTurn && !activeTurn.settled) {
+            void reconcileActiveTurn();
+          }
+        });
+        source.addEventListener("error", () => {
+          if (tab.busy && activeTurn && !activeTurn.settled) {
+            void reconcileActiveTurn();
+          }
         });
         source.addEventListener("status", (event) => {
           const data = parseData(event);
@@ -1477,29 +1559,23 @@
         if (projectLabel) projectLabel.textContent = tab.agentSession.workingDir;
         lockSessionContext();
         activateThreadView();
-        try {
-          const query = new URLSearchParams({
-            driver_id: tab.agentSession.driverId,
-            launch_generation: String(tab.agentSession.launchGeneration),
-          });
-          const res = await fetch(
-            `${basePrefix}/_fragments/agents/${encodeURIComponent(session.sessionId)}?${query}`,
-            { credentials: "same-origin", headers: { Accept: "application/json" } },
-          );
-          if (res.ok) {
-            const data = await res.json();
-            for (const msg of data.messages || []) {
-              if (msg.text) appendUserMessage(msg.text);
-              const terminal = ["completed", "error", "failed", "interrupted", "unknown"].includes(msg.state);
-              if (msg.result || msg.error || terminal) {
-                const turn = createAssistantTurn(msg.id || clientUuid(), tab.agentSession.agentName);
-                turn.text = msg.result || "";
-                settleTurn(turn, msg.state || "completed", msg.error);
-              }
+        const data = await fetchAgentThread();
+        if (data && !tab.disposed) {
+          for (const msg of data.messages || []) {
+            if (msg.text) appendUserMessage(msg.text);
+            const terminal = TERMINAL_AGENT_STATES.has(msg.state);
+            if (msg.result || msg.error || terminal) {
+              const turn = createAssistantTurn(msg.id || clientUuid(), tab.agentSession.agentName);
+              turn.text = msg.result || "";
+              settleTurn(turn, msg.state || "completed", msg.error);
+            } else if (msg.state === "running" || msg.state === "accepted") {
+              tab.busy = true;
+              createAssistantTurn(msg.id || clientUuid(), tab.agentSession.agentName);
+              syncBusyControls();
             }
           }
-        } catch { /* Attach live stream even if history read failed. */ }
-        attachAgentStream(session.sessionId);
+        }
+        if (!tab.disposed) attachAgentStream(session.sessionId);
       }
 
       function syncTrigger() {

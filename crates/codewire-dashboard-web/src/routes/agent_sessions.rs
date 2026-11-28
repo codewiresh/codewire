@@ -46,6 +46,7 @@ use crate::{
 };
 
 const STREAM_EVENT_PREFIX: &str = "\x1eCW_AGENT_V1 ";
+const LEGACY_DRIVER_MESSAGE_PREFIX: &str = "cw agent driver: message ";
 const HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 const STREAM_LIFETIME: Duration = Duration::from_secs(30 * 60);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
@@ -746,15 +747,15 @@ async fn read_one_message(
     serde_json::from_slice(&response.into_owned().record_json).map_err(|_| ())
 }
 
-/// Line-oriented extractor for `\x1eCW_AGENT_V1 {...}\n` events from raw
-/// session stdout chunks. Non-prefixed lines and invalid/oversized payloads
-/// are discarded safely.
-struct EventLineParser {
+/// Line-oriented extractor for raw session byte chunks. Keeps an independent
+/// bounded line buffer per stream so interleaved stdout and stderr chunks
+/// never corrupt partial lines.
+struct LineBuffer {
     buffer: Vec<u8>,
     dropping_oversized_line: bool,
 }
 
-impl EventLineParser {
+impl LineBuffer {
     fn new() -> Self {
         Self {
             buffer: Vec::new(),
@@ -762,12 +763,20 @@ impl EventLineParser {
         }
     }
 
-    fn push(&mut self, chunk_start: u64, bytes: &[u8]) -> Vec<(&'static str, String, u64)> {
+    fn push<F>(
+        &mut self,
+        chunk_start: u64,
+        bytes: &[u8],
+        mut parse: F,
+    ) -> Vec<(&'static str, String, u64)>
+    where
+        F: FnMut(&[u8]) -> Option<(&'static str, String)>,
+    {
         let mut events = Vec::new();
         for (index, &byte) in bytes.iter().enumerate() {
             if byte == b'\n' {
                 if !self.dropping_oversized_line
-                    && let Some((event_type, canonical)) = parse_event_line(&self.buffer)
+                    && let Some((event_type, canonical)) = parse(&self.buffer)
                 {
                     let end_offset = chunk_start.saturating_add(index as u64).saturating_add(1);
                     events.push((event_type, canonical, end_offset));
@@ -787,6 +796,46 @@ impl EventLineParser {
             self.buffer.push(byte);
         }
         events
+    }
+}
+
+/// Extracts live structured v1 events from stdout (`\x1eCW_AGENT_V1 {...}\n`)
+/// and, for older sandboxes whose `cw` driver predates v1 stdout events,
+/// falls back to the driver's deterministic stderr lifecycle lines
+/// (`cw agent driver: message <uuid> running|completed|error|failed|interrupted|unknown`)
+/// until any v1 stdout event is observed.
+struct AgentStreamParser {
+    stdout: LineBuffer,
+    stderr: LineBuffer,
+    seen_v1_events: bool,
+}
+
+impl AgentStreamParser {
+    fn new() -> Self {
+        Self {
+            stdout: LineBuffer::new(),
+            stderr: LineBuffer::new(),
+            seen_v1_events: false,
+        }
+    }
+
+    fn push_stdout(&mut self, chunk_start: u64, bytes: &[u8]) -> Vec<(&'static str, String, u64)> {
+        let events = self.stdout.push(chunk_start, bytes, parse_event_line);
+        if !events.is_empty() {
+            self.seen_v1_events = true;
+        }
+        events
+    }
+
+    fn push_stderr(&mut self, chunk_start: u64, bytes: &[u8]) -> Vec<(&'static str, String, u64)> {
+        if self.seen_v1_events {
+            // Drain/reset line state without emitting duplicate events once v1
+            // structured stdout events are active.
+            let _ = self.stderr.push(chunk_start, bytes, |_| None);
+            return Vec::new();
+        }
+        self.stderr
+            .push(chunk_start, bytes, parse_legacy_driver_line)
     }
 }
 
@@ -810,6 +859,40 @@ fn parse_event_line(raw: &[u8]) -> Option<(&'static str, String)> {
     };
     let canonical = serde_json::to_string(&parsed).ok()?;
     Some((event_type, canonical))
+}
+
+fn parse_legacy_driver_line(raw: &[u8]) -> Option<(&'static str, String)> {
+    let line = std::str::from_utf8(raw).ok()?.trim_end_matches('\r');
+    let rest = line.strip_prefix(LEGACY_DRIVER_MESSAGE_PREFIX)?;
+    let (message_id, tail) = rest.split_once(' ')?;
+    if !canonical_environment_id(message_id) {
+        return None;
+    }
+    if tail == "running" || tail.starts_with("running:") {
+        let payload = json!({
+            "v": 1,
+            "t": "turn_start",
+            "msg": message_id,
+            "legacy": true,
+        });
+        return Some(("turn_start", payload.to_string()));
+    }
+    let state = match tail {
+        "completed" => "completed",
+        "error" => "error",
+        "failed" => "failed",
+        "interrupted" => "interrupted",
+        "unknown" => "unknown",
+        _ => return None,
+    };
+    let payload = json!({
+        "v": 1,
+        "t": "turn_end",
+        "msg": message_id,
+        "state": state,
+        "legacy": true,
+    });
+    Some(("turn_end", payload.to_string()))
 }
 
 fn sse_frame(id: Option<u64>, event: &str, data: &str) -> Bytes {
@@ -883,7 +966,7 @@ pub(super) async fn events(
     let (frames, receiver) = mpsc::channel::<Bytes>(64);
     tokio::spawn(async move {
         let _ = tokio::time::timeout(STREAM_LIFETIME, async move {
-            let mut parser = EventLineParser::new();
+            let mut parser = AgentStreamParser::new();
             if !forward_attach_response(&first, &mut parser, &frames).await {
                 return;
             }
@@ -921,16 +1004,22 @@ pub(super) async fn events(
 
 async fn forward_attach_response(
     response: &AttachSessionResponse,
-    parser: &mut EventLineParser,
+    parser: &mut AgentStreamParser,
     frames: &mpsc::Sender<Bytes>,
 ) -> bool {
     match response.event.as_ref() {
         Some(attach_session_response::Event::Output(chunk)) => {
-            if chunk.stream.to_i32() != EnvironmentSessionOutputStream::Stdout as i32 {
-                return true;
-            }
             let chunk_start = chunk.next_offset.saturating_sub(chunk.data.len() as u64);
-            for (event_type, data, end_offset) in parser.push(chunk_start, &chunk.data) {
+            let events = match chunk.stream.to_i32() {
+                v if v == EnvironmentSessionOutputStream::Stdout as i32 => {
+                    parser.push_stdout(chunk_start, &chunk.data)
+                }
+                v if v == EnvironmentSessionOutputStream::Stderr as i32 => {
+                    parser.push_stderr(chunk_start, &chunk.data)
+                }
+                _ => return true,
+            };
+            for (event_type, data, end_offset) in events {
                 let frame = sse_frame(Some(end_offset), event_type, &data);
                 if frames.send(frame).await.is_err() {
                     return false;
@@ -960,15 +1049,15 @@ mod tests {
 
     #[test]
     fn event_line_parser_extracts_split_v1_events_and_ignores_other_lines() {
-        let mut parser = EventLineParser::new();
+        let mut parser = AgentStreamParser::new();
         let log_line = b"plain log line\n";
-        assert!(parser.push(0, log_line).is_empty());
+        assert!(parser.push_stdout(0, log_line).is_empty());
         let part1 = format!("{STREAM_EVENT_PREFIX}{{\"v\":1,\"t\":\"delta\",");
         let part2 = "\"msg\":\"m1\",\"text\":\"hi\"}\n";
         let offset1 = log_line.len() as u64;
-        assert!(parser.push(offset1, part1.as_bytes()).is_empty());
+        assert!(parser.push_stdout(offset1, part1.as_bytes()).is_empty());
         let offset2 = offset1 + part1.len() as u64;
-        let events = parser.push(offset2, part2.as_bytes());
+        let events = parser.push_stdout(offset2, part2.as_bytes());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "delta");
         assert_eq!(events[0].2, offset2 + part2.len() as u64);
@@ -991,8 +1080,8 @@ mod tests {
 
         // Chunk 1 carries all of event A plus the first half of event B.
         let chunk1_end = event_a.len() + split_at;
-        let mut parser = EventLineParser::new();
-        let first_events = parser.push(0, &full_stream[..chunk1_end]);
+        let mut parser = AgentStreamParser::new();
+        let first_events = parser.push_stdout(0, &full_stream[..chunk1_end]);
         assert_eq!(first_events.len(), 1);
         assert_eq!(first_events[0].0, "delta");
         let resume_id = first_events[0].2;
@@ -1005,8 +1094,8 @@ mod tests {
 
         // Reconnecting with Last-Event-ID = resume_id replays from byte event_a.len()
         // and recovers event B completely without dropping its prefix.
-        let mut reconnected = EventLineParser::new();
-        let resumed_events = reconnected.push(resume_id, &full_stream[resume_id as usize..]);
+        let mut reconnected = AgentStreamParser::new();
+        let resumed_events = reconnected.push_stdout(resume_id, &full_stream[resume_id as usize..]);
         assert_eq!(resumed_events.len(), 1);
         let value: Value = serde_json::from_str(&resumed_events[0].1).unwrap();
         assert_eq!(value["text"], "B");
@@ -1015,13 +1104,57 @@ mod tests {
 
     #[test]
     fn event_line_parser_rejects_unknown_versions_and_event_types() {
-        let mut parser = EventLineParser::new();
+        let mut parser = AgentStreamParser::new();
         let bad_version = format!("{STREAM_EVENT_PREFIX}{{\"v\":2,\"t\":\"delta\"}}\n");
         let bad_type = format!("{STREAM_EVENT_PREFIX}{{\"v\":1,\"t\":\"exec\"}}\n");
         let malformed = format!("{STREAM_EVENT_PREFIX}not-json\n");
-        assert!(parser.push(0, bad_version.as_bytes()).is_empty());
-        assert!(parser.push(100, bad_type.as_bytes()).is_empty());
-        assert!(parser.push(200, malformed.as_bytes()).is_empty());
+        assert!(parser.push_stdout(0, bad_version.as_bytes()).is_empty());
+        assert!(parser.push_stdout(100, bad_type.as_bytes()).is_empty());
+        assert!(parser.push_stdout(200, malformed.as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn legacy_stderr_driver_lines_emit_turn_lifecycle_until_v1_stdout_is_seen() {
+        let msg_id = "2b339dae-e527-8e52-82a9-0d81d6a49f8c";
+        let mut parser = AgentStreamParser::new();
+        let stderr = format!(
+            "cw agent driver: claude conversation ready (native thread e277ceb9-ee53-4520-adf7-05b007f8446b)\n\
+             cw agent driver: message {msg_id} running: test are u there?\n\
+             cw agent driver: turn running\n\
+             cw agent driver: says: Yes, I'm here.\n\
+             cw agent driver: message {msg_id} completed\n\
+             Yes, I'm here.\n"
+        );
+        let events = parser.push_stderr(0, stderr.as_bytes());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "turn_start");
+        let start: Value = serde_json::from_str(&events[0].1).unwrap();
+        assert_eq!(start["msg"], msg_id);
+        assert_eq!(start["legacy"], true);
+
+        assert_eq!(events[1].0, "turn_end");
+        let end: Value = serde_json::from_str(&events[1].1).unwrap();
+        assert_eq!(end["msg"], msg_id);
+        assert_eq!(end["state"], "completed");
+        assert_eq!(end["legacy"], true);
+
+        // Non-canonical UUIDs and non-terminal stderr lines are ignored.
+        assert!(
+            parser
+                .push_stderr(
+                    500,
+                    b"cw agent driver: message not-a-uuid completed\n\
+                      cw agent driver: message 2b339dae-e527-8e52-82a9-0d81d6a49f8c stays paused\n"
+                )
+                .is_empty()
+        );
+
+        // Once a v1 stdout event arrives, legacy stderr lines are suppressed.
+        let v1_start =
+            format!("{STREAM_EVENT_PREFIX}{{\"v\":1,\"t\":\"turn_start\",\"msg\":\"{msg_id}\"}}\n");
+        assert_eq!(parser.push_stdout(700, v1_start.as_bytes()).len(), 1);
+        let dup_stderr = format!("cw agent driver: message {msg_id} completed\n");
+        assert!(parser.push_stderr(800, dup_stderr.as_bytes()).is_empty());
     }
 
     #[test]

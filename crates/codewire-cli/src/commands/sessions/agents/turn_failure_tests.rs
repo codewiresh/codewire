@@ -407,6 +407,7 @@ fn running(fixture: &[Value], model: &str, effort: &str) -> (Harness, MessageRec
             interrupts: Vec::new(),
             usage: None,
             acknowledged: false,
+            streamed_delta: false,
             failure: None,
         }),
         config,
