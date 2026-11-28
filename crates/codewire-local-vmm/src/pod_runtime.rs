@@ -716,14 +716,6 @@ async fn restore_and_wait(
             return RestoreOutcome::Finished(Err(error.into()));
         }
     };
-    if let Err(error) = running
-        .start_network_worker(&executable, BOOT_TIMEOUT)
-        .await
-    {
-        eprintln!("standard runtime: restored VM network worker failed: {error}");
-        let _ = running.stop_discarding_guest_state().await;
-        return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
-    }
     let control_tasks = match hosted::open_control_channels(
         &running.paths().vsock_socket,
         Arc::clone(&suspender),
@@ -736,6 +728,17 @@ async fn restore_and_wait(
             return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
         }
     };
+    if let Err(error) = running
+        .start_network_worker(&executable, BOOT_TIMEOUT)
+        .await
+    {
+        eprintln!("standard runtime: restored VM network worker failed: {error}");
+        for task in control_tasks {
+            task.abort();
+        }
+        let _ = running.stop_discarding_guest_state().await;
+        return RestoreOutcome::Fallback(hibernate::FallbackReason::RestoreFailed);
+    }
 
     // Wait for `rebind-ok\n` while keeping Pod ports 7777 & 2222 closed.
     let rebind_deadline = tokio::time::Instant::now() + REBIND_TIMEOUT;

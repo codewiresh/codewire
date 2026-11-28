@@ -12,10 +12,14 @@
 //!      (`/run/codewire-hosted/restore/settings.json`) to carry a strictly
 //!      newer `restore_generation`.
 //!    - Shuts down the old Pod's `hosted_access::serve` task and awaits its
-//!      exit so old `:2222` and old tailnet/disco sockets are completely gone.
-//!    - Restarts broker egress (or re-runs guest-carried self-check) for the
-//!      new Pod's `CODEWIRE_POD_UID` and peer addresses.
-//!    - Runs `BindWorkspace` against the new Pod's UID, token, and TLS roots.
+//!      exit so old `:2222` and old tailnet/disco sockets are completely gone,
+//!      and stops the old Pod's broker egress stream.
+//!    - Runs `BindWorkspace` over the new Pod's interface (`pod_dial`) with the
+//!      new Pod's UID, token, and TLS roots so orchestration records the new
+//!      Pod's trust and interception decision (C5) before egress admission.
+//!    - Restarts broker egress for the new Pod's `CODEWIRE_POD_UID` and peer
+//!      addresses, waits for its self-check to pass, and refreshes the guest's
+//!      front-door CA bundle (or runs guest-carried self-check before binding).
 //!    - Installs the new binding (`0400` `/codewire/run/daemon/credential`)
 //!      and updates `app_ports` while keeping `PlatformQuiet` held.
 //! 4. After `codewire-daemon` rotates the credential bridge and installs the
@@ -124,10 +128,14 @@ impl HostedHibernate {
             wait_for_restore_settings(&self.restore_settings_path, min_generation).await?;
 
         // Shut down the old Pod's workspace access (SSH :2222, tailnet, Mesh)
-        // and wait for it to release its sockets before binding as the new Pod.
-        // Fail re-bind closed (aborting the stuck task) if shutdown times out.
+        // and stop the old Pod's broker egress stream before binding as the
+        // new Pod. Fail re-bind closed (aborting the stuck task) if access
+        // shutdown times out.
         if let Some(old_access) = self.access.lock().await.take() {
             old_access.stop().await?;
+        }
+        if let Some(handle) = self.config.egress.as_ref() {
+            handle.stop_stream();
         }
 
         let new_pod_uid = settings
@@ -167,26 +175,6 @@ impl HostedHibernate {
             .as_ref()
             .map(hosted_egress::EgressSettings::binding_route);
 
-        // In broker mode, restart the egress stream for the new Pod's UID and
-        // stream address before binding so outbound platform dials use the new
-        // Pod's identity and trust, and refresh the guest's front-door CA
-        // bundle in case the egress front door rotated while hibernated.
-        if let (Some(handle), Some(egress_settings)) =
-            (self.config.egress.as_ref(), egress_settings)
-            && !self.config.carried
-        {
-            let trust = handle
-                .restart(
-                    egress_settings,
-                    self.config.refusal.clone().unwrap_or_default(),
-                )
-                .await
-                .map_err(|error| format!("restored Pod egress self-check failed: {error:#}"))?;
-            let mut unused = None;
-            hosted_egress::install_trust(&trust, &mut unused)
-                .map_err(|error| format!("install restored egress trust: {error:#}"))?;
-        }
-
         let roots = match restored_config.measured() {
             Some(measured) => BindingRoots::Measured(measured.binding_roots_pem()),
             None => BindingRoots::Mounted(restored_config.tls_roots_file()),
@@ -212,7 +200,38 @@ impl HostedHibernate {
             client.set_guest_carried_self_check(passed);
         }
 
-        let bound = hosted_binding::bind_until_accepted(&client, &restored_config).await;
+        // Bind over the Pod interface first, then restart broker egress:
+        // orchestration's `EgressService.Admit` refuses a bound Pod until its
+        // first `BindWorkspace` has recorded its interception decision (C5).
+        // Ports 7777/2222 and PlatformQuiet stay closed until both bind and
+        // the restored egress self-check pass.
+        let bound = run_bind_then_broker_egress(
+            || hosted_binding::bind_until_accepted(&client, &restored_config),
+            |bound| async move {
+                if let (Some(handle), Some(egress_settings)) =
+                    (self.config.egress.as_ref(), egress_settings)
+                    && !self.config.carried
+                {
+                    let trust = handle
+                        .restart(
+                            egress_settings,
+                            self.config.refusal.clone().unwrap_or_default(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!("restored Pod egress self-check failed: {error:#}")
+                        })?;
+                    let mut interception = bound
+                        .binding
+                        .interception()
+                        .then(|| codewire_access::Interception::new(None));
+                    hosted_egress::install_trust(&trust, &mut interception)
+                        .map_err(|error| format!("install restored egress trust: {error:#}"))?;
+                }
+                Ok(bound)
+            },
+        )
+        .await?;
         self.config
             .paths
             .install_binding(&bound.binding)
@@ -377,11 +396,61 @@ fn read_newer_restore_settings(
     Ok(None)
 }
 
+/// Runs `bind` to completion before `restart_egress` so orchestration's
+/// `BindWorkspace` records the restored Pod's interception decision (C5) before
+/// `EgressService.Admit` evaluates it. Fails closed if `restart_egress` errors.
+async fn run_bind_then_broker_egress<B, BindFut, BindFn, EgressFut, EgressFn>(
+    bind: BindFn,
+    restart_egress: EgressFn,
+) -> Result<B, String>
+where
+    BindFn: FnOnce() -> BindFut,
+    BindFut: std::future::Future<Output = B>,
+    EgressFn: FnOnce(B) -> EgressFut,
+    EgressFut: std::future::Future<Output = Result<B, String>>,
+{
+    let bound = bind().await;
+    restart_egress(bound).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[tokio::test]
+    async fn restore_runs_bind_before_broker_egress_and_fails_closed_on_egress_error() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
+        let bind_events = Arc::clone(&events);
+        let egress_events = Arc::clone(&events);
+
+        let bound = run_bind_then_broker_egress(
+            || async move {
+                bind_events.lock().unwrap().push("bind");
+                "bound-ok"
+            },
+            |bound| async move {
+                assert_eq!(bound, "bound-ok");
+                egress_events.lock().unwrap().push("egress");
+                Ok(bound)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(bound, "bound-ok");
+        assert_eq!(*events.lock().unwrap(), vec!["bind", "egress"]);
+
+        // A failed restored egress self-check fails closed without returning
+        // the binding for installation.
+        let err = run_bind_then_broker_egress(
+            || async { "bound-ok" },
+            |_| async { Err("egress self-check failed".to_owned()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "egress self-check failed");
+    }
 
     #[test]
     fn restore_settings_poll_accepts_only_strictly_newer_generations() {
