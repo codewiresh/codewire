@@ -267,37 +267,125 @@ fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
 }
 
-/// Removes all host-side hibernate artifacts (`engine_root/hibernate/` and
-/// `engine_root/vms/<POD_VM_ID>/checkpoints/`), refusing to traverse symlinks.
+/// Removes all host-side hibernate artifacts (`engine_root/hibernate/` and every
+/// entry inside `engine_root/vms/<POD_VM_ID>/checkpoints/`), refusing to
+/// traverse symlinks.
+///
+/// The `checkpoints/` directory itself is preserved in place (same inode): on a
+/// restored boot this runs after `CloudHypervisorRunner::start_hosted_restored`
+/// has already launched Cloud Hypervisor with Landlock bound to
+/// `paths.checkpoints_dir`, so deleting the directory itself would break any
+/// subsequent hibernate on the restored VM.
 pub(super) fn clear_hibernate_artifacts(engine_root: &Path) {
-    let vm_checkpoints = vm_checkpoints_dir(engine_root);
     let hib_dir = engine_root.join(HIBERNATE_DIR_NAME);
-    for dir in [hib_dir, vm_checkpoints] {
-        match fs::symlink_metadata(&dir) {
-            Ok(meta) if meta.file_type().is_dir() => {
-                if let Err(error) = fs::remove_dir_all(&dir) {
+    match fs::symlink_metadata(&hib_dir) {
+        Ok(meta) if meta.file_type().is_dir() => {
+            if let Err(error) = fs::remove_dir_all(&hib_dir) {
+                eprintln!(
+                    "standard runtime: could not clear hibernate directory {}: {error}",
+                    hib_dir.display()
+                );
+            }
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            eprintln!(
+                "standard runtime: refusing to follow symlink at {}",
+                hib_dir.display()
+            );
+        }
+        Ok(_) => {
+            if let Err(error) = fs::remove_file(&hib_dir) {
+                eprintln!(
+                    "standard runtime: could not remove unexpected hibernate file {}: {error}",
+                    hib_dir.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!(
+                "standard runtime: could not inspect {}: {error}",
+                hib_dir.display()
+            );
+        }
+    }
+
+    let vm_checkpoints = vm_checkpoints_dir(engine_root);
+    match fs::symlink_metadata(&vm_checkpoints) {
+        Ok(meta) if meta.file_type().is_dir() => match fs::read_dir(&vm_checkpoints) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            eprintln!(
+                                "standard runtime: could not read entry in {}: {error}",
+                                vm_checkpoints.display()
+                            );
+                            continue;
+                        }
+                    };
+                    let path = entry.path();
+                    match fs::symlink_metadata(&path) {
+                        Ok(child_meta) if child_meta.file_type().is_dir() => {
+                            if let Err(error) = fs::remove_dir_all(&path) {
+                                eprintln!(
+                                    "standard runtime: could not clear checkpoint tree {}: {error}",
+                                    path.display()
+                                );
+                            }
+                        }
+                        Ok(_) => {
+                            if let Err(error) = fs::remove_file(&path) {
+                                eprintln!(
+                                    "standard runtime: could not remove checkpoint file {}: {error}",
+                                    path.display()
+                                );
+                            }
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            eprintln!(
+                                "standard runtime: could not inspect {}: {error}",
+                                path.display()
+                            );
+                        }
+                    }
+                }
+                if let Err(error) = sync_dir(&vm_checkpoints) {
                     eprintln!(
-                        "standard runtime: could not clear hibernate directory {}: {error}",
-                        dir.display()
+                        "standard runtime: could not sync checkpoint directory {}: {error}",
+                        vm_checkpoints.display()
                     );
                 }
             }
-            Ok(meta) if meta.file_type().is_symlink() => {
-                eprintln!(
-                    "standard runtime: refusing to follow symlink at {}",
-                    dir.display()
-                );
-            }
-            Ok(_) => {
-                let _ = fs::remove_file(&dir);
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 eprintln!(
-                    "standard runtime: could not inspect {}: {error}",
-                    dir.display()
+                    "standard runtime: could not list checkpoint directory {}: {error}",
+                    vm_checkpoints.display()
                 );
             }
+        },
+        Ok(meta) if meta.file_type().is_symlink() => {
+            eprintln!(
+                "standard runtime: refusing to follow symlink at {}",
+                vm_checkpoints.display()
+            );
+        }
+        Ok(_) => {
+            if let Err(error) = fs::remove_file(&vm_checkpoints) {
+                eprintln!(
+                    "standard runtime: could not remove unexpected checkpoint file {}: {error}",
+                    vm_checkpoints.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!(
+                "standard runtime: could not inspect {}: {error}",
+                vm_checkpoints.display()
+            );
         }
     }
 }
@@ -882,5 +970,34 @@ mod tests {
         // Once expired, a fresh legitimate hibernate can arm again.
         assert!(control.arm_at(expired));
         assert!(control.is_armed_at(expired));
+    }
+
+    #[test]
+    fn clear_hibernate_artifacts_removes_entries_while_preserving_checkpoints_dir_inode() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let runtime_digest = format!("sha256:{}", "c".repeat(64));
+        let vmm_sha = "d".repeat(64);
+        let settings = sample_settings(Some(&runtime_digest));
+        let engine = setup_hibernated_engine(&settings, &vmm_sha, &runtime_digest, 5);
+        let vm_checkpoints = vm_checkpoints_dir(engine.path());
+        fs::set_permissions(&vm_checkpoints, fs::Permissions::from_mode(0o700)).unwrap();
+        let stale_out = vm_checkpoints.join("out-stale");
+        fs::create_dir(&stale_out).unwrap();
+        fs::write(stale_out.join("state.json"), b"{}").unwrap();
+
+        let before = fs::symlink_metadata(&vm_checkpoints).unwrap();
+
+        clear_hibernate_artifacts(engine.path());
+
+        assert!(!engine.path().join(HIBERNATE_DIR_NAME).exists());
+        assert!(!checkpoints_in_dir(engine.path()).exists());
+        assert!(!stale_out.exists());
+        assert!(vm_checkpoints.is_dir());
+        assert!(fs::read_dir(&vm_checkpoints).unwrap().next().is_none());
+
+        let after = fs::symlink_metadata(&vm_checkpoints).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert!(PrivateRoot::open(&vm_checkpoints).is_ok());
     }
 }

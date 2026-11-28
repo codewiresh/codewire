@@ -56,6 +56,12 @@ const VMGENID_DRIVERS: [&str; 2] = [
     "/sys/bus/acpi/drivers/vmgenid",
     "/sys/bus/platform/drivers/vmgenid",
 ];
+/// Persistent VM block filesystems flushed via `syncfs` after `/workload` is
+/// frozen so dirty guest page-cache writes reach their backing disks before
+/// the VMM pauses or discards guest memory (#6647). Required mounts are always
+/// present in a booted guest; optional mounts are synced when present.
+const REQUIRED_FREEZE_SYNC_PATHS: [&str; 2] = [super::STATE_MOUNT_PATH, super::ROOT_MOUNT_PATH];
+const OPTIONAL_FREEZE_SYNC_PATHS: [&str; 1] = [super::DOCKER_DATA_PATH];
 
 /// This boot's identity: what the progress server and the hook authenticate
 /// with. `Resume` replaces it.
@@ -229,7 +235,11 @@ fn act(request: CheckpointRequest) -> CheckpointReply {
     };
     let workload = WorkloadCgroup::at(Path::new(super::CGROUP_HIERARCHY_PATH));
     let result = match request.action {
-        CheckpointAction::Freeze => workload.freeze(FREEZE_TIMEOUT).map(drop),
+        CheckpointAction::Freeze => freeze_and_sync_with(
+            || workload.freeze(FREEZE_TIMEOUT).map(drop),
+            || workload.thaw(THAW_TIMEOUT),
+            sync_filesystem_for_freeze,
+        ),
         CheckpointAction::Thaw => super::hosted::admit_thaw().and_then(|()| {
             thaw_stepping_clock(
                 request.host_time_ns,
@@ -263,6 +273,50 @@ fn act(request: CheckpointRequest) -> CheckpointReply {
     }
     reply.elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     reply
+}
+
+/// Freezes the workload cgroup, then flushes dirty buffers on the VM's
+/// persistent block filesystems so a subsequent hibernate fallback or crash
+/// recovery never loses files written right before freeze (#6647). Thaws the
+/// workload if any sync fails so a failed freeze never leaves it stopped.
+fn freeze_and_sync_with(
+    freeze: impl FnOnce() -> Result<()>,
+    thaw: impl FnOnce() -> Result<()>,
+    mut sync_path: impl FnMut(&Path, bool) -> Result<()>,
+) -> Result<()> {
+    freeze()?;
+    let synced = REQUIRED_FREEZE_SYNC_PATHS
+        .iter()
+        .try_for_each(|path| sync_path(Path::new(path), true))
+        .and_then(|()| {
+            OPTIONAL_FREEZE_SYNC_PATHS
+                .iter()
+                .try_for_each(|path| sync_path(Path::new(path), false))
+        });
+    if let Err(error) = synced {
+        if let Err(thaw_error) = thaw() {
+            eprintln!("codewire guest: thaw after failed freeze sync failed: {thaw_error:#}");
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn sync_filesystem_for_freeze(path: &Path, required: bool) -> Result<()> {
+    let filesystem = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if !required && error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("open {} for freeze sync", path.display()));
+        }
+    };
+    rustix::fs::syncfs(&filesystem)
+        .with_context(|| format!("sync {} after freeze", path.display()))?;
+    Ok(())
 }
 
 /// Moves this guest to the restored boot's identity, with the workload still
@@ -709,5 +763,67 @@ mod tests {
         // Within the bound nothing is stepped, so this needs no privilege.
         let skew = step_clock(now, MAX_SKEW).unwrap();
         assert!(skew.abs() < 1_000, "{skew}");
+    }
+
+    #[test]
+    fn freeze_syncs_persistent_filesystems_after_freezing_and_thaws_on_sync_error() {
+        let events = std::cell::RefCell::new(Vec::new());
+        freeze_and_sync_with(
+            || {
+                events.borrow_mut().push("freeze".to_owned());
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("thaw".to_owned());
+                Ok(())
+            },
+            |path, required| {
+                events
+                    .borrow_mut()
+                    .push(format!("sync:{}:{required}", path.display()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            events.take(),
+            [
+                "freeze",
+                "sync:/state:true",
+                "sync:/generation:true",
+                "sync:/var/lib/docker:false",
+            ]
+        );
+
+        let err = freeze_and_sync_with(
+            || {
+                events.borrow_mut().push("freeze".to_owned());
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("thaw".to_owned());
+                Ok(())
+            },
+            |path, _required| {
+                events.borrow_mut().push(format!("sync:{}", path.display()));
+                if path == Path::new(crate::guest::ROOT_MOUNT_PATH) {
+                    bail!("injected syncfs failure");
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("injected syncfs failure"));
+        assert_eq!(
+            events.take(),
+            ["freeze", "sync:/state", "sync:/generation", "thaw"]
+        );
+    }
+
+    #[test]
+    fn sync_filesystem_for_freeze_skips_absent_optional_mount() {
+        let missing = Path::new("/nonexistent-codewire-optional-mount-for-test");
+        assert!(sync_filesystem_for_freeze(missing, false).is_ok());
+        assert!(sync_filesystem_for_freeze(missing, true).is_err());
     }
 }
