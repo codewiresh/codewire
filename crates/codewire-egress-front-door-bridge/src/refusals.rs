@@ -32,19 +32,32 @@ const BROKER_ANSWERED: [Refusal; 5] = [
     Refusal::CredentialConflict,
 ];
 
+/// Bound-secret refusals the credential broker answers itself as 403
+/// responses with `Codewire-Refusal`, reported to the local refusal log
+/// under the route's bound host name (#4003).
+const BROKER_ANSWERED_BOUND_SECRET: [RefusalCode; 4] = [
+    RefusalCode::PlaceholderOutsideBinding,
+    RefusalCode::SecretNotBoundToHost,
+    RefusalCode::SecretBindingChanged,
+    RefusalCode::SecretDeleted,
+];
+
 /// The refusal `response` answers, if it is one: one the bridge or the
-/// front door rendered, or one of [`BROKER_ANSWERED`] by its status and
-/// header. Any other response is not a refusal.
+/// front door rendered, or one of [`BROKER_ANSWERED`] /
+/// [`BROKER_ANSWERED_BOUND_SECRET`] by its status and header. Any other
+/// response is not a refusal.
 pub(crate) fn refusal_of(response: &Response<Body>) -> Option<RefusalCode> {
     if let Some(AnsweredRefusal(refusal)) = response.extensions().get::<AnsweredRefusal>() {
         return Some(refusal.code());
     }
     let header = response.headers().get(REFUSAL_HEADER)?.to_str().ok()?;
     let code = RefusalCode::from_code(header)?;
-    BROKER_ANSWERED
+    let status = response.status().as_u16();
+    (BROKER_ANSWERED
         .iter()
-        .any(|refusal| refusal.code() == code && refusal.status() == response.status().as_u16())
-        .then_some(code)
+        .any(|refusal| refusal.code() == code && refusal.status() == status)
+        || (status == 403 && BROKER_ANSWERED_BOUND_SECRET.contains(&code)))
+    .then_some(code)
 }
 
 impl RouteTable {

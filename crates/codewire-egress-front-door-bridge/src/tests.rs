@@ -1799,6 +1799,24 @@ async fn the_brokers_refusals_are_reported_and_a_providers_answers_are_not() {
         ),
         (403, "credential_conflict", None),
         (400, "no_credential_selected", None),
+        (
+            403,
+            "placeholder_outside_binding",
+            Some(RefusalCode::PlaceholderOutsideBinding),
+        ),
+        (
+            403,
+            "secret_not_bound_to_host",
+            Some(RefusalCode::SecretNotBoundToHost),
+        ),
+        (
+            403,
+            "secret_binding_changed",
+            Some(RefusalCode::SecretBindingChanged),
+        ),
+        (403, "secret_deleted", Some(RefusalCode::SecretDeleted)),
+        (200, "placeholder_outside_binding", None),
+        (400, "secret_not_bound_to_host", None),
     ];
     for (status, header, expected) in answers {
         let task = tokio::spawn({
