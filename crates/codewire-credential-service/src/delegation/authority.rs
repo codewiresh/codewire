@@ -7,8 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use codewire_access::{
-    AccessProfileId, AvailableGrants, CapabilitySlot, DerivedGrant, EnvironmentAccessBinding,
-    EnvironmentId, GrantContext, GrantPlacement, HttpProvider, Owner, OwnerId, Placement, Withheld,
+    AccessProfileId, ApplicationSecretKey, AvailableGrants, CapabilitySlot, DerivedGrant,
+    EnvironmentAccessBinding, EnvironmentId, GrantContext, GrantPlacement, HttpProvider, Owner,
+    OwnerId, Placement, Withheld,
 };
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error, PlatformRuntimeSession,
@@ -380,6 +381,7 @@ impl OwnerLocalSource {
         &self,
         request: v1::EnvironmentProjectionRequest,
         expected: &Admission,
+        application_key: Option<ApplicationSecretKey>,
     ) -> Result<Vec<u8>, Error> {
         if !request.local_inventories.is_empty() {
             return Err(Error::Denied);
@@ -403,6 +405,8 @@ impl OwnerLocalSource {
             deadline_unix_ms: request.deadline_unix_ms,
         };
         ensure_request_live(&context, self)?;
+        let environment_id = EnvironmentId::parse(self.selection.local_environment_id.to_string())
+            .map_err(|_| Error::Denied)?;
         let request_deadline = request_deadline(&context, self)?;
         tokio::time::timeout_at(tokio::time::Instant::from_std(request_deadline), async {
             let mut first_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
@@ -414,7 +418,14 @@ impl OwnerLocalSource {
             ensure_request_live(&context, self)?;
             first_tx.commit().await.map_err(|_| Error::Unavailable)?;
 
-            let values = captured.decrypt(self.provider.as_ref(), &context).await?;
+            let values = captured
+                .decrypt(
+                    self.provider.as_ref(),
+                    &context,
+                    application_key.as_ref(),
+                    &environment_id,
+                )
+                .await?;
             ensure_request_live(&context, self)?;
 
             let mut final_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
@@ -441,6 +452,7 @@ impl OwnerLocalSource {
         &self,
         request: v1::EnvironmentProjectionRequest,
         expected: &Admission,
+        application_key: Option<ApplicationSecretKey>,
     ) -> Result<v1::EnvironmentProjectionComposition, Error> {
         let request_id = Uuid::parse_str(&request.request_id).map_err(|_| Error::Denied)?;
         if request_id.is_nil()
@@ -463,6 +475,8 @@ impl OwnerLocalSource {
             deadline_unix_ms: request.deadline_unix_ms,
         };
         ensure_request_live(&context, self)?;
+        let environment_id = EnvironmentId::parse(self.selection.local_environment_id.to_string())
+            .map_err(|_| Error::Denied)?;
         let request_deadline = request_deadline(&context, self)?;
         tokio::time::timeout_at(tokio::time::Instant::from_std(request_deadline), async {
             let mut first_tx = self.pool.begin().await.map_err(|_| Error::Unavailable)?;
@@ -485,7 +499,12 @@ impl OwnerLocalSource {
 
             let values = first
                 .captured
-                .decrypt(self.provider.as_ref(), &context)
+                .decrypt(
+                    self.provider.as_ref(),
+                    &context,
+                    application_key.as_ref(),
+                    &environment_id,
+                )
                 .await?;
             ensure_request_live(&context, self)?;
 
@@ -582,15 +601,21 @@ impl PlatformRuntimeAuthority for OwnerLocalRuntimeAuthority {
     async fn project_environment(
         &self,
         request: v1::EnvironmentProjectionRequest,
+        application_key: Option<ApplicationSecretKey>,
     ) -> Result<Vec<u8>, Error> {
-        self.source.project(request, &self.initial).await
+        self.source
+            .project(request, &self.initial, application_key)
+            .await
     }
 
     async fn project_environment_fragment(
         &self,
         request: v1::EnvironmentProjectionRequest,
+        application_key: Option<ApplicationSecretKey>,
     ) -> Result<v1::EnvironmentProjectionComposition, Error> {
-        self.source.project_fragment(request, &self.initial).await
+        self.source
+            .project_fragment(request, &self.initial, application_key)
+            .await
     }
 }
 

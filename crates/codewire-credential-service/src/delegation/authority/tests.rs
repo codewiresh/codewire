@@ -121,6 +121,7 @@ impl KekProvider for TaggedApplicationKek {
     }
 }
 
+mod bound;
 mod public_wire;
 
 fn platform_selection() -> PlatformProjectionSelection {
@@ -262,7 +263,7 @@ async fn setup_owner_sources_with_entries(
     let role = quote_ident(&h.role);
     for grant in [
         "EXECUTE ON FUNCTION public.codewire_platform_lock_owner_source_authority(text,text,text)",
-        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version) ON public.tenant_secrets",
+        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,binding,binding_id,binding_generation) ON public.tenant_secrets",
         "SELECT (dek_id,scope,scope_id,provider,key_name,key_version,wrapped_dek,format,revision) ON public.tenant_secret_deks",
     ] {
         sqlx::query(&format!("GRANT {grant} TO {role}"))
@@ -504,7 +505,7 @@ async fn application_and_credential_authorities_are_incompatible_across_full_and
         );
 
         let (request, recipient, context) = projection_request(&selection, unix_millis()? + 15_000);
-        let sealed = authority.project_environment(request).await?;
+        let sealed = authority.project_environment(request, None).await?;
         ensure!(
             recipient
                 .open(&sealed, &context, unix_millis()?)?
@@ -521,7 +522,7 @@ async fn application_and_credential_authorities_are_incompatible_across_full_and
             keys: vec!["LOCAL_ONLY".into()],
         }];
         let response = authority
-            .project_environment_fragment(request.clone())
+            .project_environment_fragment(request.clone(), None)
             .await?;
         let mut inventories = decode_local_inventories(&request.local_inventories)
             .map_err(|_| anyhow::anyhow!("local fixture inventory"))?;
@@ -566,7 +567,7 @@ async fn application_and_credential_authorities_are_incompatible_across_full_and
         let (request, _, _) = projection_request(&selection, unix_millis()? + 15_000);
         ensure!(
             wrong_application
-                .project_environment(request)
+                .project_environment(request, None)
                 .await
                 .is_err(),
             "credential authority decrypted application material"
@@ -853,7 +854,7 @@ async fn a_lifecycle_broken_credential_withholds_only_its_capability() -> Result
             "an expired credential withholds exactly its capability"
         );
         let (request, recipient, context) = projection_request(&selection, unix_millis()? + 15_000);
-        let sealed = authority.project_environment(request).await?;
+        let sealed = authority.project_environment(request, None).await?;
         recipient.open(&sealed, &context, unix_millis()?)?;
         // The next epoch, a new delegation, gets the reconnected Codex.
         let restarted = admitted(&h, selection.clone()).await?;
@@ -942,15 +943,25 @@ async fn empty_profile_admits_without_platform_environment_and_seals_exact_winne
         let now = unix_millis()?;
         let (mut stale_hash, _, _) = projection_request(&selection, now + 15_000);
         stale_hash.selection_sha256[0] ^= 1;
-        ensure!(authority.project_environment(stale_hash).await.is_err());
+        ensure!(
+            authority
+                .project_environment(stale_hash, None)
+                .await
+                .is_err()
+        );
         let (mut bad_recipient, _, _) = projection_request(&selection, now + 15_000);
         bad_recipient.recipient_public_key = vec![0; 32];
-        ensure!(authority.project_environment(bad_recipient).await.is_err());
+        ensure!(
+            authority
+                .project_environment(bad_recipient, None)
+                .await
+                .is_err()
+        );
         let (expired, _, _) = projection_request(&selection, now.saturating_sub(1));
-        ensure!(authority.project_environment(expired).await.is_err());
+        ensure!(authority.project_environment(expired, None).await.is_err());
         let (too_long, _, _) =
             projection_request(&selection, unix_millis()? + 2 * MAX_PROJECTION_LIFETIME_MS);
-        ensure!(authority.project_environment(too_long).await.is_err());
+        ensure!(authority.project_environment(too_long, None).await.is_err());
 
         let mut stale_generation = selection.clone();
         stale_generation.local_environment_generation += 1;
@@ -959,7 +970,7 @@ async fn empty_profile_admits_without_platform_environment_and_seals_exact_winne
         ensure!(authority.owner_local_grants(&stale_session).await.is_err());
 
         let (request, recipient, context) = projection_request(&selection, unix_millis()? + 15_000);
-        let sealed = authority.project_environment(request).await?;
+        let sealed = authority.project_environment(request, None).await?;
         let values = recipient.open(&sealed, &context, unix_millis()?)?;
         ensure!(
             values.entries().collect::<BTreeMap<_, _>>()
@@ -976,7 +987,7 @@ async fn empty_profile_admits_without_platform_environment_and_seals_exact_winne
         let (request, _, _) = projection_request(&selection, unix_millis()? + 15_000);
         let authority_task = authority.clone();
         let projection =
-            tokio::spawn(async move { authority_task.project_environment(request).await });
+            tokio::spawn(async move { authority_task.project_environment(request, None).await });
         h.provider.unwrap_gate.wait().await?;
         let changed = put(&user, "EXACT", b"changed-after-capture", &h.db.pool).await;
         h.provider.unwrap_gate.release();
@@ -1046,7 +1057,7 @@ async fn mixed_projection_filters_losers_before_material_and_rechecks_winner_rot
         }];
         ensure!(
             authority
-                .project_environment(request.clone())
+                .project_environment(request.clone(), None)
                 .await
                 .is_err(),
             "ordinary projection silently ignored mixed inventories"
@@ -1059,7 +1070,7 @@ async fn mixed_projection_filters_losers_before_material_and_rechecks_winner_rot
         );
 
         let response = authority
-            .project_environment_fragment(request.clone())
+            .project_environment_fragment(request.clone(), None)
             .await?;
         let local = decode_local_inventories(&request.local_inventories)
             .map_err(|_| anyhow::anyhow!("local fixture inventory"))?;
@@ -1122,10 +1133,11 @@ async fn mixed_projection_filters_losers_before_material_and_rechecks_winner_rot
         let (mut changing, _, _) = projection_request(&selection, unix_millis()? + 15_000);
         changing.local_inventories = request.local_inventories;
         let authority_task = authority.clone();
-        let projection =
-            tokio::spawn(
-                async move { authority_task.project_environment_fragment(changing).await },
-            );
+        let projection = tokio::spawn(async move {
+            authority_task
+                .project_environment_fragment(changing, None)
+                .await
+        });
         h.provider.unwrap_gate.wait().await?;
         let changed = put(&user, "PLATFORM_ONLY", b"rotated-after-capture", &h.db.pool).await;
         h.provider.unwrap_gate.release();

@@ -300,8 +300,9 @@ impl PlatformRuntimeAuthority for KubernetesPlatformRuntimeAuthority {
     async fn project_environment(
         &self,
         request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        application_key: Option<codewire_access::ApplicationSecretKey>,
     ) -> Result<Vec<u8>, Error> {
-        self.project(request).await
+        self.project(request, application_key).await
     }
 
     async fn current_session(&self) -> Result<PlatformRuntimeSession, Error> {

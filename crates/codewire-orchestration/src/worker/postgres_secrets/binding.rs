@@ -45,6 +45,11 @@ pub enum SecretWriteError {
     /// value only to its hosts yet.
     #[error("sending a secret only to its hosts isn't available yet")]
     Unavailable,
+    /// The set the secret is stored in has an ID that isn't its kind's one
+    /// spelling, so it has no slot and no placeholder (#4003;
+    /// docs/dev/SECRETS-AND-CREDENTIALS.md, "The placeholder").
+    #[error("secrets stored here can't be sent only to their hosts")]
+    NoSlot,
     #[error(transparent)]
     Store(#[from] anyhow::Error),
 }

@@ -139,6 +139,9 @@ pub(super) fn status_for_error(error: LocalCredentialError) -> Status {
         LocalCredentialError::SecretValueRequired(_) => {
             StoreRefusal::SecretValueRequired.attach(Status::invalid_argument(error.to_string()))
         }
+        LocalCredentialError::BoundSecretUnprojectable(_) => {
+            Status::failed_precondition(error.to_string())
+        }
         LocalCredentialError::BoundSecretRename => {
             StoreRefusal::SecretBoundRename.attach(Status::failed_precondition(error.to_string()))
         }

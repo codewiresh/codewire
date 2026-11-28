@@ -135,6 +135,11 @@ pub enum LocalCredentialError {
         "a bound secret can't be renamed; set the new key with its value, then delete the old one"
     )]
     BoundSecretRename,
+    /// A bound secret whose placeholder can't be derived: the authority's
+    /// placeholder key can't be loaded, or its set has no slot (#4003). It
+    /// is refused by name and never projected raw.
+    #[error("bound secret {0} can't be projected without its placeholder")]
+    BoundSecretUnprojectable(String),
     #[error(transparent)]
     SecretBinding(#[from] BindingError),
     #[error(transparent)]

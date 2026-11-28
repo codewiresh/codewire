@@ -207,7 +207,8 @@ async fn assert_restricted_role(pool: &PgPool, expected_role: &str) -> Result<()
          AND NOT pg_catalog.has_table_privilege(current_user,'public.tenant_secret_deks','SELECT') \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
              WHERE a.attrelid='public.tenant_secrets'::regclass AND a.attnum>0 AND NOT a.attisdropped \
-             AND a.attname<>ALL(ARRAY['path','key','scope','scope_id','dek_id','ciphertext','nonce','format','storage_contract_version']) \
+             AND a.attname<>ALL(ARRAY['path','key','scope','scope_id','dek_id','ciphertext','nonce','format','storage_contract_version', \
+                 'binding','binding_id','binding_generation']) \
              AND pg_catalog.has_column_privilege(current_user,a.attrelid,a.attnum,'SELECT')) \
          AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a \
              WHERE a.attrelid='public.tenant_secret_deks'::regclass AND a.attnum>0 AND NOT a.attisdropped \

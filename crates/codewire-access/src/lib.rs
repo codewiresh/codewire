@@ -73,8 +73,8 @@ pub use model::{
     SshPublicKeyMetadata, is_claude_subscription_token_shape,
 };
 pub use placeholder::{
-    CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG, CredentialPlaceholder,
-    PLACEHOLDER_KEY_BYTES, PlaceholderKey, known_answer,
+    ApplicationSecretKey, CREDENTIAL_PLACEHOLDER_LENGTH, CREDENTIAL_PLACEHOLDER_TAG,
+    CredentialPlaceholder, PLACEHOLDER_KEY_BYTES, PlaceholderKey, SecretPlaceholder, known_answer,
 };
 pub use presets::{BINDING_PRESETS, BindingPreset, binding_preset, nearest_binding_preset};
 pub use projected_placeholders::{PROJECTED_PLACEHOLDER_SLOTS, ProjectedPlaceholders};
@@ -93,7 +93,7 @@ pub use projection::{
 pub use refusal::{
     REFUSAL_HEADER, Refusal, RefusalCode, RefusalProvider, Unforwarded, UpstreamFailure,
 };
-pub use secret_slot::{InvalidSecretSlot, SecretScope, SecretSlot};
+pub use secret_slot::{InvalidSecretSlot, SecretKind, SecretSlot};
 
 use thiserror::Error;
 

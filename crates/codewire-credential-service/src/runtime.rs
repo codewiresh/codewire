@@ -125,6 +125,37 @@ pub(crate) async fn placeholder_keys_privileges(pool: &PgPool) -> Result<bool, s
     .await
 }
 
+/// Every projection with a winning secret reads its binding (#4003): without
+/// SELECT on the three binding columns each one would fail at its first read,
+/// so the service refuses to start, and a rollout stalls while the version
+/// already running keeps serving. Infra's grant lands first.
+async fn binding_columns_granted(pool: &PgPool) -> Result<(), RuntimeError> {
+    if binding_columns_privileges(pool)
+        .await
+        .map_err(|_| RuntimeError::Database)?
+    {
+        Ok(())
+    } else {
+        Err(RuntimeError::Configuration(
+            "application-secret projection needs SELECT on tenant_secrets.binding, binding_id and binding_generation",
+        ))
+    }
+}
+
+/// Whether this login can SELECT all three binding columns of
+/// `tenant_secrets`; false when the table or a column does not exist.
+pub(crate) async fn binding_columns_privileges(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT count(*) = 3 FROM pg_catalog.pg_attribute a \
+         WHERE a.attrelid = pg_catalog.to_regclass('public.tenant_secrets') \
+         AND a.attname = ANY(ARRAY['binding','binding_id','binding_generation']) \
+         AND a.attnum > 0 AND NOT a.attisdropped \
+         AND pg_catalog.has_column_privilege(current_user, a.attrelid, a.attnum, 'SELECT')",
+    )
+    .fetch_one(pool)
+    .await
+}
+
 /// Run the production service using only explicit restricted dependencies.
 /// The caller retains the runtime until this returns: dropping this future
 /// cannot prove provider or database cleanup after an issued mutation.
@@ -147,7 +178,10 @@ pub async fn run(
     .await
     .map_err(|_| RuntimeError::Database)?
     .map_err(|_| RuntimeError::Database)?;
-    let result = run_connected(config, pool.clone(), shutdown).await;
+    let result = match binding_columns_granted(&pool).await {
+        Ok(()) => run_connected(config, pool.clone(), shutdown).await,
+        Err(error) => Err(error),
+    };
     // Every owner has drained before its underlying connection pool closes.
     pool.close().await;
     result

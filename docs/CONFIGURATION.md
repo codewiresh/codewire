@@ -628,7 +628,7 @@ so a bound secret's new value could go unseen.
 
 | Variable | Required | Meaning | Example |
 |---|---|---|---|
-| `CODEWIRE_HOST_BOUND_SECRETS_ENABLED` | No | `true` lets a secret be bound to hosts; `false` or unset refuses every binding. Any other value stops orchestration at startup, and so does `true` while `CODEWIRE_BOUND_HOST_RESERVED_NAMES` is unset. | `false` |
+| `CODEWIRE_HOST_BOUND_SECRETS_ENABLED` | No | `true` lets a secret be bound to hosts; `false` or unset refuses every binding. Any other value stops orchestration at startup, and so does `true` while `CODEWIRE_BOUND_HOST_RESERVED_NAMES` is unset. Turn it on only where the credential service has `CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED=true`; elsewhere a bound secret is refused at projection. | `false` |
 | `CODEWIRE_BOUND_HOST_RESERVED_NAMES` | With the switch on | Comma-separated names the deployment serves that no secret may be bound to: each an exact host name, or `*.` and a domain for that domain and every name under it. List the Sandbox gateway's names, the identity issuer, the registries, the forge and any other name the deployment's configuration gives its own services. Setting a binding to one is refused. Unset or empty reserves only the names above. An entry that is neither form stops orchestration at startup. | `openbao.sandbox.example.com,*.registry.example.com` |
 
 ## Sandbox identity

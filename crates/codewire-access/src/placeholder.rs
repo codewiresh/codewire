@@ -29,6 +29,9 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{AccessError, CapabilitySlot, CredentialId, EnvironmentId};
 
+mod secret;
+pub use secret::{ApplicationSecretKey, SecretPlaceholder};
+
 /// The wire form's leading tag, which also versions the derivation.
 pub const CREDENTIAL_PLACEHOLDER_TAG: &str = "cwp1_";
 /// The derived value's length before encoding.

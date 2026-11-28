@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use sqlx::PgPool;
 
-use codewire_access::ReservedHosts;
+use codewire_access::{ReservedHosts, SecretSlot};
 #[cfg(test)]
 use codewire_protected_store::secret_envelope::KekProvider;
 #[cfg(feature = "kind-e2e")]
@@ -247,8 +247,13 @@ impl SecretStore {
         value: Option<&str>,
         binding: BindingWrite,
     ) -> Result<(), SecretWriteError> {
-        if !self.bound_secrets && matches!(binding, BindingWrite::Bind(_)) {
-            return Err(SecretWriteError::Unavailable);
+        if matches!(binding, BindingWrite::Bind(_)) {
+            if !self.bound_secrets {
+                return Err(SecretWriteError::Unavailable);
+            }
+            // A set with no slot could never project the placeholder.
+            SecretSlot::for_platform_path(secret_path, key)
+                .map_err(|_| SecretWriteError::NoSlot)?;
         }
         self.store
             .write_secret_at_path(secret_path, key, value, binding, &self.reserved)

@@ -60,7 +60,7 @@ async fn grant_projection(f: &Fixture) -> Result<()> {
     let role = quote_ident(&f.role);
     for grant in [
         "EXECUTE ON FUNCTION public.codewire_platform_lock_projection_authority(text,text,text,text)",
-        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version) ON public.tenant_secrets",
+        "SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,storage_contract_version,binding,binding_id,binding_generation) ON public.tenant_secrets",
         "SELECT (dek_id,scope,scope_id,provider,key_name,key_version,wrapped_dek,format,revision) ON public.tenant_secret_deks",
     ] {
         sqlx::query(&format!("GRANT {grant} TO {role}"))
@@ -216,9 +216,9 @@ async fn app_only_projection_uses_exact_precedence_and_never_reads_suppressed_ma
             source_identity: "/projects/local-owner/project".into(),
             keys: vec!["LOCAL".into()],
         }];
-        ensure!(authority.project_environment(mixed).await.is_err());
+        ensure!(authority.project_environment(mixed, None).await.is_err());
         ensure!(provider.calls.load(Ordering::SeqCst)==0, "workload authority must reject mixed inventories before material");
-        let sealed = authority.project_environment(message).await?;
+        let sealed = authority.project_environment(message, None).await?;
         let values = recipient.open(&sealed,&context,now_ms())?;
         ensure!(values.entries().collect::<BTreeMap<_,_>>() == BTreeMap::from([
             ("ORG_ONLY","org-value"),("PROJECT_ONLY","project-value"),("SHARED","personal"),
@@ -246,14 +246,14 @@ async fn provider_only_projection_is_authenticated_empty_and_performs_no_app_rea
         let provider = Arc::new(ObservedProvider::default());
         let authority = admitted(&f,provider.clone()).await?;
         let (message,recipient,context) = request(&authority)?;
-        let sealed = authority.project_environment(message).await?;
+        let sealed = authority.project_environment(message, None).await?;
         ensure!(recipient.open(&sealed,&context,now_ms())?.entries().len()==0);
         ensure!(provider.calls.load(Ordering::SeqCst)==0);
         // Revoking the profile's credential withholds only its capability; the
         // launch projection is not a credential fence and still seals.
         sqlx::query("UPDATE platform_credentials SET status='revoked'").execute(&f.db.pool).await?;
         let (message,recipient,context) = request(&authority)?;
-        let sealed = authority.project_environment(message).await?;
+        let sealed = authority.project_environment(message, None).await?;
         ensure!(recipient.open(&sealed,&context,now_ms())?.entries().len()==0);
         Ok(())
     }.await;
@@ -284,17 +284,17 @@ async fn a_projection_request_carries_exactly_its_bindings_digest() -> Result<()
         let authority = admitted(&f, provider.clone()).await?;
         let (mut message, _, _) = request(&authority)?;
         message.selection_sha256 = earlier.to_vec();
-        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(authority.project_environment(message, None).await.is_err());
         // Bound under version 1: its own digest projects, the current one is refused.
         super::set_binding_digest(&f.db.pool, &f.scope.pod_uid, Some(&super::hex(earlier))).await?;
         let authority = admitted(&f, provider.clone()).await?;
         let (message, recipient, context) = request(&authority)?;
         ensure!(context.selection_sha256 == earlier);
-        let sealed = authority.project_environment(message).await?;
+        let sealed = authority.project_environment(message, None).await?;
         ensure!(recipient.open(&sealed, &context, now_ms())?.entries().len() == 0);
         let (mut message, _, _) = request(&authority)?;
         message.selection_sha256 = current.to_vec();
-        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(authority.project_environment(message, None).await.is_err());
         ensure!(provider.calls.load(Ordering::SeqCst) == 0);
         Ok(())
     }
@@ -325,7 +325,7 @@ async fn organization_profile_does_not_change_the_personal_application_source_ow
         let provider=Arc::new(ObservedProvider::default());
         let authority=admitted(&f,provider.clone()).await?;
         let (message,recipient,context)=request(&authority)?;
-        let sealed=authority.project_environment(message).await?;
+        let sealed=authority.project_environment(message, None).await?;
         ensure!(recipient.open(&sealed,&context,now_ms())?.entries().collect::<Vec<_>>()==[("APP_VALUE","creator-owned")]);
         // Personal confirmation is not silently carried onto an organization pin.
         sqlx::query("UPDATE platform_environment_access_bindings SET personal_owner_confirmed_by='synthetic-creator'")
@@ -357,11 +357,11 @@ async fn malformed_recipient_selection_deadline_and_reserved_collision_fail_befo
                 3 => message.deadline_unix_ms = u64::MAX,
                 _ => message.request_id = Uuid::nil().to_string(),
             }
-            ensure!(authority.project_environment(message).await.is_err());
+            ensure!(authority.project_environment(message, None).await.is_err());
         }
         put(&f, &path, "CODEX_HOME", b"must-not-read").await?;
         let (message, _, _) = request(&authority)?;
-        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(authority.project_environment(message, None).await.is_err());
         ensure!(provider.calls.load(Ordering::SeqCst) == 0);
         Ok(())
     }
@@ -385,7 +385,7 @@ async fn projection_revalidates_ciphertext_inventory_sources_membership_and_pods
             provider.gate.arm("unwrap".into());
             let (message,_,_) = request(&authority)?;
             let runtime = authority.clone();
-            let task = tokio::spawn(async move { runtime.project_environment(message).await });
+            let task = tokio::spawn(async move { runtime.project_environment(message, None).await });
             provider.gate.wait().await?;
             // These writes completing before gate release prove no authority or
             // tenant locks are held across the protected-provider await.
@@ -445,11 +445,17 @@ async fn projection_restricted_reader_cannot_read_configuration_or_mutate_author
                 .contains("synthetic-ordinary-never-returned")
         );
         ensure!(metadata["ordinary_keys"] == json!(["KEY"]));
+        // The binding columns are readable (#4003); nothing else beside them.
+        sqlx::query("SELECT binding,binding_id,binding_generation FROM tenant_secrets")
+            .execute(&f.pool)
+            .await?;
         for statement in [
             "SELECT project_spec FROM environments",
             "SELECT * FROM tenant_secrets",
             "SELECT * FROM tenant_secret_deks",
             "SELECT * FROM tenant_secret_kek_canary",
+            "SELECT value_version FROM tenant_secrets",
+            "SELECT created_at FROM tenant_secrets",
             "UPDATE tenant_secrets SET key=key",
             "UPDATE tenant_secret_deks SET revision=revision",
             "DELETE FROM tenant_secrets",
@@ -488,18 +494,18 @@ async fn projection_bounds_inventory_and_values_before_unwrap_and_never_falls_ba
             CROSS JOIN generate_series(1,256) n WHERE s.path=$1 AND s.key='APP_VALUE'")
             .bind(&user).execute(&f.db.pool).await?;
         let (message,_,_) = request(&authority)?;
-        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(authority.project_environment(message, None).await.is_err());
         sqlx::query("DELETE FROM tenant_secrets WHERE key LIKE 'KEY_%'").execute(&f.db.pool).await?;
         put(&f,&user,"APP_VALUE",&vec![b'x';65_537]).await?;
         let (message,_,_) = request(&authority)?;
-        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(authority.project_environment(message, None).await.is_err());
         ensure!(provider.calls.load(Ordering::SeqCst)==0);
         // Correct size but unauthenticated winning material fails the entire
         // projection; the valid lower source is not substituted.
         sqlx::query("UPDATE tenant_secrets SET ciphertext=decode(repeat('00',32),'hex') WHERE path=$1")
             .bind(&user).execute(&f.db.pool).await?;
         let (message,_,_) = request(&authority)?;
-        ensure!(authority.project_environment(message).await.is_err());
+        ensure!(authority.project_environment(message, None).await.is_err());
         ensure!(provider.calls.load(Ordering::SeqCst)==1);
         Ok(())
     }.await;
@@ -521,14 +527,14 @@ async fn projection_cancellation_and_original_request_deadline_release_no_late_v
         provider.gate.arm("unwrap".into());
         let (message, _, _) = request(&authority)?;
         let runtime = authority.clone();
-        let task = tokio::spawn(async move { runtime.project_environment(message).await });
+        let task = tokio::spawn(async move { runtime.project_environment(message, None).await });
         provider.gate.wait().await?;
         task.abort();
         ensure!(task.await.unwrap_err().is_cancelled());
         // No detached unwrap task survives the owner cancellation.
         put(&f, &path, "APP_VALUE", b"after-cancel").await?;
         let (message, recipient, context) = request(&authority)?;
-        let sealed = authority.project_environment(message).await?;
+        let sealed = authority.project_environment(message, None).await?;
         ensure!(
             recipient
                 .open(&sealed, &context, now_ms())?
@@ -540,7 +546,7 @@ async fn projection_cancellation_and_original_request_deadline_release_no_late_v
         let (mut message, _, _) = request(&authority)?;
         message.deadline_unix_ms = now_ms() + 500;
         let runtime = authority.clone();
-        let task = tokio::spawn(async move { runtime.project_environment(message).await });
+        let task = tokio::spawn(async move { runtime.project_environment(message, None).await });
         provider.gate.wait().await?;
         ensure!(
             tokio::time::timeout(std::time::Duration::from_secs(2), task)
@@ -580,7 +586,7 @@ async fn projection_refuses_once_its_selected_project_is_deleted() -> Result<()>
         let provider = Arc::new(ObservedProvider::default());
         let authority = admitted(&f, provider.clone()).await?;
         let (message, recipient, context) = request(&authority)?;
-        let sealed = authority.project_environment(message).await?;
+        let sealed = authority.project_environment(message, None).await?;
         let values = recipient.open(&sealed, &context, now_ms())?;
         ensure!(
             values.entries().collect::<BTreeMap<_, _>>()
@@ -598,7 +604,7 @@ async fn projection_refuses_once_its_selected_project_is_deleted() -> Result<()>
             .await?;
         let (message, _, _) = request(&authority)?;
         ensure!(
-            authority.project_environment(message).await.is_err(),
+            authority.project_environment(message, None).await.is_err(),
             "a deleted selected project was projected"
         );
         ensure!(
@@ -823,7 +829,7 @@ async fn credential_needing_reconnect_withholds_only_its_capability_and_launches
             let authority = admitted(&f, Arc::new(ObservedProvider::default())).await
                 .with_context(|| format!("{state}: bridge admission was refused"))?;
             let (message, recipient, context) = request(&authority)?;
-            let sealed = authority.project_environment(message).await
+            let sealed = authority.project_environment(message, None).await
                 .with_context(|| format!("{state}: launch projection was refused"))?;
             ensure!(recipient.open(&sealed, &context, now_ms())?.entries().collect::<Vec<_>>() == [("APP_VALUE", "launch-value")]);
             // The other capability keeps working with its own material.
@@ -1027,3 +1033,5 @@ async fn a_user_token_confirmation_keeps_proxied_grants_but_no_codex_login() -> 
     .await;
     f.finish(result).await
 }
+
+mod bound;

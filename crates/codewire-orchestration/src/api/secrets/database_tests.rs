@@ -30,7 +30,8 @@ const VALUE: &str = "synthetic-bound-core-value";
 const RESERVED: &str = "openbao.sandbox.example.dev";
 
 /// One organization with an owner, an admin and a member, and one secret
-/// project; every identifier starts with the fixture's.
+/// project. Every identifier is 32 lowercase hex digits, as stored IDs are,
+/// so a secret here has a slot (#4003); they share the fixture's prefix.
 struct Fixture {
     state: ApiState,
     id: String,
@@ -54,9 +55,9 @@ impl Fixture {
             SecretStore::new_for_test(pool.clone(), Arc::new(TestKekProvider))
                 .with_reserved_for_test(ReservedHosts::new([RESERVED]).unwrap()),
         );
-        let id = format!("bound-{}", Uuid::new_v4().simple());
+        let id = format!("{}000", fixture_prefix(&Uuid::new_v4()));
         for role in ["owner", "admin", "member"] {
-            let user_id = format!("{id}-{role}");
+            let user_id = user_id(&id, role);
             sqlx::query(
                 "INSERT INTO users (id, email, name, email_verified) \
                  VALUES ($1, $2, 'Bound secret core test', true)",
@@ -69,19 +70,20 @@ impl Fixture {
         }
         sqlx::query(
             "INSERT INTO organizations (id, name, slug, created_by) \
-             VALUES ($1, 'Bound secret core test', $1, $1 || '-owner')",
+             VALUES ($1, 'Bound secret core test', $1, $2)",
         )
         .bind(&id)
+        .bind(user_id(&id, "owner"))
         .execute(&pool)
         .await
         .unwrap();
         for role in ["owner", "admin", "member"] {
             sqlx::query(
-                "INSERT INTO org_members (id, org_id, user_id, role) \
-                 VALUES ($1 || '-' || $2, $1, $1 || '-' || $2, $2)",
+                "INSERT INTO org_members (id, org_id, user_id, role) VALUES ($3, $1, $3, $2)",
             )
             .bind(&id)
             .bind(role)
+            .bind(user_id(&id, role))
             .execute(&pool)
             .await
             .unwrap();
@@ -102,7 +104,7 @@ impl Fixture {
 
     fn user(&self, role: &str) -> AuthUser {
         AuthUser {
-            user_id: format!("{}-{role}", self.id),
+            user_id: user_id(&self.id, role),
             org_id: None,
             is_admin: false,
             via_api_key: false,
@@ -122,7 +124,9 @@ impl Fixture {
             format!("/org-secrets/{}", self.id),
             format!("/projects/{}/{}", self.id, self.project_id),
         ];
-        paths.extend(["owner", "admin", "member"].map(|role| format!("/users/{}-{role}", self.id)));
+        paths.extend(
+            ["owner", "admin", "member"].map(|role| format!("/users/{}", user_id(&self.id, role))),
+        );
         for path in paths {
             self.state.secrets.delete_path(&path).await.unwrap();
         }
@@ -137,13 +141,29 @@ impl Fixture {
                 .await
                 .unwrap();
         }
-        sqlx::query("DELETE FROM users WHERE id LIKE $1 || '-%'")
-            .bind(&self.id)
+        sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+            .bind(["owner", "admin", "member"].map(|role| user_id(&self.id, role)))
             .execute(pool)
             .await
             .unwrap();
         pool.close().await;
     }
+}
+
+/// The first 29 hex digits of `seed`: the fixture's IDs add three more.
+fn fixture_prefix(seed: &Uuid) -> String {
+    seed.simple().to_string()[..29].to_owned()
+}
+
+/// The ID of the fixture's member with `role`, beside its organization `id`.
+fn user_id(id: &str, role: &str) -> String {
+    let suffix = match role {
+        "owner" => "001",
+        "admin" => "002",
+        "member" => "003",
+        _ => panic!("no fixture member {role}"),
+    };
+    format!("{}{suffix}", &id[..29])
 }
 
 fn binding(hosts: &[&str]) -> StoredBinding {
@@ -396,4 +416,56 @@ async fn db_binding_is_refused_while_host_bound_secrets_are_off() {
             .binding,
         None
     );
+}
+
+/// A set whose stored ID isn't its kind's spelling has no slot, so binding
+/// one of its secrets is refused and changes nothing (#4003).
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL"]
+async fn db_binding_is_refused_in_a_set_with_no_slot() {
+    let fixture = Fixture::new().await;
+    let state = &fixture.state;
+    let seeded = AuthUser {
+        user_id: format!("seeded-{}", fixture.id),
+        org_id: None,
+        is_admin: false,
+        via_api_key: false,
+    };
+    sqlx::query(
+        "INSERT INTO users (id, email, name, email_verified) \
+         VALUES ($1, $1 || '@example.test', 'Seeded owner', true)",
+    )
+    .bind(&seeded.user_id)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+    let (status, code, _) = refusal(
+        set_user_secret_core(state, &seeded, "TOKEN", VALUE, bind(&["api.fancy.com"])).await,
+    );
+    assert_eq!(
+        (status, code),
+        (StatusCode::BAD_REQUEST, SECRET_BINDING_UNAVAILABLE)
+    );
+    assert!(
+        list_user_secrets_core(state, &seeded)
+            .await
+            .unwrap()
+            .secrets
+            .is_empty(),
+        "the refused bind stored nothing"
+    );
+    set_user_secret_core(state, &seeded, "TOKEN", VALUE, BindingWrite::Keep)
+        .await
+        .unwrap();
+    state
+        .secrets
+        .delete_path(&format!("/users/{}", seeded.user_id))
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(&seeded.user_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+    fixture.cleanup().await;
 }

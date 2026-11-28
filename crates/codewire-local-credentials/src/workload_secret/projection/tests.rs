@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use super::*;
 
+mod bound;
 mod composition;
 
 #[derive(Clone, Default)]

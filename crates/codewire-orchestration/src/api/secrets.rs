@@ -101,7 +101,7 @@ pub(super) fn refused_write(error: &SecretWriteError) -> Option<AppError> {
             detail: error.to_string().into(),
         }),
         SecretWriteError::EmptyValue => validate_secret_value("").err(),
-        SecretWriteError::Unavailable => Some(AppError::Coded {
+        SecretWriteError::Unavailable | SecretWriteError::NoSlot => Some(AppError::Coded {
             status: axum::http::StatusCode::BAD_REQUEST,
             code: SECRET_BINDING_UNAVAILABLE,
             detail: error.to_string().into(),

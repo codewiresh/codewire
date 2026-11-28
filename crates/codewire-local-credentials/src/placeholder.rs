@@ -13,7 +13,9 @@
 //! store (Secret Service, the login Keychain) is shared by every authority
 //! root of the OS user, such as another HOME's or another credential root's:
 //! each root creates, reads and moves only its own key. The ID is not a
-//! secret and is never an input to a placeholder.
+//! secret and is never an input to a credential's placeholder; it is the
+//! collection ID of the owner's personal secrets in a bound secret's slot
+//! (kind `local`, #4003).
 //!
 //! [`LocalCredentialAuthority::environment_credential_placeholder`] creates
 //! the key on its first use, and this authority process keeps it once
@@ -32,8 +34,8 @@
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use codewire_access::{
-    CapabilitySlot, CredentialId, CredentialPlaceholder, DerivedGrant, EnvironmentAccessBinding,
-    EnvironmentId, PLACEHOLDER_KEY_BYTES, PlaceholderKey,
+    ApplicationSecretKey, CapabilitySlot, CredentialId, CredentialPlaceholder, DerivedGrant,
+    EnvironmentAccessBinding, EnvironmentId, PLACEHOLDER_KEY_BYTES, PlaceholderKey,
 };
 use codewire_protected_store::{
     ProtectedEntryId, ProtectedStore, ProtectedStoreError, ProtectedValue,
@@ -88,8 +90,23 @@ pub(crate) fn recorded_placeholder_key_entry(
 fn placeholder_key_entry(
     connection: &Connection,
 ) -> Result<ProtectedEntryId, LocalCredentialError> {
-    if let Some(entry) = recorded_placeholder_key_entry(connection)? {
-        return Ok(entry);
+    placeholder_key_entry_for(&authority_id(connection)?)
+}
+
+/// This root's ID, giving the root one first if it has none, as
+/// [`placeholder_key_entry`] does.
+fn authority_id(connection: &Connection) -> Result<String, LocalCredentialError> {
+    let recorded = connection
+        .query_row(
+            "SELECT value FROM authority_metadata WHERE key = ?1",
+            [AUTHORITY_ID_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(database_error)?;
+    if let Some(authority_id) = recorded {
+        placeholder_key_entry_for(&authority_id)?;
+        return Ok(authority_id);
     }
     let authority_id = Uuid::new_v4().simple().to_string();
     connection
@@ -98,7 +115,7 @@ fn placeholder_key_entry(
             [AUTHORITY_ID_KEY, authority_id.as_str()],
         )
         .map_err(database_error)?;
-    placeholder_key_entry_for(&authority_id)
+    Ok(authority_id)
 }
 
 fn placeholder_key_entry_for(authority_id: &str) -> Result<ProtectedEntryId, LocalCredentialError> {
@@ -336,6 +353,22 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
                 &admission.grant.credential_id,
             )
         })
+    }
+
+    /// This root's ID and the application-secret key a projection of its
+    /// bound secrets derives their placeholders under (#4003;
+    /// docs/dev/SECRETS-AND-CREDENTIALS.md, "The application-secret key"):
+    /// expanded from the placeholder key, loading or creating that first.
+    /// Only the expanded key leaves here. Loading may wait on the protected
+    /// store, as a projection's value reads do.
+    pub(crate) fn application_secret_key(
+        &self,
+        connection: &Connection,
+    ) -> Result<(String, ApplicationSecretKey), LocalCredentialError> {
+        let authority_id = authority_id(connection)?;
+        let entry = placeholder_key_entry_for(&authority_id)?;
+        let key = self.load_placeholder_key(&entry)?;
+        Ok((authority_id, ApplicationSecretKey::derive(key)))
     }
 
     /// The placeholder key, read from `entry` or created there on first use,

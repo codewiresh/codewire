@@ -5,8 +5,8 @@
 //! placeholders here too, derived as its delegation's leases derive theirs.
 
 use codewire_access::{
-    AvailableGrants, CapabilitySlot, CredentialPlaceholder, DerivedGrant, EnvironmentId, OwnerId,
-    PlaceholderKey, ProjectedPlaceholders,
+    ApplicationSecretKey, AvailableGrants, CapabilitySlot, CredentialPlaceholder, DerivedGrant,
+    EnvironmentId, OwnerId, PlaceholderKey, ProjectedPlaceholders,
 };
 use codewire_platform_credentials::{PlatformCredentialError, PlatformCredentialStore};
 
@@ -142,6 +142,44 @@ impl<A: PlatformRuntimeAuthority> PlatformBrokerLeaseProvider<A> {
                 let reason = placeholder_failure(&error);
                 timing::placeholder(reason);
                 Err(reason)
+            }
+        }
+    }
+
+    /// The environment's application-secret key for one projection (#4003;
+    /// docs/dev/SECRETS-AND-CREDENTIALS.md, "The application-secret key"),
+    /// when this epoch derives placeholders: its environment's key (hosted,
+    /// or a local VM's from its owner's local root, by the admitted
+    /// session's user and environment), read for this call alone, expanded
+    /// and dropped here. Only the expanded key reaches the projection, which
+    /// can't compute a credential's placeholder with it. An epoch without
+    /// placeholders, or a key that can't be read, gives none, and the
+    /// projection then refuses a bound secret by name; a plain secret
+    /// projects as before.
+    pub(super) async fn application_secret_key(&self) -> Option<ApplicationSecretKey> {
+        self.placeholders.as_ref()?;
+        let context = &self.session.context;
+        let key = match &self.session.identity {
+            RuntimeIdentity::Hosted { .. } => {
+                self.credentials
+                    .environment_placeholder_key(&context.environment_id)
+                    .await
+            }
+            RuntimeIdentity::OwnerLocal { .. } => {
+                self.credentials
+                    .owner_local_placeholder_key(&context.user_id, &context.environment_id)
+                    .await
+            }
+        };
+        match key {
+            Ok(key) => Some(ApplicationSecretKey::derive(&key)),
+            Err(error) => {
+                tracing::warn!(
+                    environment_id = context.environment_id.as_str(),
+                    reason = placeholder_failure(&error).label(),
+                    "projection has no application-secret key: its environment's key could not be read"
+                );
+                None
             }
         }
     }

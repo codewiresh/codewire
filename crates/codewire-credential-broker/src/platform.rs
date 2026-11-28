@@ -41,7 +41,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use codewire_access::{
-    AvailableGrants, BrokerOperationId, BrokerRouteId,
+    ApplicationSecretKey, AvailableGrants, BrokerOperationId, BrokerRouteId,
     CREDENTIAL_REFRESH_EXECUTION_DEADLINE_SECONDS, CapabilitySlot, CredentialAuthKind,
     CredentialId, CredentialMetadata, CredentialStatus, DerivedGrant, EnvironmentAccessBinding,
     GrantContext, GrantPermission, GrantPlacement, Owner, PROVIDER_REFRESH_TIMEOUT_SECONDS,
@@ -316,9 +316,13 @@ pub trait PlatformRuntimeAuthority: Send + Sync {
 
     /// Only recipient ciphertext for the sources already bound by the trusted
     /// authority. An identity-only test adapter remains explicitly deny-only.
+    /// `application_key` is the environment's application-secret key, never
+    /// a credential's placeholder key, and only when the epoch derives
+    /// placeholders; a bound secret is refused by name without it (#4003).
     async fn project_environment(
         &self,
         _request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        _application_key: Option<ApplicationSecretKey>,
     ) -> Result<Vec<u8>, PlatformRuntimeError> {
         Err(PlatformRuntimeError::Denied)
     }
@@ -329,6 +333,7 @@ pub trait PlatformRuntimeAuthority: Send + Sync {
     async fn project_environment_fragment(
         &self,
         _request: codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionRequest,
+        _application_key: Option<ApplicationSecretKey>,
     ) -> Result<
         codewire_daemon_proto::codewire::bridge::v1::EnvironmentProjectionComposition,
         PlatformRuntimeError,
@@ -1064,7 +1069,7 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         let deadline = request.deadline_unix_ms;
         let result = self
             .authority
-            .project_environment_fragment(request)
+            .project_environment_fragment(request, self.application_secret_key().await)
             .await
             .map_err(runtime_error)?;
         self.session().await?;
@@ -1086,7 +1091,7 @@ impl<A: PlatformRuntimeAuthority + 'static> BrokerLeaseProvider for PlatformBrok
         let deadline = request.deadline_unix_ms;
         let sealed = self
             .authority
-            .project_environment(request)
+            .project_environment(request, self.application_secret_key().await)
             .await
             .map_err(runtime_error)?;
         self.session().await?;

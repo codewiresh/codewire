@@ -2927,10 +2927,13 @@ and no credential reaches the application-secret path, so what that path
 holds can't compute a credential's placeholder. A test holds that the two
 keys give different placeholders for the same input. Hosted, the key
 exists only while hosted placeholders are on
-(`CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED`); with them off, binding a secret
-is refused when it is set, and a bound secret is refused by name at
-projection, never projected raw. This needs no grant beyond the binding
-columns below.
+(`CREDENTIAL_HOSTED_PLACEHOLDERS_ENABLED`). Orchestration, which takes the
+binding, can't see that setting, so a deployment turns on host-bound
+secrets (`CODEWIRE_HOST_BOUND_SECRETS_ENABLED`) only where hosted
+placeholders are on. Where they are off, a bound secret is refused by name
+at projection, logged with its key and the reason, and never projected
+raw. The same holds in a local VM whose platform source declared no front
+door. This needs no grant beyond the binding columns below.
 
 **Projection.** Values are already read at each launch, not at create
 (an `EnvironmentProjectionRequest`, rechecked against the selection digest). For a bound
@@ -2944,8 +2947,10 @@ so the value never leaves it for a launch:
 A bound row is never decrypted for a projection. The credential broker's
 database login reads its `binding`, `binding_id` and `binding_generation`
 columns, granted beside the nine it reads today, in infra's grants and
-audit before the code that reads them ships. Tests in both stores hold
-that a bound secret's value never reaches a projection.
+audit before the code that reads them ships. The credential service
+refuses to start when its login can't read those three columns, so a
+missing grant stops a rollout rather than every projection. Tests in both
+stores hold that a bound secret's value never reaches a projection.
 
 The raw value is projected only when the secret is plain now and the
 environment's boot or Pod recorded it plain. A secret that is bound now is

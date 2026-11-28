@@ -371,3 +371,82 @@ async fn a_seed_placeholder_is_the_one_its_delegations_leases_carry() -> Result<
     .await;
     fixture.finish(result).await
 }
+
+/// #4003: an epoch that derives placeholders gives its projection the
+/// environment's application-secret key, expanded from the environment's
+/// key (hosted) or from its owner's local root (a local VM), and nothing
+/// else; an epoch without placeholders gives none and creates no key.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn a_projection_gets_only_its_environments_application_secret_key() -> Result<()> {
+    use codewire_access::{ApplicationSecretKey, SecretKind, SecretPlaceholder, SecretSlot};
+
+    let fixture = Fixture::create_for_bridge().await?;
+    let result = async {
+        let slot = SecretSlot::new(
+            SecretKind::Project,
+            "0f8a4c1e-3b2d-4e5f-8a9b-1c2d3e4f5a6b",
+            "FANCY_TOKEN",
+        )?;
+        let placeholder = |key: &ApplicationSecretKey, environment: &EnvironmentId| {
+            SecretPlaceholder::derive(key, environment, &slot, &[7; 16], 1, None)
+        };
+
+        let off = fixture.epoch().await?;
+        anyhow::ensure!(off.application_secret_key().await.is_none());
+        anyhow::ensure!(
+            key_rows(&fixture.pool).await? == 0,
+            "a key was created while off"
+        );
+
+        let hosted = placeholder_epoch(fixture.epoch().await?);
+        let given = hosted
+            .application_secret_key()
+            .await
+            .context("a hosted epoch with placeholders gives a key")?;
+        let hosted_id = fixture.context.environment_id.clone();
+        let expected = ApplicationSecretKey::derive(
+            &fixture
+                .store
+                .environment_placeholder_key(&hosted_id)
+                .await?,
+        );
+        anyhow::ensure!(placeholder(&given, &hosted_id) == placeholder(&expected, &hosted_id));
+
+        let local = EnvironmentId::parse(Uuid::new_v4().to_string())?;
+        let binding = EnvironmentAccessBinding {
+            environment_id: local.clone(),
+            ..fixture.current_binding().await?
+        };
+        let delegated = fixture
+            .owner_local_in(
+                local.clone(),
+                fixture.owner.clone(),
+                true,
+                Some(binding),
+                CapabilitySlot::codex(),
+                &fixture.record,
+                permission(),
+            )
+            .await?
+            .map_err(|error| anyhow::anyhow!("owner-local delegation refused: {error:?}"))?;
+        let delegated = Adapter {
+            placeholders: Some(EpochPlaceholders::default()),
+            ..delegated
+        };
+        let given = delegated
+            .application_secret_key()
+            .await
+            .context("a delegation with placeholders gives a key")?;
+        let expected = ApplicationSecretKey::derive(
+            &fixture
+                .store
+                .owner_local_placeholder_key(&fixture.context.user_id, &local)
+                .await?,
+        );
+        anyhow::ensure!(placeholder(&given, &local) == placeholder(&expected, &local));
+        Ok(())
+    }
+    .await;
+    fixture.finish(result).await
+}

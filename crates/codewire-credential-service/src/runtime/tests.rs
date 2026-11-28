@@ -980,3 +980,64 @@ async fn hosted_placeholders_require_select_and_insert_on_the_key_table() -> Res
     .await;
     database.finish(result).await
 }
+
+/// Startup requires SELECT on all three binding columns of `tenant_secrets`
+/// (#4003): a login without them, or missing any one, is refused, so a
+/// rollout stalls rather than failing every projection; one with them starts.
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn startup_requires_select_on_the_three_binding_columns() -> Result<()> {
+    use crate::platform_test_support::{TestDatabase, quote_ident};
+    let database = TestDatabase::create().await?;
+    let result = async {
+        let (pool, role) = database.broker_pool().await?;
+        let role = quote_ident(&role);
+        let refused = |result: std::result::Result<(), super::RuntimeError>| {
+            matches!(result, Err(super::RuntimeError::Configuration(message))
+                if message.contains("tenant_secrets.binding, binding_id and binding_generation"))
+        };
+        ensure!(
+            refused(super::binding_columns_granted(&pool).await),
+            "a login without the columns is refused"
+        );
+        sqlx::query(&format!(
+            "GRANT SELECT (path,key,scope,scope_id,dek_id,ciphertext,nonce,format,\
+             storage_contract_version) ON public.tenant_secrets TO {role}"
+        ))
+        .execute(&database.pool)
+        .await?;
+        ensure!(
+            refused(super::binding_columns_granted(&pool).await),
+            "today's nine columns alone are refused"
+        );
+        sqlx::query(&format!(
+            "GRANT SELECT (binding,binding_id,binding_generation) ON public.tenant_secrets TO {role}"
+        ))
+        .execute(&database.pool)
+        .await?;
+        ensure!(
+            super::binding_columns_granted(&pool).await.is_ok(),
+            "a login with the three columns starts"
+        );
+        for column in ["binding", "binding_id", "binding_generation"] {
+            sqlx::query(&format!(
+                "REVOKE SELECT ({column}) ON public.tenant_secrets FROM {role}"
+            ))
+            .execute(&database.pool)
+            .await?;
+            ensure!(
+                refused(super::binding_columns_granted(&pool).await),
+                "a login missing {column} is refused"
+            );
+            sqlx::query(&format!(
+                "GRANT SELECT ({column}) ON public.tenant_secrets TO {role}"
+            ))
+            .execute(&database.pool)
+            .await?;
+        }
+        pool.close().await;
+        Ok(())
+    }
+    .await;
+    database.finish(result).await
+}

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use codewire_access::{ApplicationSecretKey, EnvironmentId};
 use codewire_credential_broker::platform::{
     PlatformRuntimeAuthority, PlatformRuntimeError as Error,
 };
@@ -26,6 +27,7 @@ use uuid::Uuid;
 
 use crate::authority::{KubernetesPlatformRuntimeAuthority, SCOPE_QUERY, Scope};
 
+mod bound;
 #[cfg(feature = "enrollment")]
 pub(crate) mod composition;
 
@@ -121,6 +123,10 @@ struct EnvelopeRow {
     nonce: Vec<u8>,
     format: i16,
     storage_contract_version: i16,
+    /// The binding as text; `None` for a plain secret (#4003).
+    binding: Option<String>,
+    binding_id: Option<Uuid>,
+    binding_generation: i64,
 }
 
 #[derive(PartialEq, Eq, sqlx::FromRow)]
@@ -137,9 +143,11 @@ struct DekRow {
 }
 
 #[derive(PartialEq, Eq)]
-struct Winner {
-    path: String,
-    envelope: EnvelopeRow,
+enum Winner {
+    /// Decrypted for the projection.
+    Plain { path: String, envelope: EnvelopeRow },
+    /// Never decrypted: its placeholder takes its value's place.
+    Bound(bound::BoundSecret),
 }
 
 #[derive(PartialEq, Eq)]
@@ -323,9 +331,12 @@ async fn capture_winners_in(
     let mut encoded_len = 4_usize;
     for (key, path) in winner_paths {
         let context = DekContext::from_secret_path(&path).map_err(|_| Error::Denied)?;
+        // A bound row's ciphertext is never selected.
         let envelope: EnvelopeRow = sqlx::query_as(
-            "SELECT dek_id,scope,scope_id,CASE WHEN octet_length(ciphertext) BETWEEN 17 AND $3 \
-             THEN ciphertext END AS ciphertext,nonce,format,storage_contract_version \
+            "SELECT dek_id,scope,scope_id,CASE WHEN binding IS NULL \
+             AND octet_length(ciphertext) BETWEEN 17 AND $3 \
+             THEN ciphertext END AS ciphertext,nonce,format,storage_contract_version, \
+             binding::text AS binding,binding_id,binding_generation \
              FROM public.tenant_secrets WHERE path=$1 AND key=$2",
         )
         .bind(&path)
@@ -335,7 +346,6 @@ async fn capture_winners_in(
         .await
         .map_err(|_| Error::Unavailable)?
         .ok_or(Error::Denied)?;
-        let ciphertext = envelope.ciphertext.as_ref().ok_or(Error::Denied)?;
         if envelope.scope != context.scope.as_str()
             || envelope.scope_id != context.scope_id
             || envelope.storage_contract_version != 1
@@ -344,6 +354,22 @@ async fn capture_winners_in(
         {
             return Err(Error::Denied);
         }
+        if let Some(binding) = &envelope.binding {
+            let secret = bound::BoundSecret::from_row(
+                &path,
+                &key,
+                binding,
+                envelope.binding_id,
+                envelope.binding_generation,
+            )?;
+            encoded_len = encoded_len
+                .checked_add(secret.encoded_len())
+                .filter(|len| *len <= MAX_ENVIRONMENT_PROJECTION_BYTES)
+                .ok_or(Error::Denied)?;
+            captured.winners.insert(key, Winner::Bound(secret));
+            continue;
+        }
+        let ciphertext = envelope.ciphertext.as_ref().ok_or(Error::Denied)?;
         encoded_len = encoded_len
             .checked_add(8 + key.len() + ciphertext.len() - 16)
             .ok_or(Error::Denied)?;
@@ -366,27 +392,48 @@ async fn capture_winners_in(
             }
             captured.deks.insert(dek.dek_id.clone(), dek);
         }
-        captured.winners.insert(key, Winner { path, envelope });
+        captured
+            .winners
+            .insert(key, Winner::Plain { path, envelope });
     }
     Ok(captured)
 }
 
 impl Capture {
+    /// The projection's values: each plain winner decrypted, and each bound
+    /// winner's placeholder under `application_key` for `environment`. A
+    /// bound winner that can't have one refuses the whole projection by name
+    /// before anything is decrypted.
     pub(crate) async fn decrypt(
         &self,
         provider: &dyn KekProvider,
         context: &ProjectionContext,
+        application_key: Option<&ApplicationSecretKey>,
+        environment: &EnvironmentId,
     ) -> Result<EnvironmentProjection, Error> {
+        let mut entries = bound::placeholders_or_refuse(
+            self.winners.values().filter_map(|winner| match winner {
+                Winner::Bound(secret) => Some(secret),
+                Winner::Plain { .. } => None,
+            }),
+            application_key,
+            environment,
+        )?;
+        let plain = || {
+            self.winners
+                .iter()
+                .filter_map(|(key, winner)| match winner {
+                    Winner::Plain { path, envelope } => Some((key, path, envelope)),
+                    Winner::Bound(_) => None,
+                })
+        };
         let mut deks = BTreeMap::new();
         for (id, row) in &self.deks {
             ensure_deadline(context)?;
-            let winner = self
-                .winners
-                .values()
-                .find(|winner| &winner.envelope.dek_id == id)
+            let (_, path, _) = plain()
+                .find(|(_, _, envelope)| &envelope.dek_id == id)
                 .ok_or(Error::Denied)?;
-            let dek_context =
-                DekContext::from_secret_path(&winner.path).map_err(|_| Error::Denied)?;
+            let dek_context = DekContext::from_secret_path(path).map_err(|_| Error::Denied)?;
             let wrapped = WrappedDek {
                 provider: KekProviderKind::OpenBaoTransit,
                 key_name: row.key_name.clone(),
@@ -405,27 +452,20 @@ impl Capture {
             ensure_deadline(context)?;
             deks.insert(id.clone(), dek);
         }
-        let mut entries = Vec::with_capacity(self.winners.len());
-        for (key, winner) in &self.winners {
+        for (key, path, row) in plain() {
             ensure_deadline(context)?;
-            let dek_context =
-                DekContext::from_secret_path(&winner.path).map_err(|_| Error::Denied)?;
+            let dek_context = DekContext::from_secret_path(path).map_err(|_| Error::Denied)?;
             let coordinates = SecretCoordinates {
                 context: &dek_context,
-                path: &winner.path,
+                path,
                 key,
             };
             let envelope = EncryptedTenantSecret {
-                ciphertext: winner
-                    .envelope
-                    .ciphertext
-                    .as_ref()
-                    .ok_or(Error::Denied)?
-                    .clone(),
-                nonce: winner.envelope.nonce.clone(),
-                format: winner.envelope.format,
+                ciphertext: row.ciphertext.as_ref().ok_or(Error::Denied)?.clone(),
+                nonce: row.nonce.clone(),
+                format: row.format,
             };
-            let dek = deks.get(&winner.envelope.dek_id).ok_or(Error::Denied)?;
+            let dek = deks.get(&row.dek_id).ok_or(Error::Denied)?;
             let value = decrypt_secret(dek, &coordinates, &envelope).map_err(|_| Error::Denied)?;
             entries.push((key.clone(), value));
         }
@@ -437,6 +477,7 @@ impl KubernetesPlatformRuntimeAuthority {
     pub(crate) async fn project(
         &self,
         request: v1::EnvironmentProjectionRequest,
+        application_key: Option<ApplicationSecretKey>,
     ) -> Result<Vec<u8>, Error> {
         if !request.local_inventories.is_empty() {
             return Err(Error::Denied);
@@ -456,6 +497,8 @@ impl KubernetesPlatformRuntimeAuthority {
         }
         let environment =
             Uuid::parse_str(&self.initial.scope.environment_id).map_err(|_| Error::Denied)?;
+        let environment_id = EnvironmentId::parse(self.initial.scope.environment_id.clone())
+            .map_err(|_| Error::Denied)?;
         let context = ProjectionContext {
             environment_id: *environment.as_bytes(),
             operation_generation: self.initial.scope.generation as u64,
@@ -483,7 +526,12 @@ impl KubernetesPlatformRuntimeAuthority {
                 ensure_deadline(&context)?;
                 tx.commit().await.map_err(|_| Error::Unavailable)?;
                 let values = captured
-                    .decrypt(self.authority.provider.as_ref(), &context)
+                    .decrypt(
+                        self.authority.provider.as_ref(),
+                        &context,
+                        application_key.as_ref(),
+                        &environment_id,
+                    )
                     .await?;
                 // Token rotation never extends this channel; both live Pod/controller
                 // identity and canonical provider/source selection are checked again.
