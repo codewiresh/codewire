@@ -83,6 +83,23 @@ impl RunningVm {
         }
         Ok(timings)
     }
+    /// Snapshot a VM that [`Self::suspend`] already froze and paused. On
+    /// failure the VM remains suspended rather than waking.
+    async fn snapshot_already_suspended(
+        &mut self,
+        vmm: &Path,
+    ) -> Result<CaptureTimings, RunnerError> {
+        let paused = Instant::now();
+        self.api
+            .snapshot(vmm, snapshot_timeout(self.request.memory_mib))
+            .await?;
+        let memory_write = paused.elapsed();
+        Ok(CaptureTimings {
+            memory_write,
+            vm_paused: memory_write,
+            ..CaptureTimings::default()
+        })
+    }
 }
 
 impl CloudHypervisorRunner {
@@ -102,6 +119,18 @@ impl CloudHypervisorRunner {
         running: &mut RunningVm,
         operation_id: Uuid,
     ) -> Result<Hibernation, RunnerError> {
+        self.hibernate_with_state(running, operation_id, false)
+            .await
+    }
+
+    /// Hibernate a VM that is either running (`already_suspended == false`) or
+    /// already frozen and paused (`already_suspended == true`).
+    pub async fn hibernate_with_state(
+        &self,
+        running: &mut RunningVm,
+        operation_id: Uuid,
+        already_suspended: bool,
+    ) -> Result<Hibernation, RunnerError> {
         if !matches!(running.try_exit()?, ExitClass::StillRunning) {
             return Err(RunnerError::Checkpoint("the VM is not running"));
         }
@@ -113,12 +142,16 @@ impl CloudHypervisorRunner {
         let out_name = format!("{CHECKPOINT_OUT_PREFIX}{operation_id}");
         let out = checkpoints.create_dir(Path::new(&out_name), 0o700)?;
         let vmm = PrivateRoot::open(&out)?.create_dir(Path::new("vmm"), 0o700)?;
-        let captured = running.pause_and_snapshot(&vmm, operation_id, abi).await;
+        let captured = if already_suspended {
+            running.snapshot_already_suspended(&vmm).await
+        } else {
+            running.pause_and_snapshot(&vmm, operation_id, abi).await
+        };
         let mut timings = match captured {
             Ok(timings) => timings,
             Err(error) => {
-                // Best effort: the VM runs on, and the next capture or boot
-                // removes a tree left here.
+                // Best effort: the VM stays in its previous state, and the next
+                // capture or boot removes a tree left here.
                 let _ = remove_checkpoint_tree(&checkpoints, &out_name);
                 return Err(error);
             }
@@ -134,12 +167,23 @@ impl CloudHypervisorRunner {
         )?;
         remove_checkpoint_tree(&checkpoints, &out_name)?;
         let input = checkpoints.path().join(CHECKPOINT_IN);
+        let setup_disk_bytes = running
+            .setup_disk
+            .as_ref()
+            .map(|setup| setup.file.size)
+            .or_else(|| {
+                running
+                    .request
+                    .checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.setup_disk_bytes)
+            });
         let restore = build_hibernate_restore(
             &input,
             &running.request,
             operation_id,
             memory_bytes,
-            running.setup_disk.as_ref().map(|setup| setup.file.size),
+            setup_disk_bytes,
             running.docker_disk.is_some(),
             self.vmm_identity().1,
         )?;

@@ -75,10 +75,12 @@ const RUNNER_WATCH_BUFFER: usize = 8;
 // 16: SuspendVm and ResumeVm pause and resume a running Linux VM in memory
 //     (#5529); RunnerInfo carries suspended_at_unix_ms, suspend_reason, and
 //     last_wake_duration_ms.
+// 17: HibernateVm writes guest memory and device state into checkpoints/in and
+//     ends the VMM (Linux only, #5529).
 /// The protocol a runner speaks, and the only one [`RunnerClient`] admits.
 /// A local credential authority reports it for the brokers it starts, which
 /// connect as that client (#5238).
-pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 16;
+pub const NATIVE_RUNNER_PROTOCOL_VERSION: u32 = 17;
 const RUNNER_PROTOCOL_INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 const RUNNER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 pub(crate) const RUNNER_SERVER_DRAIN_TIMEOUT: std::time::Duration =
@@ -1193,6 +1195,9 @@ impl EnvironmentRunnerService for RunnerRpc {
         state.generation = request.generation;
         state.state = v1::EnvironmentState::Running;
         state.error_code = None;
+        if running.restore_report().is_some() {
+            state.last_wake_duration_ms = Some(elapsed_ms(started));
+        }
         running.label_policies(
             request.network_policy_label,
             request.credential_policy_label,
@@ -1503,6 +1508,15 @@ impl EnvironmentRunnerService for RunnerRpc {
         request: Request<v1::ResumeVmRequest>,
     ) -> Result<Response<v1::ResumeVmResponse>, Status> {
         self.resume_vm_inner(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn hibernate_vm(
+        &self,
+        request: Request<v1::HibernateVmRequest>,
+    ) -> Result<Response<v1::HibernateVmResponse>, Status> {
+        self.hibernate_vm_inner(request.into_inner())
             .await
             .map(Response::new)
     }

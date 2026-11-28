@@ -10,8 +10,8 @@ use crate::state::{CHECKPOINT_OUT_PREFIX, CHECKPOINT_VMM_FILES, CHECKPOINTS_DIRE
 mod host;
 mod proto;
 pub(in crate::supervisor) use host::require_unlocked;
-use host::{CLONING_FILESYSTEMS, pinned_vmm, require_same_host, synced_store_warning};
-pub(in crate::supervisor) use host::{host_identity, read_vmm_files, vmm_files_match};
+use host::{CLONING_FILESYSTEMS, require_same_host, synced_store_warning};
+pub(in crate::supervisor) use host::{host_identity, pinned_vmm, read_vmm_files, vmm_files_match};
 pub(in crate::supervisor) use proto::{checkpoint_proto, earlier_runtime, unrestorable_after_move};
 
 /// The seed bindings a runner reports for the boot it captured, an empty

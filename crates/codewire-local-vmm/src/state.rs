@@ -625,6 +625,13 @@ pub fn cleanup_trashed_vm(
         drop(checkpoints);
         vm.remove_empty_private_directory(Path::new(CHECKPOINTS_DIRECTORY))?;
     }
+    if let Some(hibernate) = optional_private_directory(&vm, Path::new(HIBERNATE_DIRECTORY))? {
+        for file in HIBERNATE_FILES {
+            hibernate.remove_private_regular(Path::new(file), 0o600)?;
+        }
+        drop(hibernate);
+        vm.remove_empty_private_directory(Path::new(HIBERNATE_DIRECTORY))?;
+    }
     if let Some(generations) = optional_private_directory(&vm, Path::new("generations"))? {
         for name in admitted_generation_names(&generations)? {
             let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
@@ -760,7 +767,7 @@ fn optional_private_directory(
 }
 
 pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError> {
-    const ENTRIES: [&str; 10] = [
+    const ENTRIES: [&str; 11] = [
         "api",
         "vsock",
         "fs",
@@ -769,6 +776,7 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
         "diagnostics",
         "generations",
         CHECKPOINTS_DIRECTORY,
+        HIBERNATE_DIRECTORY,
         "vm.lock",
         "state.json",
     ];
@@ -874,6 +882,16 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
     if let Some(checkpoints) = optional_private_directory(vm, Path::new(CHECKPOINTS_DIRECTORY))? {
         checkpoint_tree_names(&checkpoints)?;
     }
+    if let Some(hibernate) = optional_private_directory(vm, Path::new(HIBERNATE_DIRECTORY))? {
+        ensure_only_entries(hibernate.path(), &HIBERNATE_FILES)?;
+        for name in HIBERNATE_FILES {
+            match hibernate.open_regular(Path::new(name), false, None, false, Some(0o600)) {
+                Ok(_) => {}
+                Err(error) if path_error_is_not_found(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
     if let Some(generations) = optional_private_directory(vm, Path::new("generations"))? {
         for name in admitted_generation_names(&generations)? {
             let generation = generations.open_private_directory(Path::new(&name), 0o700)?;
@@ -895,6 +913,11 @@ pub(crate) fn validate_owned_vm_tree(vm: &PrivateRoot) -> Result<(), StateError>
 
 /// `vms/<id>/checkpoints` (#3046 R4).
 pub(crate) const CHECKPOINTS_DIRECTORY: &str = "checkpoints";
+/// `vms/<id>/hibernate` (#5529): host-only hibernate metadata outside the
+/// VMM's Landlock write directory.
+pub(crate) const HIBERNATE_DIRECTORY: &str = "hibernate";
+/// Regular 0600 files owned by the supervisor inside `vms/<id>/hibernate`.
+pub(crate) const HIBERNATE_FILES: [&str; 3] = ["record.json", "generation", "fallback.json"];
 /// `checkpoints/out-<operation>`: one capture the VMM and the runner write.
 pub(crate) const CHECKPOINT_OUT_PREFIX: &str = "out-";
 /// `checkpoints/in`: the VM checkpoint this boot restored from, which its

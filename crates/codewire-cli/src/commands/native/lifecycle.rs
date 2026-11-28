@@ -375,6 +375,9 @@ pub(crate) async fn start_native_environment(
         &local_summary(&environment, Outcome::Started, secrets.clone()),
         &caps,
     );
+    let was_hibernated = environment.state == v1::EnvironmentState::Stopped as i32
+        && environment.hibernated_at_unix_ms > 0;
+    let began = std::time::Instant::now();
     let progress = NativeProgress::new(&caps).interruptible(
         &caps,
         InterruptNotice::new(VmLocation::Local, "start", &environment.name),
@@ -404,6 +407,17 @@ pub(crate) async fn start_native_environment(
             // the result, so they come before the next step.
             let next = summary.next.take();
             print_summary(&summary, &caps);
+            if let Some(reason) = trimmed_str(&started.hibernate_fallback_reason) {
+                eprintln!(
+                    "Notice: {}",
+                    crate::commands::environment::idle_hibernate::fallback_notice(reason)
+                );
+            } else if was_hibernated && !caps.is_machine() {
+                eprintln!(
+                    "Restored from hibernate in {:.1}s.",
+                    began.elapsed().as_secs_f64()
+                );
+            }
             if let Some(moved) = &moved {
                 println!(
                     "\n{}",
@@ -603,7 +617,9 @@ pub(crate) async fn stop_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    if environment.state == v1::EnvironmentState::Stopped as i32 {
+    if environment.state == v1::EnvironmentState::Stopped as i32
+        && environment.hibernated_at_unix_ms == 0
+    {
         return print_already(&environment, Already::Stopped, output);
     }
     let progress = NativeProgress::new(&caps).interruptible(
@@ -646,6 +662,14 @@ pub(crate) async fn suspend_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    if environment.state == v1::EnvironmentState::Stopped as i32
+        && environment.hibernated_at_unix_ms > 0
+    {
+        anyhow::bail!(
+            "environment {} is hibernated and cannot be suspended",
+            crate::commands::progress::terminal_text(&environment.name),
+        );
+    }
     if environment.state != v1::EnvironmentState::Running as i32 {
         anyhow::bail!(
             "environment {} is {} and cannot be suspended; only a running VM can be suspended",
@@ -694,7 +718,8 @@ pub(crate) async fn suspend_native_environment(
     }
 }
 
-/// `cw resume` on a local Linux VM: resumes a suspended VM in memory (#5529).
+/// `cw resume` on a local Linux VM: resumes a suspended VM in memory or
+/// restores a hibernated VM from disk (#5529).
 pub(crate) async fn resume_native_environment(
     name: &str,
     output: OutputFormat,
@@ -702,7 +727,9 @@ pub(crate) async fn resume_native_environment(
     let caps = crate::commands::lifecycle_output::capabilities(output);
     let mut client = native_client().await?;
     let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
-    if environment.state != v1::EnvironmentState::Running as i32 {
+    let is_hibernated = environment.state == v1::EnvironmentState::Stopped as i32
+        && environment.hibernated_at_unix_ms > 0;
+    if environment.state != v1::EnvironmentState::Running as i32 && !is_hibernated {
         if environment.state == v1::EnvironmentState::Stopped as i32 {
             anyhow::bail!(
                 "environment {} is stopped; start it with `cw --local start {}`",
@@ -716,14 +743,23 @@ pub(crate) async fn resume_native_environment(
             native_state_label(environment.state)
         );
     }
-    if environment.suspended_at_unix_ms == 0 {
+    if environment.state == v1::EnvironmentState::Running as i32
+        && environment.suspended_at_unix_ms == 0
+    {
         return print_already(&environment, Already::Running, output);
     }
     let progress = NativeProgress::new(&caps).interruptible(
         &caps,
         InterruptNotice::new(VmLocation::Local, "resume", &environment.name),
     );
-    progress.begin("resume", "Resuming the VM");
+    progress.begin(
+        "resume",
+        if is_hibernated {
+            "Restoring the hibernated VM"
+        } else {
+            "Resuming the VM"
+        },
+    );
     let response = match progress
         .tick_while(client.resume(&environment.name, &environment.id))
         .await?
@@ -751,10 +787,89 @@ pub(crate) async fn resume_native_environment(
     match output {
         OutputFormat::Json => print_native_environment(&resumed, output),
         OutputFormat::Text => {
+            if let Some(reason) = trimmed_str(&resumed.hibernate_fallback_reason) {
+                eprintln!(
+                    "Notice: {}",
+                    crate::commands::environment::idle_hibernate::fallback_notice(reason)
+                );
+            }
             resume_result(&resumed, response.wake_duration_ms).print(&caps);
             Ok(())
         }
     }
+}
+
+/// `cw hibernate` on a local Linux VM: writes guest memory and device state to
+/// disk and exits the VMM so the host reclaims RAM (#5529).
+pub(crate) async fn hibernate_native_environment(
+    name: &str,
+    output: OutputFormat,
+) -> anyhow::Result<()> {
+    let caps = crate::commands::lifecycle_output::capabilities(output);
+    let mut client = native_client().await?;
+    let environment = get_native_environment_with_authority_recovery(&mut client, name).await?;
+    if environment.state == v1::EnvironmentState::Stopped as i32 {
+        if environment.hibernated_at_unix_ms > 0 {
+            return print_already(&environment, Already::Hibernated, output);
+        }
+        anyhow::bail!(
+            "environment {} is stopped and cannot be hibernated; only a running or suspended VM can be hibernated",
+            crate::commands::progress::terminal_text(&environment.name)
+        );
+    }
+    if environment.state != v1::EnvironmentState::Running as i32 {
+        anyhow::bail!(
+            "environment {} is {} and cannot be hibernated",
+            crate::commands::progress::terminal_text(&environment.name),
+            native_state_label(environment.state)
+        );
+    }
+    let progress = NativeProgress::new(&caps).interruptible(
+        &caps,
+        InterruptNotice::new(VmLocation::Local, "hibernate", &environment.name),
+    );
+    progress.begin("hibernate", "Hibernating the VM");
+    let response = match progress
+        .tick_while(client.hibernate(&environment.name, &environment.id, "user"))
+        .await?
+    {
+        Ok(response) => {
+            progress.complete();
+            response
+        }
+        Err(status) => {
+            let stage = progress.fail();
+            return Err(lifecycle_failure(
+                "hibernate",
+                &environment.name,
+                stage,
+                native_status(status),
+                true,
+            )
+            .await);
+        }
+    };
+    let hibernated = response.environment.unwrap_or(environment);
+    if response.already_hibernated {
+        return print_already(&hibernated, Already::Hibernated, output);
+    }
+    match output {
+        OutputFormat::Json => print_native_environment(&hibernated, output),
+        OutputFormat::Text => {
+            hibernate_result(&hibernated).print(&caps);
+            Ok(())
+        }
+    }
+}
+
+fn hibernate_result(environment: &v1::Environment) -> ResultBlock {
+    let name = &environment.name;
+    ResultBlock::new(Status::Done, format!("Environment {name} hibernated"))
+        .detail(format!(
+            "{} · processes and files saved; start or connect to restore it",
+            location_label(VmLocation::Local)
+        ))
+        .next(environment_command(VmLocation::Local, "start", name))
 }
 
 fn suspend_result(environment: &v1::Environment) -> ResultBlock {

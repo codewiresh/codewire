@@ -7,7 +7,7 @@ mod cp;
 pub(crate) mod cpu;
 mod create_request;
 mod host_placement;
-mod idle_hibernate;
+pub(crate) mod idle_hibernate;
 mod idle_stop;
 mod idle_suspend;
 pub(crate) mod info;
@@ -281,6 +281,14 @@ pub(crate) async fn handle_env_command(
             ))
             .await
         }
+        EnvCommand::Hibernate(target) => {
+            Box::pin(handle_unified_environment_lifecycle(
+                globals,
+                placement,
+                UnifiedEnvironmentLifecycle::Hibernate(target),
+            ))
+            .await
+        }
         EnvCommand::Restart(target) => {
             Box::pin(handle_unified_environment_lifecycle(
                 globals,
@@ -339,7 +347,6 @@ fn platform_only_command_name(command: &EnvCommand) -> &'static str {
         EnvCommand::Unprotect(_) => "unprotect",
         EnvCommand::CancelDelete(_) => "cancel-delete",
         EnvCommand::Extend(_) => "extend",
-        EnvCommand::Hibernate(_) => "hibernate",
         EnvCommand::Logs(_) => "logs --setup",
         _ => "this command",
     }
@@ -854,6 +861,7 @@ enum UnifiedEnvironmentLifecycle {
     Stop(EnvTargetArgs),
     Suspend(EnvTargetArgs),
     Resume(EnvTargetArgs),
+    Hibernate(EnvTargetArgs),
     Restart(EnvTargetArgs),
     Remove(EnvDeleteArgs),
 }
@@ -862,9 +870,11 @@ impl UnifiedEnvironmentLifecycle {
     fn environment(&self) -> &str {
         match self {
             Self::Start(args) => &args.environment,
-            Self::Stop(args) | Self::Suspend(args) | Self::Resume(args) | Self::Restart(args) => {
-                &args.environment
-            }
+            Self::Stop(args)
+            | Self::Suspend(args)
+            | Self::Resume(args)
+            | Self::Hibernate(args)
+            | Self::Restart(args) => &args.environment,
             Self::Remove(args) => &args.environment,
         }
     }
@@ -875,6 +885,7 @@ impl UnifiedEnvironmentLifecycle {
             Self::Stop(_) => "stop",
             Self::Suspend(_) => "suspend",
             Self::Resume(_) => "resume",
+            Self::Hibernate(_) => "hibernate",
             Self::Restart(_) => "restart",
             Self::Remove(_) => "rm",
         }
@@ -1767,6 +1778,11 @@ async fn handle_unified_environment_lifecycle(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         (
             UnifiedEnvironmentTarget::NativeLocal(name),
+            UnifiedEnvironmentLifecycle::Hibernate(args),
+        ) => Box::pin(hibernate_native_environment(&name, args.output)).await,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        (
+            UnifiedEnvironmentTarget::NativeLocal(name),
             UnifiedEnvironmentLifecycle::Restart(args),
         ) => Box::pin(restart_native_environment(globals, &name, args.output)).await,
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1789,6 +1805,12 @@ async fn handle_unified_environment_lifecycle(
                     environment: id,
                     output: args.output,
                 }),
+                UnifiedEnvironmentLifecycle::Hibernate(args) => {
+                    EnvCommand::Hibernate(EnvTargetArgs {
+                        environment: id,
+                        output: args.output,
+                    })
+                }
                 UnifiedEnvironmentLifecycle::Restart(_) => {
                     anyhow::bail!("restart is supported only for local environments")
                 }

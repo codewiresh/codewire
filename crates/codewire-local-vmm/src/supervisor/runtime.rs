@@ -2198,6 +2198,12 @@ mod tests {
         ) -> Result<Response<v1::ResumeVmResponse>, Status> {
             self.forbidden()
         }
+        async fn hibernate_vm(
+            &self,
+            _: Request<v1::HibernateVmRequest>,
+        ) -> Result<Response<v1::HibernateVmResponse>, Status> {
+            self.forbidden()
+        }
     }
 
     #[tokio::test]

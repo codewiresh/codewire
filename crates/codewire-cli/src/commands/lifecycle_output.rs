@@ -362,23 +362,25 @@ impl ResultBlock {
     }
 }
 
-/// The state a stop, start, suspend or resume asked for, found already.
+/// The state a stop, start, suspend, resume, or hibernate asked for, found already.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Already {
     Stopped,
     Running,
     Suspended,
+    Hibernated,
 }
 
 /// What a stop of a stopped environment, a start or resume of a running one,
-/// or a suspend of a suspended one says in both placements: one plain line.
-/// The environment is as asked, so the command exits 0
-/// (docs/dev/CLI-PARITY.md, L1).
+/// a suspend of a suspended one, or a hibernate of a hibernated one says in
+/// both placements: one plain line. The environment is as asked, so the
+/// command exits 0 (docs/dev/CLI-PARITY.md, L1).
 pub(crate) fn already_line(name: &str, already: Already) -> String {
     let state = match already {
         Already::Stopped => "stopped",
         Already::Running => "running",
         Already::Suspended => "suspended",
+        Already::Hibernated => "hibernated",
     };
     format!("Environment {name} is already {state}.\n")
 }

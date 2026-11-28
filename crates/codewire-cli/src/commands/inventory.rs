@@ -495,8 +495,12 @@ pub(crate) fn local_entry(
             stop_reason: None,
             suspended: environment.state == EnvironmentState::Running as i32
                 && environment.suspended_at_unix_ms > 0,
-            hibernated: false,
-            hibernate_reason: None,
+            hibernated: environment.state == EnvironmentState::Stopped as i32
+                && environment.hibernated_at_unix_ms > 0,
+            hibernate_reason: (environment.state == EnvironmentState::Stopped as i32
+                && environment.hibernated_at_unix_ms > 0)
+                .then(|| trimmed_str(&environment.hibernate_reason).map(str::to_owned))
+                .flatten(),
             daemon_health: if environment.state == EnvironmentState::Running as i32 {
                 "ready".into()
             } else {
@@ -2411,5 +2415,30 @@ mod tests {
             .map(|entry| (entry.name(), entry.location))
             .collect();
         assert_eq!(order, [("b", Location::Local), ("b", Location::Cloud)]);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_hibernated_local_vm_says_so_in_the_state_cell_and_json() {
+        use codewire_local_vmm::control::v1::{Environment as LocalEnv, EnvironmentState};
+        let env = LocalEnv {
+            id: "11111111-1111-4111-8111-111111111111".into(),
+            name: "nap".into(),
+            state: EnvironmentState::Stopped as i32,
+            hibernated_at_unix_ms: 1_764_300_000_000,
+            hibernate_reason: "idle".into(),
+            ..Default::default()
+        };
+        let entry = local_entry(&env, None);
+        assert!(entry.list.hibernated);
+        assert_eq!(entry.list.hibernate_reason.as_deref(), Some("idle"));
+        assert_eq!(
+            state_cell(&entry.list, chrono::Utc::now()),
+            "hibernated (idle)"
+        );
+        let json = serde_json::to_value(&entry.list).unwrap();
+        assert_eq!(json["state"], "stopped");
+        assert_eq!(json["hibernated"], true);
+        assert_eq!(json["hibernate_reason"], "idle");
     }
 }

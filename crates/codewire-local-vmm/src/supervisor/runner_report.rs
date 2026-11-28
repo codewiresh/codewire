@@ -18,9 +18,17 @@ pub(super) async fn with_runner_report(
     supervisor: &Supervisor,
     mut environment: v1::Environment,
 ) -> v1::Environment {
+    hibernate::apply_to_environment(&supervisor.config.engine_root(), &mut environment);
     let Ok(id) = Uuid::parse_str(&environment.id) else {
         return environment;
     };
+    if let Some((at_unix_ms, reason)) = supervisor.hibernating_info(id) {
+        if environment.state == v1::EnvironmentState::Running as i32 {
+            environment.suspended_at_unix_ms = at_unix_ms;
+            environment.suspend_reason = reason;
+        }
+        return environment;
+    }
     let running = environment.state == v1::EnvironmentState::Running as i32;
     let deadline = match (environment.error_code.is_empty(), running) {
         (false, _) => RUNNER_EXIT_TIMEOUT,

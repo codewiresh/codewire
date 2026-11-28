@@ -441,6 +441,7 @@ fn print_already(
                 Already::Stopped => "stopped",
                 Already::Running => "running",
                 Already::Suspended => "suspended",
+                Already::Hibernated => "hibernated",
             };
             let response = StatusResponse {
                 status: status.to_owned(),

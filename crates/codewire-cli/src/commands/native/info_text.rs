@@ -75,6 +75,27 @@ pub(super) fn format_native_environment(
             view.name
         ));
     }
+    if let Some(hibernated_at) = &view.hibernated_at {
+        output.push_str(&format!("HibernatedAt: {hibernated_at}\n"));
+    }
+    if let Some(reason) = &view.hibernate_reason {
+        output.push_str(&format!("HibernateReason: {reason}\n"));
+    }
+    if let Some(memory) = &view.hibernate_memory {
+        output.push_str(&format!("HibernateMemory: {memory}\n"));
+    }
+    if view.hibernated_at.is_some() {
+        output.push_str(&format!(
+            "Notice:      Hibernated to disk; processes and files are saved. Run `cw --local start {}` or connect to restore it.\n",
+            view.name
+        ));
+    }
+    if let Some(reason) = &view.hibernate_fallback_reason {
+        output.push_str(&format!(
+            "Notice:      {}\n",
+            crate::commands::environment::idle_hibernate::fallback_notice(reason)
+        ));
+    }
     if let Some(wake_ms) = view.last_wake_duration_ms {
         output.push_str(&format!("LastWake:    {wake_ms}ms\n"));
     }

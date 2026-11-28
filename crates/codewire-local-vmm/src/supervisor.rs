@@ -21,6 +21,8 @@ mod failure_codes;
 use failure_codes::{create_failure_code, lifecycle_failure_cause};
 mod halt;
 use halt::{HaltReason, fatal_drain_error};
+mod hibernate;
+mod hibernate_ports;
 mod local_https;
 mod managed_runtime;
 mod metadata;
@@ -558,6 +560,7 @@ pub async fn serve_supervisor(config: NativeRuntimeConfig) -> Result<(), Supervi
         .record_direct_share_discriminators_for_startup()
         .await?;
     supervisor.core().begin_rollback_of_failed_creates()?;
+    supervisor.arm_hibernated_port_wakers_for_startup().await;
     let (local_https, local_https_task) = local_https::channel();
     let service = SupervisorRpc {
         info: supervisor_info(&config),
@@ -922,6 +925,12 @@ struct Supervisor {
     collection: tokio::sync::Notify,
     /// Wakes content writers waiting for a running collection to end.
     collection_ended: tokio::sync::Notify,
+    /// Wake-stub loopback listeners for published host ports of hibernated VMs (#5529).
+    hibernate_port_wakers: hibernate_ports::HibernatePortWakers,
+    /// Environments currently executing a hibernate transition so concurrent
+    /// `cw ls` / `cw info` reads never see a stale awake state while the
+    /// runner mutex is held (#5529).
+    hibernating: std::sync::Mutex<HashMap<Uuid, (i64, String)>>,
 }
 
 impl Supervisor {
@@ -937,6 +946,8 @@ impl Supervisor {
             leases: std::sync::Mutex::default(),
             collection: tokio::sync::Notify::new(),
             collection_ended: tokio::sync::Notify::new(),
+            hibernate_port_wakers: hibernate_ports::HibernatePortWakers::default(),
+            hibernating: std::sync::Mutex::default(),
         })
     }
 
@@ -2877,7 +2888,8 @@ impl Supervisor {
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
-                    self.ensure_vm_started(&request.name, 1, operation.operation_id)
+                    let _ = self
+                        .ensure_vm_started(&request.name, 1, operation.operation_id)
                         .await?;
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
@@ -4384,7 +4396,7 @@ impl Supervisor {
         name: &str,
         generation: u64,
         operation_id: Uuid,
-    ) -> Result<(), SupervisorError> {
+    ) -> Result<u64, SupervisorError> {
         // Every checked share stays open until the runner's StartVm returns
         // (`while_holding_direct_shares`): the runner reopens each by path
         // and compares (device, inode), which is exact only while the
@@ -4421,7 +4433,7 @@ impl Supervisor {
                     .await
                     .map_err(|status| SupervisorError::VmStart(status.message().to_owned()))?;
             }
-            return Ok(());
+            return Ok(generation);
         }
         if current.generation >= generation {
             return Err(SupervisorError::InvalidRunnerResponse);
@@ -4489,7 +4501,196 @@ impl Supervisor {
             managed_credential_clients: managed_credential_clients.encode().to_owned(),
             checkpoint: None,
         };
-        let start_request = checkpoints::attach_boot(self, operation_id, start_request)?;
+        let mut start_request = checkpoints::attach_boot(self, operation_id, start_request)?;
+        // Release any supervisor wake-stub listeners for this hibernated VM
+        // right before the runner reserves its published loopback ports (#5529).
+        self.hibernate_port_wakers.release(environment.id).await;
+        let engine_root = self.config.engine_root();
+        let mut hibernate_fallback_cold_request: Option<v1::StartVmRequest> = None;
+        if start_request.checkpoint.is_some() {
+            // An explicit VM checkpoint restore discards any prior hibernate image.
+            hibernate::clear_all(&engine_root, environment.id);
+        } else {
+            hibernate::clear_fallback(&engine_root, environment.id);
+            if hibernate::has_pending_hibernate(&engine_root, environment.id) {
+                match self
+                    .admit_hibernate_for_start(
+                        &environment,
+                        generation,
+                        &expected_artifact_generation,
+                        &start_request,
+                    )
+                    .await
+                {
+                    Ok(record) => {
+                        hibernate_fallback_cold_request = Some(start_request.clone());
+                        start_request.vsock_cid = record.vsock_cid;
+                        start_request.checkpoint = Some(record.to_checkpoint_boot());
+                    }
+                    Err(reason) => {
+                        hibernate::write_fallback(&engine_root, environment.id, reason);
+                        diagnostic_log::record(
+                            self.log.as_deref(),
+                            "vm_hibernate_fallback",
+                            &[
+                                ("environment", LogField::Id(environment.id)),
+                                ("generation", LogField::Count(generation)),
+                                ("reason", LogField::Name(reason.log_name())),
+                            ],
+                        );
+                    }
+                }
+            }
+        }
+        let restoring_hibernate = hibernate_fallback_cold_request.is_some();
+        let attempt = self
+            .launch_runner_generation(
+                name,
+                operation_id,
+                &environment,
+                &mut client,
+                current.generation,
+                current_state,
+                generation,
+                &expected_artifact_generation,
+                &expected_cw_runtime_generation,
+                broker_request,
+                start_request,
+                checked_direct_shares,
+            )
+            .await;
+        let booted_generation = match attempt {
+            Ok(()) => {
+                if restoring_hibernate {
+                    hibernate::clear_hibernate_image(&engine_root, environment.id);
+                }
+                generation
+            }
+            Err(_restore_error) if restoring_hibernate => {
+                // Mid-restore failure: discard the unusable hibernate image,
+                // record the fallback reason, and cold-boot cleanly from disks
+                // on the next generation (#5529).
+                let _ = client.stop().await;
+                hibernate::clear_hibernate_image(&engine_root, environment.id);
+                hibernate::write_fallback(
+                    &engine_root,
+                    environment.id,
+                    hibernate::FallbackReason::RestoreFailed,
+                );
+                diagnostic_log::record(
+                    self.log.as_deref(),
+                    "vm_hibernate_fallback",
+                    &[
+                        ("environment", LogField::Id(environment.id)),
+                        ("generation", LogField::Count(generation)),
+                        (
+                            "reason",
+                            LogField::Name(hibernate::FallbackReason::RestoreFailed.log_name()),
+                        ),
+                    ],
+                );
+                let fallback_generation = generation
+                    .checked_add(1)
+                    .ok_or(SupervisorError::InvalidState)?;
+                self.update_environment(name, |env| {
+                    env.generation = fallback_generation;
+                    env.state = StoredEnvironmentState::Starting;
+                    if let Some(runner) = env.runner.as_mut() {
+                        runner.error_code = None;
+                    }
+                    Ok(())
+                })?;
+                let mut cold_request = hibernate_fallback_cold_request
+                    .expect("restoring_hibernate implies cold boot request");
+                cold_request.generation = fallback_generation;
+                let fallback_broker = self.core().credential_broker_request_for_environment(
+                    &projection_environment,
+                    fallback_generation,
+                )?;
+                let fallback_shares = self
+                    .revalidate_environment_workspace_plan_for_boot(name)
+                    .await?;
+                self.launch_runner_generation(
+                    name,
+                    operation_id,
+                    &environment,
+                    &mut client,
+                    generation,
+                    StoredEnvironmentState::Stopped,
+                    fallback_generation,
+                    &expected_artifact_generation,
+                    &expected_cw_runtime_generation,
+                    fallback_broker,
+                    cold_request,
+                    fallback_shares,
+                )
+                .await?;
+                fallback_generation
+            }
+            Err(error) => return Err(error),
+        };
+        self.core()
+            .network_policies
+            .record_enforced(environment.id, &egress.network_policy)
+            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
+        self.finish_started_vm(
+            name,
+            booted_generation,
+            operation_id,
+            &environment,
+            client,
+            cw_runtime,
+        )
+        .await?;
+        Ok(booted_generation)
+    }
+
+    async fn admit_hibernate_for_start(
+        &self,
+        environment: &EnvironmentRecord,
+        target_generation: u64,
+        expected_artifact_generation: &str,
+        start_request: &v1::StartVmRequest,
+    ) -> Result<hibernate::LocalHibernateRecord, hibernate::FallbackReason> {
+        let engine_root = self.config.engine_root();
+        let engine = PrivateRoot::open(&engine_root)
+            .map_err(|_| hibernate::FallbackReason::DamagedMemoryFile)?;
+        let store = RuntimeArtifactStore::create(&engine)
+            .map_err(|_| hibernate::FallbackReason::RuntimeImageDigestMismatch)?;
+        let artifacts = store
+            .open_generation(expected_artifact_generation)
+            .await
+            .map_err(|_| hibernate::FallbackReason::RuntimeImageDigestMismatch)?;
+        let (vmm_sha256, _) = checkpoints::local::pinned_vmm(&artifacts);
+        let host_cpu = checkpoints::local::host_identity().cpu;
+        let expected_restore_generation = target_generation.saturating_sub(1);
+        hibernate::admit_restore(
+            &engine_root,
+            environment,
+            expected_restore_generation,
+            vmm_sha256,
+            &host_cpu,
+            expected_artifact_generation,
+            start_request,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_runner_generation(
+        &self,
+        name: &str,
+        operation_id: Uuid,
+        environment: &EnvironmentRecord,
+        client: &mut RunnerClient,
+        prior_generation: u64,
+        prior_state: StoredEnvironmentState,
+        generation: u64,
+        expected_artifact_generation: &str,
+        expected_cw_runtime_generation: &str,
+        broker_request: CredentialBrokerEnsureRequest,
+        start_request: v1::StartVmRequest,
+        checked_direct_shares: CheckedDirectShares,
+    ) -> Result<(), SupervisorError> {
         let runner_events = client
             .watch(environment.id)
             .await
@@ -4505,15 +4706,15 @@ impl Supervisor {
             None
         };
         let progress = self.operation_progress.clone();
-        let artifact_generation = expected_artifact_generation.clone();
+        let artifact_generation = expected_artifact_generation.to_owned();
         let mut relay = tokio::spawn(relay_runner_start_events(
             runner_events,
             RunnerStartRelayContext {
                 operation_id,
                 environment_id: environment.id,
                 artifact_generation,
-                prior_generation: current.generation,
-                prior_state: current_state,
+                prior_generation,
+                prior_state,
                 target_generation: generation,
                 progress,
             },
@@ -4527,7 +4728,7 @@ impl Supervisor {
                         events,
                         environment.id,
                         generation,
-                        &expected_artifact_generation,
+                        expected_artifact_generation,
                     )
                 }),
                 ensure_credential_broker(broker_request),
@@ -4587,19 +4788,7 @@ impl Supervisor {
             let _ = client.stop().await;
             return Err(SupervisorError::InvalidRunnerResponse);
         }
-        self.core()
-            .network_policies
-            .record_enforced(environment.id, &egress.network_policy)
-            .map_err(|error| SupervisorError::NetworkPolicyStore(error.to_string()))?;
-        self.finish_started_vm(
-            name,
-            generation,
-            operation_id,
-            &environment,
-            client,
-            cw_runtime,
-        )
-        .await
+        Ok(())
     }
 }
 
@@ -4640,6 +4829,8 @@ impl Supervisor {
             return Err(SupervisorError::Orphaned);
         }
         let environment = self.environment(name)?;
+        self.hibernate_port_wakers.release(environment.id).await;
+        hibernate::clear_all(&self.config.engine_root(), environment.id);
         self.stop_environment_broker_if_present(&environment)
             .await?;
         if self.core().incompatible_runners.contains(&environment.id) {
@@ -4692,6 +4883,7 @@ impl Supervisor {
             // assets before recording state or touching an existing runner.
             self.admit_start_or_move(name).await?;
         }
+        let mut booted_generation = target_generation;
         let mut operation = operation.clone();
         while let Some(effect) = supervisor_effect(operation.kind, operation.checkpoint)? {
             let effect_name = effect.name();
@@ -4753,7 +4945,8 @@ impl Supervisor {
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
                 LifecycleEffect::StartVm => {
-                    self.ensure_vm_started(name, target_generation, operation.operation_id)
+                    booted_generation = self
+                        .ensure_vm_started(name, target_generation, operation.operation_id)
                         .await?;
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
@@ -4764,7 +4957,7 @@ impl Supervisor {
                             .get_mut(name)
                             .ok_or_else(|| SupervisorError::NotFound(name.to_owned()))?;
                         let _displaced = environment.promote_staging_workspace_generation()?;
-                        environment.generation = target_generation;
+                        environment.generation = booted_generation;
                         environment.state = StoredEnvironmentState::Running;
                         Ok(())
                     })?;
@@ -5182,6 +5375,15 @@ impl Supervisor {
                             .host_ports = target.clone();
                         Ok(())
                     })?;
+                    let environment = self.environment(name)?;
+                    if environment.state == StoredEnvironmentState::Stopped
+                        && hibernate::is_hibernated(&self.config.engine_root(), environment.id)
+                        && let Some(this) = self.this.upgrade()
+                    {
+                        self.hibernate_port_wakers
+                            .arm(this, environment.id, name.to_owned(), &target)
+                            .await;
+                    }
                 }
                 _ => return Err(SupervisorError::InvalidState),
             }
@@ -5212,6 +5414,8 @@ impl Supervisor {
         // which hold no local binding, and the authority would otherwise keep
         // restarting a broker whose runner is gone (#2924).
         let environment = self.environment(name)?;
+        self.hibernate_port_wakers.release(environment.id).await;
+        hibernate::clear_all(&self.config.engine_root(), environment.id);
         self.stop_environment_broker_if_present(&environment)
             .await?;
         if self.environment(name)?.runner.is_none() {
@@ -5345,7 +5549,8 @@ impl Supervisor {
                 }
                 LifecycleEffect::RestartVm => {
                     if was_running {
-                        self.ensure_vm_started(name, target_generation, operation.operation_id)
+                        let _ = self
+                            .ensure_vm_started(name, target_generation, operation.operation_id)
                             .await?;
                     }
                     operation = self.core().checkpoint_operation(&operation)?;
@@ -5484,12 +5689,13 @@ impl Supervisor {
                 }
                 LifecycleEffect::StartVm => {
                     if workspace_transition_requires_boot(&self.environment(name)?, &parameters)? {
-                        self.ensure_vm_started(
-                            name,
-                            parameters.target_generation,
-                            operation.operation_id,
-                        )
-                        .await?;
+                        let _ = self
+                            .ensure_vm_started(
+                                name,
+                                parameters.target_generation,
+                                operation.operation_id,
+                            )
+                            .await?;
                     }
                     operation = self.core().checkpoint_operation(&operation)?;
                 }
@@ -5738,7 +5944,12 @@ impl Supervisor {
 
     async fn daemon_access(&self, name: &str) -> Result<v1::DaemonAccess, SupervisorError> {
         self.reconcile(name).await?;
-        if self.environment(name)?.state != StoredEnvironmentState::Running {
+        let environment = self.environment(name)?;
+        if environment.state == StoredEnvironmentState::Stopped
+            && hibernate::has_pending_hibernate(&self.config.engine_root(), environment.id)
+        {
+            self.wake_hibernated_under_lease(name).await?;
+        } else if environment.state != StoredEnvironmentState::Running {
             return Err(SupervisorError::NotRunning);
         }
         let artifact_generation =
@@ -6129,6 +6340,15 @@ impl LocalSupervisorService for SupervisorRpc {
             .map(Response::new)
     }
 
+    async fn hibernate_environment(
+        &self,
+        request: Request<v1::HibernateEnvironmentRequest>,
+    ) -> Result<Response<v1::HibernateEnvironmentResponse>, Status> {
+        self.hibernate_environment_inner(request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
     async fn stop_environment(
         &self,
         request: Request<v1::EnvironmentSelector>,
@@ -6185,10 +6405,13 @@ impl LocalSupervisorService for SupervisorRpc {
         let environment = self.supervisor.environment(&name).map_err(Status::from)?;
         require_expected_environment(&environment, expected_environment_id)?;
         reject_environment_workload_secrets(&environment).map_err(Status::from)?;
+        let hibernated_stopped = environment.state == StoredEnvironmentState::Stopped
+            && hibernate::is_hibernated(&self.supervisor.config.engine_root(), environment.id);
         if !matches!(
             environment.state,
             StoredEnvironmentState::Running | StoredEnvironmentState::Error
-        ) {
+        ) && !hibernated_stopped
+        {
             return Err(Status::failed_precondition(
                 "native local environment must be running or recoverable",
             ));

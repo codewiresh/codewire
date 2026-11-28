@@ -551,25 +551,65 @@ async fn resolve_environment_session_target(
     }
 }
 
-/// Wakes a hibernated cloud Sandbox before interactive access (`cw shell`,
-/// `cw exec`, `cw attach`, `cw run`) connects to it (#6647).
+/// Wakes a hibernated Sandbox or local VM before interactive access (`cw shell`,
+/// `cw exec`, `cw attach`, `cw run`) connects to it (#6647, #5529).
 async fn wake_hibernated_session_target(
     globals: &Globals,
     target: &EnvironmentSessionTarget,
 ) -> anyhow::Result<()> {
-    let EnvironmentSessionTarget::Platform {
-        org_id,
-        environment_id,
-        ..
-    } = target
-    else {
-        return Ok(());
-    };
-    let env = OsEnv;
-    let paths = ResolvePaths::from_env(&env)?;
-    let platform = resolve_platform(globals, &paths, &env)?;
-    let client = EnvironmentClient::new(&platform)?;
-    super::environment::wake_hibernated_if_needed(&client, org_id, environment_id).await
+    match target {
+        EnvironmentSessionTarget::Platform {
+            org_id,
+            environment_id,
+            ..
+        } => {
+            let env = OsEnv;
+            let paths = ResolvePaths::from_env(&env)?;
+            let platform = resolve_platform(globals, &paths, &env)?;
+            let client = EnvironmentClient::new(&platform)?;
+            super::environment::wake_hibernated_if_needed(&client, org_id, environment_id).await
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        EnvironmentSessionTarget::NativeLocal { environment_id, .. } => {
+            let Ok(mut client) = super::native::native_client().await else {
+                return Ok(());
+            };
+            let Ok(environments) = client.list().await else {
+                return Ok(());
+            };
+            let Some(environment) = environments
+                .into_iter()
+                .find(|env| env.id == *environment_id)
+            else {
+                return Ok(());
+            };
+            if environment.state
+                != codewire_local_vmm::control::v1::EnvironmentState::Stopped as i32
+                || environment.hibernated_at_unix_ms == 0
+            {
+                return Ok(());
+            }
+            let safe_name = crate::commands::progress::terminal_text(&environment.name);
+            eprintln!("Restoring hibernated VM {safe_name}...");
+            let reply = client
+                .resume(&environment.name, &environment.id)
+                .await
+                .map_err(super::native::native_status)?;
+            if let Some(reason) = reply
+                .environment
+                .as_ref()
+                .and_then(|env| trimmed_str(&env.hibernate_fallback_reason))
+            {
+                eprintln!(
+                    "Notice: {}",
+                    super::environment::idle_hibernate::fallback_notice(reason)
+                );
+            }
+            Ok(())
+        }
+        #[cfg(unix)]
+        EnvironmentSessionTarget::Host { .. } => Ok(()),
+    }
 }
 
 /// A saved managed-message location is also its placement authority. Resolve

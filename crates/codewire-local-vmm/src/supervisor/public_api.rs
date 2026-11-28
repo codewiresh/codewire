@@ -325,6 +325,12 @@ impl SupervisorRpc {
         let (_, environment) = self.public_environment(org_id, environment_id).await?;
         match private_environment_state(environment.state)? {
             v1::EnvironmentState::Stopped => {
+                if environment.hibernated_at_unix_ms > 0 {
+                    return Ok(fixed_daemon_status(
+                        proto::EnvironmentDaemonState::Starting,
+                        "hibernated; start or connect to restore it",
+                    ));
+                }
                 return Ok(fixed_daemon_status(
                     proto::EnvironmentDaemonState::Starting,
                     "local environment is stopped",
@@ -798,6 +804,12 @@ fn public_environment(
             .then(|| operation_timestamp(environment.suspended_at_unix_ms))
             .transpose()?
             .into(),
+        hibernated_at: (environment.hibernated_at_unix_ms > 0)
+            .then(|| operation_timestamp(environment.hibernated_at_unix_ms))
+            .transpose()?
+            .into(),
+        hibernate_reason: environment.hibernate_reason.clone(),
+        hibernate_fallback_reason: environment.hibernate_fallback_reason.clone(),
         ..Default::default()
     })
 }

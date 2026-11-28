@@ -1123,6 +1123,13 @@ impl crate::control::v1::environment_runner_service_server::EnvironmentRunnerSer
     ) -> Result<Response<v1::ResumeVmResponse>, Status> {
         self.unexpected_use()
     }
+
+    async fn hibernate_vm(
+        &self,
+        _request: Request<v1::HibernateVmRequest>,
+    ) -> Result<Response<v1::HibernateVmResponse>, Status> {
+        self.unexpected_use()
+    }
 }
 
 fn spawn_test_runner_protocol_server(

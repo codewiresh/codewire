@@ -19,9 +19,12 @@ service LocalSupervisorService {
   // Pause a running Linux VM in memory, keeping its processes and sockets
   // (#5529, protocol 30). Idempotent when already suspended.
   rpc SuspendEnvironment(SuspendEnvironmentRequest) returns (SuspendEnvironmentResponse);
-  // Resume a suspended Linux VM (#5529, protocol 30). Idempotent when already
-  // running.
+  // Resume a suspended or hibernated Linux VM (#5529, protocol 30/31).
+  // Idempotent when already running.
   rpc ResumeEnvironment(ResumeEnvironmentRequest) returns (ResumeEnvironmentResponse);
+  // Hibernate a running or suspended Linux VM to disk and end its VMM
+  // (#5529, protocol 31). Idempotent when already hibernated.
+  rpc HibernateEnvironment(HibernateEnvironmentRequest) returns (HibernateEnvironmentResponse);
   rpc RefreshEnvironmentSkills(EnvironmentSelector) returns (Operation);
   rpc ResizeEnvironment(ResizeEnvironmentRequest) returns (Operation);
   rpc UpdateEnvironmentSources(UpdateEnvironmentSourcesRequest) returns (Operation);
@@ -586,6 +589,40 @@ service EnvironmentRunnerService {
   // Runner protocol 16 (#5529): resume a paused VM and thaw its workload
   // (Linux only). Idempotent when already running.
   rpc ResumeVm(ResumeVmRequest) returns (ResumeVmResponse);
+  // Runner protocol 17 (#5529): write guest memory and device state into
+  // vms/<id>/checkpoints/in and end the VMM (Linux only). Accepts running or
+  // suspended VMs.
+  rpc HibernateVm(HibernateVmRequest) returns (HibernateVmResponse);
+}
+
+message HibernateEnvironmentRequest {
+  string name = 1;
+  string environment_id = 2;
+  // "user" or "idle"; empty defaults to "user".
+  string reason = 3;
+}
+
+message HibernateEnvironmentResponse {
+  Environment environment = 1;
+  bool already_hibernated = 2;
+}
+
+message HibernateVmRequest {
+  string environment_id = 1;
+  uint64 generation = 2;
+  string operation_id = 3;
+}
+
+message HibernateVmResponse {
+  CheckpointTimings timings = 1;
+  uint64 memory_bytes = 2;
+  string config_sha256 = 3;
+  string state_sha256 = 4;
+  string vmm_sha256 = 5;
+  uint32 vsock_cid = 6;
+  string root_generation = 7;
+  uint64 setup_disk_bytes = 8;
+  CheckpointBootBindings boot = 9;
 }
 
 message SuspendEnvironmentRequest {
@@ -1103,8 +1140,18 @@ message Environment {
   int64 suspended_at_unix_ms = 33;
   // "user" or "idle" while suspended; empty otherwise.
   string suspend_reason = 34;
-  // How long the most recent wake from suspend took, in milliseconds.
+  // How long the most recent wake from suspend or hibernate took, in milliseconds.
   uint64 last_wake_duration_ms = 35;
+  // Nonzero while the stopped VM has a valid hibernate memory image on disk
+  // (#5529, protocol 31).
+  int64 hibernated_at_unix_ms = 36;
+  // "user" or "idle" while hibernated; empty otherwise.
+  string hibernate_reason = 37;
+  // Size of the hibernate memory image in bytes while hibernated; zero otherwise.
+  uint64 hibernate_memory_bytes = 38;
+  // Set when the most recent start could not restore from hibernate and fell
+  // back to a clean cold boot from disks; cleared on the next start or stop.
+  string hibernate_fallback_reason = 39;
 }
 
 message ListEnvironmentsRequest {}

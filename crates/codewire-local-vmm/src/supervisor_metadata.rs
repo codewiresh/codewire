@@ -255,6 +255,10 @@ impl EnvironmentRecord {
             suspended_at_unix_ms: 0,
             suspend_reason: String::new(),
             last_wake_duration_ms: 0,
+            hibernated_at_unix_ms: 0,
+            hibernate_reason: String::new(),
+            hibernate_memory_bytes: 0,
+            hibernate_fallback_reason: String::new(),
         }
     }
 

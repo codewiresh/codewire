@@ -228,38 +228,52 @@ impl Supervisor {
                 },
                 &paths,
             ),
-            Plan::Clear => match self.clear(&paths, boot.environment_id).await {
-                Ok(removed) => {
-                    write_marker(&paths).map_err(|()| self.marker_failed(boot))?;
-                    diagnostic_log::record(
-                        self.log.as_deref(),
-                        "state_disk_clear",
-                        &[
-                            ("outcome", LogField::Name("cleared")),
-                            ("removed_logins", LogField::Count(u64::from(removed))),
-                        ],
+            Plan::Clear => {
+                // Scrubbing state.raw invalidates any hibernated memory image
+                // that had the filesystem mounted; discard it so the boot runs
+                // as a clean cold boot with a clear fallback notice (#5529).
+                let engine_root = self.config.engine_root();
+                if super::hibernate::has_pending_hibernate(&engine_root, boot.environment_id) {
+                    super::hibernate::clear_hibernate_image(&engine_root, boot.environment_id);
+                    super::hibernate::write_fallback(
+                        &engine_root,
+                        boot.environment_id,
+                        super::hibernate::FallbackReason::VmConfigMismatch,
                     );
-                    Ok(())
                 }
-                Err(step) => {
-                    diagnostic_log::record(
-                        self.log.as_deref(),
-                        "state_disk_clear",
-                        &[
-                            ("outcome", LogField::Name("failed")),
-                            ("step", LogField::Name(step.name())),
-                        ],
-                    );
-                    self.overridden(
-                        boot,
-                        UnclearedDisk::ClearFailed {
-                            step,
-                            platform: boot.platform,
-                        },
-                        &paths,
-                    )
+                match self.clear(&paths, boot.environment_id).await {
+                    Ok(removed) => {
+                        write_marker(&paths).map_err(|()| self.marker_failed(boot))?;
+                        diagnostic_log::record(
+                            self.log.as_deref(),
+                            "state_disk_clear",
+                            &[
+                                ("outcome", LogField::Name("cleared")),
+                                ("removed_logins", LogField::Count(u64::from(removed))),
+                            ],
+                        );
+                        Ok(())
+                    }
+                    Err(step) => {
+                        diagnostic_log::record(
+                            self.log.as_deref(),
+                            "state_disk_clear",
+                            &[
+                                ("outcome", LogField::Name("failed")),
+                                ("step", LogField::Name(step.name())),
+                            ],
+                        );
+                        self.overridden(
+                            boot,
+                            UnclearedDisk::ClearFailed {
+                                step,
+                                platform: boot.platform,
+                            },
+                            &paths,
+                        )
+                    }
                 }
-            },
+            }
         }
     }
 

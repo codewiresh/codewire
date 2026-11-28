@@ -48,9 +48,10 @@ mod unsupported_options;
 pub(crate) use profile::require_native_agent_profile;
 
 pub(crate) use lifecycle::{
-    NativeCreated, local_vm_credentials, network_ref, print_native_created,
-    remove_native_environment, restart_native_environment, resume_native_environment,
-    start_native_environment, stop_native_environment, suspend_native_environment,
+    NativeCreated, hibernate_native_environment, local_vm_credentials, network_ref,
+    print_native_created, remove_native_environment, restart_native_environment,
+    resume_native_environment, start_native_environment, stop_native_environment,
+    suspend_native_environment,
 };
 pub(crate) use local_https::{
     HttpsReport, NativeHttpsView, handle_local_https, https_report, print_created_https,
@@ -2385,6 +2386,14 @@ pub(crate) struct NativeEnvironmentView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) suspend_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hibernated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hibernate_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hibernate_memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hibernate_fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_wake_duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_selection: Option<sources::SourceView>,
@@ -2402,8 +2411,12 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
     fn try_from(environment: &v1::Environment) -> anyhow::Result<Self> {
         let is_suspended = environment.state == v1::EnvironmentState::Running as i32
             && environment.suspended_at_unix_ms > 0;
+        let is_hibernated = environment.state == v1::EnvironmentState::Stopped as i32
+            && environment.hibernated_at_unix_ms > 0;
         let state = if is_suspended {
             "suspended".to_owned()
+        } else if is_hibernated {
+            "hibernated".to_owned()
         } else {
             native_state_label(environment.state).to_owned()
         };
@@ -2413,6 +2426,16 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
         let suspend_reason = is_suspended
             .then(|| trimmed_str(&environment.suspend_reason).map(str::to_owned))
             .flatten();
+        let hibernated_at = is_hibernated
+            .then(|| format_unix_ms_rfc3339(environment.hibernated_at_unix_ms))
+            .flatten();
+        let hibernate_reason = is_hibernated
+            .then(|| trimmed_str(&environment.hibernate_reason).map(str::to_owned))
+            .flatten();
+        let hibernate_memory = (is_hibernated && environment.hibernate_memory_bytes > 0)
+            .then(|| format_binary_bytes(environment.hibernate_memory_bytes));
+        let hibernate_fallback_reason =
+            trimmed_str(&environment.hibernate_fallback_reason).map(str::to_owned);
         let last_wake_duration_ms =
             (environment.last_wake_duration_ms > 0).then_some(environment.last_wake_duration_ms);
         Ok(Self {
@@ -2454,6 +2477,10 @@ impl TryFrom<&v1::Environment> for NativeEnvironmentView {
             generation: environment.generation,
             suspended_at,
             suspend_reason,
+            hibernated_at,
+            hibernate_reason,
+            hibernate_memory,
+            hibernate_fallback_reason,
             last_wake_duration_ms,
             source_selection: sources::source_view(environment)?,
             network_policy: environment.network_policy.as_ref().map(network_policy_text),
@@ -4224,7 +4251,7 @@ fn strip_ascii_case_suffix<'a>(value: &'a str, suffixes: &[&str]) -> Option<&'a 
         .map(|suffix| &value[..value.len() - suffix.len()])
 }
 
-fn native_status(status: tonic::Status) -> anyhow::Error {
+pub(crate) fn native_status(status: tonic::Status) -> anyhow::Error {
     let mut message = status.message().to_owned();
     // The supervisor names only which store directory; the directories are
     // this user's own, so read them here to name the path and modes (#3271).
@@ -6563,6 +6590,10 @@ working_directory: /workspace/github
             generation: 7,
             suspended_at: None,
             suspend_reason: None,
+            hibernated_at: None,
+            hibernate_reason: None,
+            hibernate_memory: None,
+            hibernate_fallback_reason: None,
             last_wake_duration_ms: None,
             source_selection: None,
         };
@@ -6597,6 +6628,43 @@ working_directory: /workspace/github
         assert!(suspended_text.contains("SuspendedAt: "));
         assert!(suspended_text.contains("SuspendReason: user\n"));
         assert!(suspended_text.contains("LastWake:    18ms\n"));
+
+        let hibernated_env = v1::Environment {
+            id: Uuid::new_v4().to_string(),
+            name: "nap".to_owned(),
+            state: v1::EnvironmentState::Stopped as i32,
+            vcpus: 2,
+            memory_mib: 4096,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            generation: 2,
+            hibernated_at_unix_ms: 1_764_300_000_000,
+            hibernate_reason: "user".to_owned(),
+            hibernate_memory_bytes: 4 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+        let hibernated_view = NativeEnvironmentView::try_from(&hibernated_env).unwrap();
+        assert_eq!(hibernated_view.state, "hibernated");
+        let hibernated_text = format_native_environment(&hibernated_view, None, &[], PLAIN_STYLE);
+        assert!(hibernated_text.contains("State:       hibernated\n"));
+        assert!(hibernated_text.contains("HibernatedAt: "));
+        assert!(hibernated_text.contains("HibernateReason: user\n"));
+        assert!(hibernated_text.contains("HibernateMemory: 4Gi\n"));
+
+        let fallback_env = v1::Environment {
+            id: Uuid::new_v4().to_string(),
+            name: "nap".to_owned(),
+            state: v1::EnvironmentState::Running as i32,
+            vcpus: 2,
+            memory_mib: 4096,
+            disk_bytes: 20 * 1024 * 1024 * 1024,
+            generation: 3,
+            hibernate_fallback_reason: "damaged-memory-file".to_owned(),
+            ..Default::default()
+        };
+        let fallback_view = NativeEnvironmentView::try_from(&fallback_env).unwrap();
+        let fallback_text = format_native_environment(&fallback_view, None, &[], PLAIN_STYLE);
+        assert!(fallback_text.contains("damaged-memory-file"));
+        assert!(fallback_text.contains("running processes were lost while files were kept"));
 
         let mut spec = codewire_project::ProjectSpec {
             install_command: "npm ci\nnpm run build".to_owned(),

@@ -730,7 +730,7 @@ impl NativeSupervisorClient {
             .into_inner())
     }
 
-    /// Resume a suspended Linux local VM (#5529, protocol 30).
+    /// Resume a suspended or hibernated Linux local VM (#5529, protocol 30/31).
     pub async fn resume(
         &mut self,
         name: &str,
@@ -746,6 +746,29 @@ impl NativeSupervisorClient {
             .resume_environment(v1::ResumeEnvironmentRequest {
                 name: name.to_owned(),
                 environment_id: environment_id.to_owned(),
+            })
+            .await?
+            .into_inner())
+    }
+
+    /// Hibernate a running or suspended Linux local VM to disk (#5529, protocol 31).
+    pub async fn hibernate(
+        &mut self,
+        name: &str,
+        environment_id: &str,
+        reason: &str,
+    ) -> Result<v1::HibernateEnvironmentResponse, Status> {
+        if !self.supports(SupervisorFeature::LocalHibernate) {
+            return Err(Status::unimplemented(
+                "your local VMs run on an older cw's supervisor, which cannot hibernate local VMs; `cw upgrade --vms` moves them to this cw once they are idle",
+            ));
+        }
+        Ok(self
+            .inner
+            .hibernate_environment(v1::HibernateEnvironmentRequest {
+                name: name.to_owned(),
+                environment_id: environment_id.to_owned(),
+                reason: reason.to_owned(),
             })
             .await?
             .into_inner())
