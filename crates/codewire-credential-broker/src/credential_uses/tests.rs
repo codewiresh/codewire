@@ -221,3 +221,48 @@ async fn a_send_after_a_swap_is_one_use_at_the_host_it_went_to() {
         (KEY, "openai", Some("api.openai.com"), 2)
     );
 }
+
+#[cfg(feature = "platform")]
+#[tokio::test]
+async fn send_bound_secret_forwards_to_inner_transport_without_recording_provider_use() {
+    #[derive(Clone, Default)]
+    struct BoundSecretEcho(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl BrokerUpstreamTransport for BoundSecretEcho {
+        async fn execute(
+            &self,
+            _request: BrokerUpstreamRequest,
+        ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+            Err(BrokerUpstreamError::DestinationDenied)
+        }
+
+        async fn send_bound_secret(
+            &self,
+            _request: BrokerUpstreamRequest,
+        ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(BrokerUpstreamResponse::new(
+                http::StatusCode::OK,
+                http::HeaderMap::new(),
+                Box::pin(futures::stream::empty()),
+            ))
+        }
+    }
+
+    let uses = CredentialUses::new();
+    let epoch = EpochUses::new(uses.clone(), POD);
+    let inner = BoundSecretEcho::default();
+    let transport = RecordingUses(inner.clone());
+    let response = scoped(async {
+        swapped(&epoch, KEY, "openai");
+        transport
+            .send_bound_secret(request("https://api.example.com/v1/items"))
+            .await
+    })
+    .await
+    .expect("RecordingUses must forward send_bound_secret to the inner transport");
+    assert_eq!(response.into_parts().0, http::StatusCode::OK);
+    assert_eq!(inner.0.load(Ordering::SeqCst), 1);
+    assert!(uses.take().is_empty());
+}

@@ -259,7 +259,8 @@ fn sent(target: &Url) {
 
 /// A broker transport that records each send after a swap as a use.
 /// [`BrokerUpstreamTransport::forward_github`] carries nothing of the
-/// broker's, so it records nothing.
+/// broker's, and [`BrokerUpstreamTransport::send_bound_secret`] writes its
+/// own bound-secret audit line, so neither records a provider credential use.
 #[derive(Clone)]
 pub struct RecordingUses<U>(pub U);
 
@@ -290,6 +291,13 @@ impl<U: BrokerUpstreamTransport> BrokerUpstreamTransport for RecordingUses<U> {
         request: BrokerUpstreamRequest,
     ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
         self.0.forward_github(request).await
+    }
+
+    async fn send_bound_secret(
+        &self,
+        request: BrokerUpstreamRequest,
+    ) -> Result<BrokerUpstreamResponse, BrokerUpstreamError> {
+        self.0.send_bound_secret(request).await
     }
 }
 
