@@ -8,6 +8,7 @@ use prometheus::{IntCounter, IntCounterVec, Opts, register_int_counter, register
 
 static REQUESTS: OnceLock<IntCounterVec> = OnceLock::new();
 static TOKEN_REVIEWS: OnceLock<IntCounter> = OnceLock::new();
+static UNSERVED: OnceLock<IntCounter> = OnceLock::new();
 
 /// The closed set of `WorkspaceBindingService` methods.
 pub(super) const METHODS: [&str; 8] = [
@@ -63,4 +64,18 @@ pub(super) fn observe_request(method: &'static str, code: &'static str) {
 
 pub(super) fn observe_token_review() {
     token_reviews().inc();
+}
+
+/// First binds refused because the Pod's front door does not serve a host
+/// its selection would bind (#6290, `front_door_hosts_unserved`).
+pub(super) fn observe_front_door_hosts_unserved() {
+    UNSERVED
+        .get_or_init(|| {
+            register_int_counter!(
+                "codewire_workspace_binding_front_door_hosts_unserved_total",
+                "First binds refused because the Pod's front door does not serve a host the selection binds."
+            )
+            .expect("workspace binding unserved metric registration must be unique")
+        })
+        .inc();
 }

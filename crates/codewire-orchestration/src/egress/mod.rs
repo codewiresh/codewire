@@ -17,6 +17,7 @@ use crate::workspace_binding::PgBindingStore;
 pub mod admission;
 pub mod assignment;
 pub mod confidential_hold;
+pub mod front_door_hosts;
 pub mod gateway_check;
 pub mod interception_ca;
 pub mod interception_trust;
@@ -160,6 +161,10 @@ pub fn mount(
             spawn_report_sweep(state.pool.clone());
             if let Some(kube) = api.kube.clone() {
                 interception_trust::spawn_sweep(
+                    state.pool.clone(),
+                    kube::Api::namespaced(kube.clone(), &state.sandbox_namespace),
+                );
+                front_door_hosts::spawn_sweep(
                     state.pool.clone(),
                     kube::Api::namespaced(kube, &state.sandbox_namespace),
                 );

@@ -3921,9 +3921,18 @@ admission and the bind accept a Pod, so a live Pod is always on it.
   reports every name its own front door has a route for: each exact host on
   443, and the `chatgpt.com` suffix route. The report comes from that
   build's built-in route table, never from an assignment it was sent, so it
-  says what this `cw-egress` actually serves. Orchestration does not read
-  it yet. Next, an intercepted first bind will be refused by name when a
-  host its selection needs is missing from it.
+  says what this `cw-egress` actually serves. Orchestration keeps the
+  latest report per Pod (`sandbox_pod_front_door_hosts`). A first bind that
+  would intercept waits (UNAVAILABLE) until a report exists, and is refused
+  (`front_door_hosts_unserved`, FAILED_PRECONDITION) when a host its
+  selection needs is missing from it, so nothing is stored or delivered.
+  The refused names stay on the Pod's row, and the create or start waiting
+  for that Pod ends with them: a create fails with code
+  `front_door_hosts_unserved` and one sentence naming only the missing
+  hosts of the creator's own selection. Not covered yet: only the first bind
+  is checked, so a later admission that reports fewer names for an
+  already-intercepted Pod isn't handled (#6421); and a host a binding names
+  itself (#5043, #4003) isn't checked against the report.
 - **Off is today.** With the switch off, every hosted path is exactly as
   before.
 

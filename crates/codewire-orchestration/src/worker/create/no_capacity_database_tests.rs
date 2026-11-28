@@ -431,3 +431,57 @@ async fn db_a_container_start_failure_ends_a_create_once() -> Result<()> {
     .await;
     db.finish(result).await
 }
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn db_a_create_its_front_door_cannot_serve_ends_naming_the_hosts() -> Result<()> {
+    let db = TestDatabase::create().await?;
+    let result = async {
+        seed_parents(&db).await?;
+        let pool = &db.pool;
+        let svc = Service::for_pool(pool.clone());
+        let id = "5b2d9c41-7f36-4a1e-8d53-6c9f0a1b3000";
+        seed(pool, id, &FIRST_ATTEMPT).await?;
+        let message = super::front_door_hosts::FrontDoorHostsUnserved {
+            hosts: vec!["api.github.com".into()],
+        }
+        .to_string();
+        ensure!(
+            svc.fail_create_for_front_door_hosts(id, &message, CREATE_MUTATION_STATES)
+                .await?,
+            "not ended"
+        );
+        let (now, desired, code, reason) = outcome(pool, id).await?;
+        ensure!((now.as_str(), desired.as_str()) == ("error", "destroyed"));
+        ensure!(
+            code == crate::lifecycle::FRONT_DOOR_HOSTS_UNSERVED_ERROR_CODE,
+            "{code}"
+        );
+        ensure!(reason == message, "{reason}");
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM environment_logs \
+             WHERE environment_id = $1 AND phase = 'lifecycle_front_door_hosts_unserved'",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+        ensure!(logged == 1, "logged {logged} times");
+        let action = svc
+            .reconcile(&Snapshot {
+                id: id.to_owned(),
+                state: now,
+                desired_state: desired,
+                external_cleanup_complete: false,
+            })
+            .await?;
+        ensure!(action == Action::Destroy, "{action:?}");
+        ensure!(
+            !svc.fail_create_for_front_door_hosts(id, &message, CREATE_MUTATION_STATES)
+                .await?,
+            "ended twice"
+        );
+        Ok(())
+    }
+    .await;
+    db.finish(result).await
+}

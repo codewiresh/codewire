@@ -15,7 +15,7 @@ use temporalio_sdk::activities::ActivityContext;
 
 use super::activity_authority::{ActivityAuthority, AuthorityLost, is_authority_lost};
 use super::create::{
-    environment_per_env_template_name, environment_rendering_intent,
+    environment_per_env_template_name, environment_rendering_intent, front_door_hosts,
     load_environment_rendering_intent, ready_timeout_for_isolation,
     reconcile_or_refresh_runtime_identity, reconcile_runtime_identity_for_pod,
     refresh_workspace_bootstrap, requires_running_runtime_identity, run_template_mutation,
@@ -901,7 +901,7 @@ pub async fn handle_environment_start(
             START_MUTATION_STATES,
             authority.run_while_authoritative_for_states(
                 START_MUTATION_STATES,
-                runtime.wait_ready(&placement, env_id, ready_timeout),
+                front_door_hosts::wait_ready(ctx, &placement, env_id, ready_timeout),
             ),
         ),
     )

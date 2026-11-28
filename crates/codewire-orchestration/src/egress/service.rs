@@ -29,6 +29,7 @@ use codewire_egress_node::replacement::StartLimiter;
 
 use super::admission::{self, CallerUse, Reviewed};
 use super::assignment::{AssignedPolicy, Intercept, environment_policy, interception_bindings};
+use super::front_door_hosts;
 use super::lockdown;
 use super::reports;
 
@@ -819,6 +820,24 @@ impl EgressService for EgressConnectService {
             tracing::info!(?refusal, pod = %guest.name, "egress stream refused");
             denied()
         })?;
+        // What this cw-egress's front door serves (#6290), kept for the Pod's
+        // first bind; an unreadable report keeps nothing, so that bind waits.
+        match front_door_hosts::reported(
+            request
+                .front_door_hosts
+                .iter()
+                .map(|binding| (binding.host, binding.port, binding.suffix)),
+        ) {
+            Some(hosts) => self
+                .state
+                .bindings
+                .record_front_door_hosts(&guest.uid, &hosts)
+                .await
+                .map_err(|_| unavailable("record the front door's hosts", "the binding store"))?,
+            None => {
+                tracing::warn!(pod = %guest.name, "egress admission reported unreadable front-door hosts")
+            }
+        }
         let binding = self.state.live_binding(&guest).await?;
         // An unbound warm member has no environment policy yet: its lockdown
         // is the shared template's, and it is assigned nothing of an

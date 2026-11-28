@@ -44,7 +44,15 @@ use crate::sandbox::{
 };
 use crate::start_metrics::{self, CreateMilestone, StartPath, StartProfile, StartStage};
 
+pub(super) mod front_door_hosts;
 mod pool_route;
+mod readiness;
+pub(crate) use readiness::ReadinessWaitFailed;
+use readiness::readiness_wait;
+pub(super) use readiness::{
+    container_start_failure, end_failed_create, fail_create_for_container_start,
+    no_capacity_refusal, wait_failure_log,
+};
 mod render_config;
 mod rendering_intent;
 pub use rendering_intent::environment_rendering_intent;
@@ -1360,7 +1368,8 @@ async fn run_environment_create(
                     CREATE_MUTATION_STATES,
                     authority.run_while_authoritative_for_states(
                         CREATE_MUTATION_STATES,
-                        readiness_wait(runtime.wait_ready(
+                        readiness_wait(front_door_hosts::wait_ready(
+                            ctx,
                             &placement,
                             env_id,
                             ready_timeout_for_isolation(&env.isolation_tier),
@@ -1398,11 +1407,7 @@ async fn run_environment_create(
                         reclaimed_cold = true;
                         continue;
                     }
-                    if env.never_ran
-                        && let Some(failure) = container_start_failure(&e)
-                    {
-                        fail_create_for_container_start(ctx, &svc, authority, env_id, failure)
-                            .await?;
+                    if env.never_ran && end_failed_create(ctx, &svc, authority, env_id, &e).await? {
                         return Ok(None);
                     }
                     record_error(
@@ -3024,92 +3029,6 @@ pub(super) async fn reconcile_runtime_identity_for_pod(
 
 /// How long a cold re-claim waits for the pool-born Claim to be gone.
 const RECLAIM_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// A create's readiness wait expired or failed before its Sandbox bound
-/// (review M3). It reads exactly as the wait's own error.
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub(crate) struct ReadinessWaitFailed(anyhow::Error);
-
-/// Mark a readiness wait's failure, so a never-bound pool-born Claim that
-/// never became Ready can be re-claimed cold. Authority loss is checked
-/// outside this wait and is never marked.
-async fn readiness_wait<T>(
-    wait: impl std::future::Future<Output = anyhow::Result<T>>,
-) -> anyhow::Result<T> {
-    wait.await.map_err(|error| {
-        if crate::worker::activity_authority::is_authority_lost(&error) {
-            error
-        } else {
-            ReadinessWaitFailed(error).into()
-        }
-    })
-}
-
-/// The scheduler's refusal, when the readiness wait ended for lack of room.
-pub(super) fn no_capacity_refusal(error: &anyhow::Error) -> Option<&NoCapacity> {
-    error.downcast_ref::<NoCapacity>().or_else(|| {
-        error
-            .downcast_ref::<ReadinessWaitFailed>()
-            .and_then(|failed| failed.0.downcast_ref::<NoCapacity>())
-    })
-}
-
-/// The container that could not start, when a readiness wait ended for that.
-pub(super) fn container_start_failure(error: &anyhow::Error) -> Option<&ContainerStartFailed> {
-    error.downcast_ref::<ContainerStartFailed>().or_else(|| {
-        error
-            .downcast_ref::<ReadinessWaitFailed>()
-            .and_then(|failed| failed.0.downcast_ref::<ContainerStartFailed>())
-    })
-}
-
-/// End a create whose workspace container cannot start, in place of an error
-/// that would retry into the same failed Pod: this activity finishes, and the
-/// reconcile it queues does the normal destroy, which releases the claim and
-/// the slot (#4431).
-pub(super) async fn fail_create_for_container_start(
-    ctx: &WorkerContext,
-    svc: &Service<PgLifecycleStore>,
-    authority: &ActivityAuthority,
-    env_id: &str,
-    failure: &ContainerStartFailed,
-) -> anyhow::Result<()> {
-    authority.ensure().await?;
-    let message = start_failure_text::summary(failure);
-    start_failure_text::log(env_id, failure);
-    if !svc
-        .fail_create_for_container_start(env_id, &message, CREATE_MUTATION_STATES)
-        .await?
-    {
-        return Ok(());
-    }
-    tracing::warn!(
-        environment_id = env_id,
-        container = %failure.container,
-        reason = %failure.reason,
-        "create ended: a workspace container could not start"
-    );
-    ctx.temporal_trigger
-        .trigger_environment(env_id, "reconcile")
-        .await
-}
-
-/// A failed wait's line in the environment's log, which its user reads. The
-/// scheduler's words describe the cluster's nodes, so a refusal says what the
-/// user can do; [`refuse_for_no_capacity`] keeps them in the worker's log.
-pub(super) fn wait_failure_log(
-    error: &anyhow::Error,
-    outcome: crate::lifecycle::NoCapacityRefusal,
-) -> String {
-    if no_capacity_refusal(error).is_some() {
-        return outcome.message.to_owned();
-    }
-    match container_start_failure(error) {
-        Some(failure) => start_failure_text::summary(failure),
-        None => format!("{error:#}"),
-    }
-}
 
 /// End a create or a start the cluster has no room for, in place of an error
 /// that would retry: this activity finishes, and the reconcile it queues does

@@ -1,5 +1,7 @@
-//! A workspace Pod's container that cannot start (#4431): what the wait
-//! reports, and how it is read from the statuses the kubelet writes.
+//! What ends a workspace Pod's readiness wait early: a container that cannot
+//! start (#4431), what the wait reports and how it is read from the statuses
+//! the kubelet writes, and a scheduler that refuses the Pod for lack of
+//! capacity (#3635).
 
 use super::*;
 
@@ -48,6 +50,61 @@ impl StartFailureKind {
         match self {
             Self::ImagePull => IMAGE_PULL_FAILURE_GRACE,
             Self::Start => CONTAINER_START_FAILURE_GRACE,
+        }
+    }
+}
+
+impl SandboxClient {
+    /// Ends once a container of the environment's workspace Pod has been
+    /// unable to start for its grace without a break, and never otherwise, so
+    /// each wait for a new Pod races it (#4431). A Pod that cannot be read, or
+    /// a failure of the other kind, breaks the run. A container that is still
+    /// being created or initialized is not a failure, however long it takes.
+    pub(in crate::sandbox) async fn refused_for_start_failure(
+        &self,
+        env_id: &str,
+    ) -> ContainerStartFailed {
+        let name = claim_name(env_id);
+        let mut failing_since: Option<(StartFailureKind, tokio::time::Instant)> = None;
+        loop {
+            let pod = self.claim_workspace_pod(&name).await;
+            match pod.as_ref().and_then(container_start_failure) {
+                Some((kind, failure)) => {
+                    let since = match failing_since {
+                        Some((seen, since)) if seen == kind => since,
+                        _ => tokio::time::Instant::now(),
+                    };
+                    failing_since = Some((kind, since));
+                    if since.elapsed() >= kind.grace() {
+                        tracing::warn!(claim = name, error = %failure, "container start failure detected");
+                        return failure;
+                    }
+                }
+                None => failing_since = None,
+            }
+            tokio::time::sleep(START_FAILURE_POLL).await;
+        }
+    }
+
+    /// Ends once the scheduler has refused the environment's workspace Pod for
+    /// lack of resources for [`NO_CAPACITY_GRACE`] without a break, and never
+    /// otherwise, so each wait for a new Pod races it (#3635). An unreadable Pod
+    /// breaks the run, so only an unbroken refusal counts.
+    pub(in crate::sandbox) async fn refused_for_no_capacity(&self, env_id: &str) -> NoCapacity {
+        let name = claim_name(env_id);
+        let mut refused_since = None;
+        loop {
+            let pod = self.claim_workspace_pod(&name).await;
+            match pod.as_ref().and_then(capacity_refusal) {
+                Some(refusal) => {
+                    let since = *refused_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= NO_CAPACITY_GRACE {
+                        return NoCapacity(refusal);
+                    }
+                }
+                None => refused_since = None,
+            }
+            tokio::time::sleep(NO_CAPACITY_POLL).await;
         }
     }
 }

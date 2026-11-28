@@ -1611,6 +1611,12 @@ database_lane_orchestration_workers() {
       'worker::stuck_environments_database_tests::' \
       -- --ignored --nocapture --test-threads=1
 
+  counted_suite "front-door host reports" front-door-host-reports \
+    TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
+    cargo test --locked -p codewire-orchestration --lib \
+      'egress::front_door_hosts::database_tests::' \
+      -- --ignored --nocapture --test-threads=1
+
   counted_suite "no capacity outcome matrix" no-capacity-outcome \
     TEST_DATABASE_URL="$DATABASE_URL_RUST" -- \
     cargo test --locked -p codewire-orchestration --lib \

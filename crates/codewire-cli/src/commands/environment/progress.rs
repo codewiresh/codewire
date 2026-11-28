@@ -374,14 +374,7 @@ impl<W: Write> StartProgress<W> {
                         )?;
                     }
                     _ => {
-                        // A container that could not start fails the sandbox's
-                        // start, whichever wait was open when it was seen.
-                        let sandbox_start = event
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.get("kind"))
-                            .and_then(|kind| kind.as_str())
-                            == Some("container_start_failed");
+                        let sandbox_start = fails_sandbox_start(event.metadata.as_ref());
                         let stage_label = if sandbox_start {
                             Some(SANDBOX_START_LABEL.to_owned())
                         } else {
@@ -1131,5 +1124,16 @@ pub(crate) fn terminal_text(text: &str) -> String {
     replaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A container that could not start, or a front door that can't serve the
+/// selection, fails the sandbox's start, whichever wait was open when it was
+/// seen.
+fn fails_sandbox_start(metadata: Option<&serde_json::Value>) -> bool {
+    matches!(
+        metadata
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(|kind| kind.as_str()),
+        Some("container_start_failed" | "front_door_hosts_unserved")
+    )
+}
 #[cfg(test)]
 mod tests;

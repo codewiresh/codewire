@@ -482,6 +482,14 @@ impl WorkspaceBindingState {
             .record_trust(pod_uid, proposed)
             .await
             .map_err(|_| BindError::Unavailable)?;
+        // #6290: a first bind that would intercept is refused unless the Pod's
+        // own front door reported every name its selection binds. A name
+        // handed to a door with no route for it fails silently, and
+        // interception is never quietly off. Until an admission reports, the
+        // bind waits.
+        if trusted && proposed && binding.interception.is_none() {
+            self.front_door_serves(pod_uid, &binding).await?;
+        }
         let interception = self
             .store
             .record_interception(caller.identity.pod_uid(), trusted && proposed)
@@ -496,6 +504,50 @@ impl WorkspaceBindingState {
         )?;
         response.server_url.clone_from(&self.server_url);
         Ok(response)
+    }
+
+    /// Whether `pod_uid`'s front door reported every name `binding`'s
+    /// selection would bind (#6290): UNAVAILABLE, so the daemon asks again,
+    /// until an admission has reported; FAILED_PRECONDITION, logged with the
+    /// missing names, counted and recorded for the Pod, when one is missing.
+    /// The create or start waiting for the Pod reads that record and ends
+    /// with the missing names.
+    async fn front_door_serves(
+        &self,
+        pod_uid: &str,
+        binding: &LiveBinding,
+    ) -> Result<(), BindError> {
+        let clients =
+            codewire_access::ManagedCredentialClients::decode(&binding.managed_credential_clients)
+                .map_err(|_| BindError::Unavailable)?;
+        let needed = crate::egress::assignment::interception_bindings(true, clients)
+            .map_err(|_| BindError::Unavailable)?;
+        let needed = crate::egress::front_door_hosts::needed(&needed);
+        let reported = self
+            .store
+            .front_door_hosts(pod_uid)
+            .await
+            .map_err(|_| BindError::Unavailable)?
+            .ok_or(BindError::Unavailable)?;
+        let missing = crate::egress::front_door_hosts::missing(&needed, &reported);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        metrics::observe_front_door_hosts_unserved();
+        // The refusal stands whether or not this write lands; without it the
+        // waiting create ends at its readiness timeout instead of by name.
+        let _ = self
+            .store
+            .record_front_door_unserved(pod_uid, &missing)
+            .await;
+        tracing::warn!(
+            environment_id = %binding.environment_id,
+            pod_uid,
+            missing = ?missing,
+            reason = "front_door_hosts_unserved",
+            "refused the first bind: the Pod's front door does not serve every host its selection binds"
+        );
+        Err(BindError::FailedPrecondition)
     }
 
     /// A fresh access grant for an already-bound Pod.

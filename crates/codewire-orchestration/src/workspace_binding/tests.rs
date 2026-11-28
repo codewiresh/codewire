@@ -244,7 +244,7 @@ fn binding(scope: WorkspaceCredentialScope) -> LiveBinding {
         sandbox_uid: SANDBOX_UID.into(),
         operation_generation: 7,
         projection_selection_sha256: Some("ab".repeat(32)),
-        managed_credential_clients: "github".into(),
+        managed_credential_clients: "v2:10".into(),
         credential_scope: scope,
         environment_generation: ENVIRONMENT_GENERATION,
         isolation_tier: "standard".into(),
@@ -480,6 +480,11 @@ pub(super) struct FakeStore {
     interception: Mutex<HashMap<String, bool>>,
     /// Each Pod's interception trust, recorded once (#6200).
     trust: Mutex<HashMap<String, bool>>,
+    /// What the Pod's front door last reported it serves (#6290); `None`
+    /// before any admission reported. By default, every built-in name.
+    front_door_hosts: Mutex<Option<std::collections::BTreeSet<String>>>,
+    /// The names a refused first bind recorded for the Pod (#6290).
+    unserved: Mutex<Option<Vec<String>>>,
     /// Environments whose suspended mark a wake report cleared (#5529).
     woken: Mutex<Vec<String>>,
 }
@@ -500,6 +505,8 @@ impl FakeStore {
             reports: Mutex::new(Vec::new()),
             interception: Mutex::new(HashMap::new()),
             trust: Mutex::new(HashMap::new()),
+            front_door_hosts: Mutex::new(Some(every_front_door_name())),
+            unserved: Mutex::new(None),
             woken: Mutex::new(Vec::new()),
         })
     }
@@ -522,8 +529,41 @@ impl FakeStore {
     }
 }
 
+/// Every name a current cw-egress's front door reports: what the widest
+/// selection binds.
+fn every_front_door_name() -> std::collections::BTreeSet<String> {
+    let widest = codewire_access::ManagedCredentialClients::from_profile_slots([
+        "codex",
+        "openai",
+        "anthropic",
+        "ssh",
+        "github",
+    ])
+    .and_then(codewire_access::ManagedCredentialClients::with_anthropic_sign_in)
+    .unwrap();
+    crate::egress::front_door_hosts::needed(
+        &crate::egress::assignment::interception_bindings(true, widest).unwrap(),
+    )
+}
+
 #[async_trait]
 impl BindingStore for FakeStore {
+    async fn record_front_door_unserved(
+        &self,
+        _pod_uid: &str,
+        missing: &[String],
+    ) -> Result<(), BindingStoreUnavailable> {
+        *self.unserved.lock().unwrap() = Some(missing.to_vec());
+        Ok(())
+    }
+
+    async fn front_door_hosts(
+        &self,
+        _pod_uid: &str,
+    ) -> Result<Option<std::collections::BTreeSet<String>>, BindingStoreUnavailable> {
+        Ok(self.front_door_hosts.lock().unwrap().clone())
+    }
+
     async fn record_trust(
         &self,
         pod_uid: &str,
@@ -832,7 +872,7 @@ async fn a_bound_pod_gets_its_binding_and_a_pod_scoped_credential() {
     assert_eq!(response.pod_uid, POD_UID);
     assert_eq!(response.operation_generation, 7);
     assert_eq!(response.projection_selection_sha256, "ab".repeat(32));
-    assert_eq!(response.managed_credential_clients, "github");
+    assert_eq!(response.managed_credential_clients, "v2:10");
     assert_eq!(response.working_directory, "/workspace/app");
     assert_eq!(
         response.daemon_credential,
@@ -1142,6 +1182,77 @@ async fn the_first_bind_follows_the_trust_its_first_admission_recorded() {
         );
         assert_eq!(store.trust.lock().unwrap()[POD_UID], admitted_with_ca);
     }
+}
+
+// #6290: an intercepted first bind is refused unless the Pod's own front door
+// reported every name its selection binds, and waits until one reported. A
+// refused bind stores no decision, so no epoch, placeholder or login follows.
+#[tokio::test]
+async fn an_intercepted_first_bind_needs_every_name_from_the_pods_own_front_door() {
+    let broker_pod = || {
+        let mut pod = workspace_pod();
+        pod.metadata.labels.as_mut().unwrap().insert(
+            crate::egress::admission::EGRESS_MODE_LABEL.into(),
+            crate::egress::admission::EGRESS_MODE_BROKER.into(),
+        );
+        pod
+    };
+    let cluster = || {
+        FakeCluster::new(
+            valid_review(),
+            vec![Some(broker_pod())],
+            vec![Some(sandbox())],
+        )
+    };
+    let bind = |store: Arc<FakeStore>, interception: bool| async move {
+        fixture_with(cluster(), store, |state| {
+            state.with_interception(interception)
+        })
+        .bind(20)
+        .await
+        .map(|response| response.interception)
+    };
+    // The binding selects GitHub: a front door without GitHub's routes, as
+    // one built before them, refuses it.
+    let without_github = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    without_github
+        .front_door_hosts
+        .lock()
+        .unwrap()
+        .as_mut()
+        .unwrap()
+        .retain(|name| !name.contains("github.com"));
+    assert_eq!(
+        bind(without_github.clone(), true).await,
+        Err(BindError::FailedPrecondition)
+    );
+    assert!(
+        without_github.interception.lock().unwrap().is_empty(),
+        "no decision is stored"
+    );
+    assert_eq!(
+        *without_github.unserved.lock().unwrap(),
+        Some(vec!["api.github.com".to_owned(), "github.com".to_owned()]),
+        "exactly the missing hosts are kept for the waiting create"
+    );
+    // Before any admission reported, the bind waits for one.
+    let unreported = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    *unreported.front_door_hosts.lock().unwrap() = None;
+    assert_eq!(
+        bind(unreported.clone(), true).await,
+        Err(BindError::Unavailable)
+    );
+    assert!(unreported.interception.lock().unwrap().is_empty());
+    assert_eq!(*unreported.unserved.lock().unwrap(), None);
+    // With interception off nothing is intercepted, so nothing is refused.
+    let off = FakeStore::bound(WorkspaceCredentialScope::Pod);
+    *off.front_door_hosts.lock().unwrap() = None;
+    assert_eq!(bind(off, false).await, Ok(false));
+    // Every name served: intercepted.
+    assert_eq!(
+        bind(FakeStore::bound(WorkspaceCredentialScope::Pod), true).await,
+        Ok(true)
+    );
 }
 
 #[tokio::test]
@@ -1531,6 +1642,8 @@ async fn a_token_that_expires_during_the_wait_gets_no_binding() {
         reports: Mutex::new(Vec::new()),
         interception: Mutex::new(HashMap::new()),
         trust: Mutex::new(HashMap::new()),
+        front_door_hosts: Mutex::new(Some(every_front_door_name())),
+        unserved: Mutex::new(None),
         woken: Mutex::new(Vec::new()),
     });
     let fixture = fixture_with(FakeCluster::valid(), store, |state| {

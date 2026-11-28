@@ -146,6 +146,36 @@ pub trait BindingStore: Send + Sync {
         Err(BindingStoreUnavailable)
     }
 
+    /// Replaces the names `pod_uid`'s front door reports it serves, at an
+    /// egress admission (#6290). A store that keeps none drops it, and the
+    /// Pod's first bind then waits: it fails closed.
+    async fn record_front_door_hosts(
+        &self,
+        _pod_uid: &str,
+        _hosts: &std::collections::BTreeSet<String>,
+    ) -> Result<(), BindingStoreUnavailable> {
+        Ok(())
+    }
+
+    /// Keeps the names `pod_uid`'s first bind was refused for (#6290), which
+    /// the create or start waiting for the Pod reads to end with them.
+    async fn record_front_door_unserved(
+        &self,
+        _pod_uid: &str,
+        _missing: &[String],
+    ) -> Result<(), BindingStoreUnavailable> {
+        Ok(())
+    }
+
+    /// The names `pod_uid`'s front door last reported it serves at an egress
+    /// admission (#6290, migration 0069), or `None` before any did.
+    async fn front_door_hosts(
+        &self,
+        _pod_uid: &str,
+    ) -> Result<Option<std::collections::BTreeSet<String>>, BindingStoreUnavailable> {
+        Err(BindingStoreUnavailable)
+    }
+
     /// The enabled runtime transport zone `name`, if any.
     async fn transport_zone(
         &self,
@@ -322,6 +352,44 @@ impl BindingStore for PgBindingStore {
             BindingStoreUnavailable
         })?;
         row.map(live_binding_from_row).transpose()
+    }
+
+    async fn record_front_door_hosts(
+        &self,
+        pod_uid: &str,
+        hosts: &std::collections::BTreeSet<String>,
+    ) -> Result<(), BindingStoreUnavailable> {
+        crate::egress::front_door_hosts::record(&self.pool, pod_uid, hosts)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "front-door host report write failed");
+                BindingStoreUnavailable
+            })
+    }
+
+    async fn record_front_door_unserved(
+        &self,
+        pod_uid: &str,
+        missing: &[String],
+    ) -> Result<(), BindingStoreUnavailable> {
+        crate::egress::front_door_hosts::record_unserved(&self.pool, pod_uid, missing)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "front-door unserved hosts write failed");
+                BindingStoreUnavailable
+            })
+    }
+
+    async fn front_door_hosts(
+        &self,
+        pod_uid: &str,
+    ) -> Result<Option<std::collections::BTreeSet<String>>, BindingStoreUnavailable> {
+        crate::egress::front_door_hosts::read(&self.pool, pod_uid)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "front-door host report read failed");
+                BindingStoreUnavailable
+            })
     }
 
     async fn record_trust(

@@ -516,6 +516,83 @@ async fn a_broker_mode_guest_on_the_callers_node_is_admitted_with_its_assignment
     );
 }
 
+/// An unbound store that keeps each Pod's reported front-door hosts.
+#[derive(Default)]
+struct Reports(std::sync::Mutex<Vec<(String, std::collections::BTreeSet<String>)>>);
+
+#[async_trait]
+impl BindingStore for Reports {
+    async fn live_binding(
+        &self,
+        _pod_uid: &str,
+        _namespace: &str,
+        _pod_name: &str,
+    ) -> Result<Option<LiveBinding>, BindingStoreUnavailable> {
+        Ok(None)
+    }
+
+    async fn record_trust(
+        &self,
+        _pod_uid: &str,
+        ca_given: bool,
+    ) -> Result<bool, BindingStoreUnavailable> {
+        Ok(ca_given)
+    }
+
+    async fn record_front_door_hosts(
+        &self,
+        pod_uid: &str,
+        hosts: &std::collections::BTreeSet<String>,
+    ) -> Result<(), BindingStoreUnavailable> {
+        self.0
+            .lock()
+            .unwrap()
+            .push((pod_uid.to_owned(), hosts.clone()));
+        Ok(())
+    }
+}
+
+/// #6290: each admission keeps what the calling cw-egress's front door says it
+/// serves, for the Pod's first bind; an older cw-egress, which sends none,
+/// is kept as serving nothing, and an unreadable report is not kept at all.
+#[tokio::test]
+async fn an_admission_keeps_the_front_doors_reported_hosts() {
+    let admit = |hosts: Value| async move {
+        let cluster = Cluster::healthy();
+        let reports = Arc::new(Reports::default());
+        let mut body = admit_body();
+        body["frontDoorHosts"] = hosts;
+        let (status, _) = call_app(app_with(&cluster, reports.clone(), None), "Admit", body).await;
+        let kept = reports.0.lock().unwrap().clone();
+        (status, kept)
+    };
+    let (status, kept) = admit(json!([
+        {"host": "api.anthropic.com", "port": 443},
+        {"host": "chatgpt.com", "port": 443, "suffix": true}
+    ]))
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].0, GUEST_UID);
+    assert_eq!(
+        kept[0].1.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["*.chatgpt.com:443", "api.anthropic.com:443"]
+    );
+    let (status, kept) = admit(json!([])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        kept,
+        [(GUEST_UID.to_owned(), std::collections::BTreeSet::new())]
+    );
+    let (status, kept) = admit(json!([{"host": "API.Anthropic.com", "port": 443}])).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unreadable report doesn't refuse the stream"
+    );
+    assert!(kept.is_empty(), "an unreadable report is not kept");
+}
+
 /// An interception CA source that answers as told and counts its asks.
 struct Cas {
     certificate: Option<Vec<u8>>,
