@@ -21,6 +21,7 @@ impl From<uuid::Uuid> for v1::SshStreamOpen {
         Self {
             environment_id: environment_id.to_string(),
             remote: false,
+            session_environment_id: String::new(),
         }
     }
 }

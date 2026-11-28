@@ -246,6 +246,11 @@ message SshStreamOpen {
   // idle timeout, so remote connections never use up the owner's. Protocol 28;
   // an older supervisor counts it with the owner's.
   bool remote = 2;
+  // Platform environment UUID checked by `session@codewire.sh` on a remote
+  // stream (#3609, slice 3), where the platform's environment ID differs from
+  // the supervisor's local UUID. Empty for owner streams, which check
+  // `environment_id`. Protocol 29.
+  string session_environment_id = 3;
 }
 
 message RetireSupervisorRequest {

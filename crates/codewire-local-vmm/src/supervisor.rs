@@ -6949,26 +6949,19 @@ impl LocalSupervisorService for SupervisorRpc {
         request: Request<tonic::Streaming<v1::SshStreamFrame>>,
     ) -> Result<Response<Self::OpenEnvironmentSshStreamStream>, Status> {
         let mut inbound = request.into_inner();
-        let (environment_id, remote) = ssh::opened_environment(&mut inbound).await?;
-        let permit = self.ssh_streams.admit(environment_id, remote)?;
-        // Subscribed before access is taken, so no stop between the two is
-        // missed.
+        let opened = ssh::opened_environment(&mut inbound).await?;
+        let id = opened.environment_id;
+        let permit = self.ssh_streams.admit(id, opened.remote)?;
         let operations = self.operation_events.subscribe();
-        let access = self.environment_daemon_access(environment_id).await?;
+        let access = self.environment_daemon_access(id).await?;
         let host_key = self
             .host_keys
-            .private(environment_id)
+            .private(id)
             .map_err(|_| Status::internal("local environment SSH host key is unavailable"))?;
         let daemon = ssh::daemon_client(access).await?;
         let features = ssh::DaemonFeatures::read(&daemon).await;
         Ok(Response::new(ssh::serve(
-            daemon,
-            features,
-            host_key,
-            inbound,
-            operations,
-            environment_id,
-            permit,
+            daemon, features, host_key, inbound, operations, opened, permit,
         )))
     }
 

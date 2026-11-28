@@ -42,6 +42,7 @@ impl SupervisorSplice {
         let open = local::SshStreamOpen {
             environment_id: self.vm.local_environment_id.to_string(),
             remote: true,
+            session_environment_id: self.vm.environment_id.to_string(),
         };
         // The supervisor's side reads from a pipe this connection owns, so
         // dropping the connection ends that read too.

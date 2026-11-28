@@ -180,17 +180,44 @@ impl Drop for SshStreamPermit {
     }
 }
 
-/// The environment from a stream's first frame, which must open it, and
-/// whether the stream is remote.
+/// Parsed opening frame of an SSH stream RPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct OpenedSshStream {
+    pub(super) environment_id: Uuid,
+    pub(super) remote: bool,
+    pub(super) session_environment_id: Uuid,
+}
+
+fn parse_open(open: v1::SshStreamOpen) -> Result<OpenedSshStream, Status> {
+    let environment_id = Uuid::parse_str(&open.environment_id)
+        .map_err(|_| Status::invalid_argument("the SSH stream names an invalid environment"))?;
+    let session_environment_id = if open.session_environment_id.is_empty() {
+        environment_id
+    } else if !open.remote {
+        return Err(Status::invalid_argument(
+            "a local SSH stream may not set a separate session environment",
+        ));
+    } else {
+        Uuid::parse_str(&open.session_environment_id).map_err(|_| {
+            Status::invalid_argument("the SSH stream names an invalid session environment")
+        })?
+    };
+    Ok(OpenedSshStream {
+        environment_id,
+        remote: open.remote,
+        session_environment_id,
+    })
+}
+
+/// The environment from a stream's first frame, which must open it, whether
+/// the stream is remote, and the environment UUID `session@codewire.sh` checks.
 pub(super) async fn opened_environment(
     inbound: &mut Streaming<v1::SshStreamFrame>,
-) -> Result<(Uuid, bool), Status> {
+) -> Result<OpenedSshStream, Status> {
     match inbound.message().await? {
         Some(v1::SshStreamFrame {
             frame: Some(Frame::Open(open)),
-        }) => Uuid::parse_str(&open.environment_id)
-            .map(|environment_id| (environment_id, open.remote))
-            .map_err(|_| Status::invalid_argument("the SSH stream names an invalid environment")),
+        }) => parse_open(open),
         _ => Err(Status::invalid_argument(
             "an SSH stream opens with its environment",
         )),
@@ -289,9 +316,10 @@ pub(super) fn serve(
     host_key: PrivateKey,
     mut inbound: impl Stream<Item = Result<v1::SshStreamFrame, Status>> + Send + Unpin + 'static,
     mut operations: broadcast::Receiver<OperationRecord>,
-    environment_id: Uuid,
+    opened: OpenedSshStream,
     permit: SshStreamPermit,
 ) -> SshFrames {
+    let environment_id = opened.environment_id;
     let (outbound, frames) = mpsc::channel(QUEUED_FRAMES);
     let (server_side, client_side) = tokio::io::duplex(PIPE_BYTES);
     let (mut from_server, mut to_server) = tokio::io::split(client_side);
@@ -307,7 +335,7 @@ pub(super) fn serve(
     // `cw shell` and `cw attach` keep a session across reconnects.
     let sessions: Arc<dyn SessionAttachRunner> = Arc::new(DaemonSessionAttachRunner::new(
         daemon.credential_client(),
-        environment_id.to_string(),
+        opened.session_environment_id.to_string(),
     ));
     let dialer: Arc<dyn ForwardDialer> = if features.forwarding {
         Arc::new(DaemonForwardDialer::new(daemon.clone()).with_unix(features.socket_forwarding))
@@ -509,6 +537,21 @@ mod tests {
         environment: Uuid,
         permit: SshStreamPermit,
     ) -> Connected {
+        let opened = OpenedSshStream {
+            environment_id: environment,
+            remote: permit.remote,
+            session_environment_id: environment,
+        };
+        connect_opened(daemon, host_key, operations, opened, permit).await
+    }
+
+    async fn connect_opened(
+        daemon: DaemonSessionClient,
+        host_key: PrivateKey,
+        operations: broadcast::Receiver<OperationRecord>,
+        opened: OpenedSshStream,
+        permit: SshStreamPermit,
+    ) -> Connected {
         let expected = host_key.public_key().clone();
         let (inbound_tx, inbound_rx) = mpsc::channel(8);
         let features = DaemonFeatures::read(&daemon).await;
@@ -518,7 +561,7 @@ mod tests {
             host_key,
             ReceiverStream::new(inbound_rx),
             operations,
-            environment,
+            opened,
             permit,
         );
         let (client_io, bridge) = tokio::io::duplex(PIPE_BYTES);
@@ -1022,7 +1065,11 @@ mod tests {
                 keys.private(environment).unwrap(),
                 ReceiverStream::new(inbound),
                 operations.subscribe(),
-                environment,
+                OpenedSshStream {
+                    environment_id: environment,
+                    remote,
+                    session_environment_id: environment,
+                },
                 streams.admit(environment, remote).unwrap(),
             );
             (input, frames)
@@ -1137,5 +1184,144 @@ mod tests {
                 environment
             ));
         }
+    }
+
+    #[test]
+    fn opening_an_ssh_stream_accepts_a_separate_session_environment_only_when_remote() {
+        let local = Uuid::new_v4();
+        let platform = Uuid::new_v4();
+        assert_eq!(
+            parse_open(v1::SshStreamOpen {
+                environment_id: local.to_string(),
+                remote: false,
+                session_environment_id: String::new(),
+            })
+            .unwrap(),
+            OpenedSshStream {
+                environment_id: local,
+                remote: false,
+                session_environment_id: local,
+            }
+        );
+        assert_eq!(
+            parse_open(v1::SshStreamOpen {
+                environment_id: local.to_string(),
+                remote: true,
+                session_environment_id: platform.to_string(),
+            })
+            .unwrap(),
+            OpenedSshStream {
+                environment_id: local,
+                remote: true,
+                session_environment_id: platform,
+            }
+        );
+        assert_eq!(
+            parse_open(v1::SshStreamOpen {
+                environment_id: local.to_string(),
+                remote: false,
+                session_environment_id: platform.to_string(),
+            })
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            parse_open(v1::SshStreamOpen {
+                environment_id: local.to_string(),
+                remote: true,
+                session_environment_id: "not-a-uuid".to_owned(),
+            })
+            .unwrap_err()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    /// A host peer's remote SSH stream carries the platform's environment UUID
+    /// separately from the supervisor's local UUID, so `session@codewire.sh`
+    /// (`cw shell` / `cw attach`) matches the platform ID and refuses the
+    /// supervisor's local ID (#3609, slice 3).
+    #[tokio::test]
+    async fn a_remote_stream_checks_the_platform_environment_id_for_durable_sessions() {
+        use codewire_client::session_wire::encode_frame;
+        use codewire_client::{AttachSessionOpen, AttachSessionRequest, attach_session_request};
+
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = in_process_daemon(temp.path()).await;
+        let keys = HostKeys::new(temp.path());
+        let local = Uuid::new_v4();
+        let platform = Uuid::new_v4();
+        let streams = Arc::new(SshStreams::default());
+        let (operations, _) = broadcast::channel(16);
+        let connected = connect_opened(
+            daemon,
+            keys.private(local).unwrap(),
+            operations.subscribe(),
+            OpenedSshStream {
+                environment_id: local,
+                remote: true,
+                session_environment_id: platform,
+            },
+            streams.admit(local, true).unwrap(),
+        )
+        .await;
+
+        let try_attach = |env_id: Uuid| {
+            let client = &connected.client;
+            async move {
+                let mut channel = client.channel_open_session().await.unwrap();
+                channel
+                    .request_subsystem(true, "session@codewire.sh")
+                    .await
+                    .unwrap();
+                let open = AttachSessionRequest {
+                    input: Some(attach_session_request::Input::Open(Box::new(
+                        AttachSessionOpen {
+                            org_id: "org-test".to_owned(),
+                            environment_id: env_id.to_string(),
+                            session_id: "session-00000000-0000-4000-8000-000000000000".to_owned(),
+                            ..Default::default()
+                        },
+                    ))),
+                    ..Default::default()
+                };
+                channel
+                    .data(&encode_frame(&open).unwrap()[..])
+                    .await
+                    .unwrap();
+                let mut stderr = Vec::new();
+                let mut status = None;
+                timeout(Duration::from_secs(20), async {
+                    while let Some(msg) = channel.wait().await {
+                        match msg {
+                            ChannelMsg::ExtendedData { data, ext: 1 } => {
+                                stderr.extend_from_slice(&data)
+                            }
+                            ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                            ChannelMsg::Close => break,
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("session attach ends");
+                (status, String::from_utf8_lossy(&stderr).into_owned())
+            }
+        };
+
+        let (local_status, local_stderr) = try_attach(local).await;
+        assert_eq!(local_status, Some(1));
+        assert!(
+            local_stderr.contains(&format!("serves environment {platform}, not {local}")),
+            "{local_stderr}"
+        );
+
+        let (platform_status, platform_stderr) = try_attach(platform).await;
+        assert_eq!(platform_status, Some(1));
+        assert!(
+            platform_stderr.contains("not found"),
+            "expected platform ID to pass the identity check and reach daemon lookup, got: {platform_stderr}"
+        );
     }
 }
