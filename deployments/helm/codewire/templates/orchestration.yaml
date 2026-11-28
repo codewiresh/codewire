@@ -55,6 +55,18 @@ spec:
               drop: [ALL]
             seccompProfile:
               type: RuntimeDefault
+          {{- $svc := . }}
+          {{- if .temporalHostPort }}
+          {{- $env := list }}
+          {{- range .env }}
+            {{- if eq .name "TEMPORAL_HOST_PORT" }}
+              {{- $env = append $env (dict "name" "TEMPORAL_HOST_PORT" "value" $.Values.orchestration.temporalHostPort) }}
+            {{- else }}
+              {{- $env = append $env . }}
+            {{- end }}
+          {{- end }}
+          {{- $svc = merge (dict "env" $env) (omit . "env") }}
+          {{- end }}
           {{- $extraEnv := list }}
           {{- if .localKeyring.enabled }}
           {{- $kekMount := required "orchestration.localKeyring.mountPath is required when orchestration.localKeyring.enabled is true" .localKeyring.mountPath }}
@@ -65,7 +77,7 @@ spec:
                 (dict "name" "CODEWIRE_SECRET_KEK_ACTIVE_ID" "value" $kekActiveId)
           }}
           {{- end }}
-          {{- include "codewire.serviceContainer" (dict "root" $ "service" . "extraEnv" $extraEnv) | nindent 10 }}
+          {{- include "codewire.serviceContainer" (dict "root" $ "service" $svc "extraEnv" $extraEnv) | nindent 10 }}
           ports:
             - containerPort: 8084
               name: http

@@ -81,9 +81,15 @@ PY
 
   helm template codewire deployments/helm/codewire --namespace codewire -f "$values_file" >"$out_file"
 
-  python3 - "$out_file" "$direct_access" "$temporal_in_cluster" "$admin_enabled" <<'PY'
+  python3 - "$out_file" "$direct_access" "$temporal_in_cluster" "$admin_enabled" "$temporal_host" <<'PY'
 import sys, yaml
-path, direct, temporal, admin = sys.argv[1], sys.argv[2] == "true", sys.argv[3] == "true", sys.argv[4] == "true"
+path, direct, temporal, admin, expected_temporal = (
+    sys.argv[1],
+    sys.argv[2] == "true",
+    sys.argv[3] == "true",
+    sys.argv[4] == "true",
+    sys.argv[5],
+)
 docs = [d for d in yaml.safe_load_all(open(path, encoding="utf-8")) if d]
 kn = {(d["kind"], d["metadata"]["name"]) for d in docs}
 
@@ -103,8 +109,23 @@ for required in (
     assert required in kn, f"missing {required} in {path}"
 
 orch = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "codewire-orchestration")
-env = {e["name"]: e.get("value") for e in orch["spec"]["template"]["spec"]["containers"][0]["env"]}
+env_list = orch["spec"]["template"]["spec"]["containers"][0]["env"]
+env_names = [e["name"] for e in env_list]
+assert len(env_names) == len(set(env_names)), f"duplicate env names in orchestration: {env_names}"
+env = {e["name"]: e.get("value") for e in env_list}
 assert env.get("CODEWIRE_SECRET_KEK_PROVIDER") == "local-keyring", "local-keyring env missing"
+assert env.get("TEMPORAL_HOST_PORT") == expected_temporal, f"orchestration TEMPORAL_HOST_PORT mismatch: {env.get('TEMPORAL_HOST_PORT')} != {expected_temporal}"
+
+cfg = next(d for d in docs if d["kind"] == "ConfigMap" and d["metadata"]["name"].startswith("codewire-config-"))
+assert cfg["data"].get("SANDBOX_NAMESPACE") == "codewire-sandboxes", "SANDBOX_NAMESPACE missing"
+assert cfg["data"].get("SANDBOX_DAEMON_IMAGE") == "ghcr.io/codewiresh/daemon:v0.4.0-test", "SANDBOX_DAEMON_IMAGE missing"
+
+btp = next(d for d in docs if d["kind"] == "BackendTrafficPolicy" and d["metadata"]["name"] == "codewire-long-lived")
+http_timeout = btp["spec"]["timeout"]["http"]
+assert "connectionIdleTimeout" in http_timeout and "streamIdleTimeout" not in http_timeout, f"invalid BackendTrafficPolicy timeout: {http_timeout}"
+for rule in btp["spec"]["rateLimit"]["local"]["rules"]:
+    for sel in rule["clientSelectors"]:
+        assert "path" not in sel and any(h["name"] == ":path" for h in sel.get("headers", [])), f"invalid clientSelector: {sel}"
 
 apex = next(d for d in docs if d["kind"] == "HTTPRoute" and d["metadata"]["name"] == "codewire-apex")
 grpc_rule = next(r for r in apex["spec"]["rules"] if r["name"] == "environment-session-grpc")
@@ -112,6 +133,11 @@ matches = {m["path"]["value"] for m in grpc_rule["matches"]}
 assert "^/codewire[.]v1[.]HostAgentService/.*" in matches, "HostAgentService route missing"
 
 assert (("Deployment", "codewire-temporal") in kn) == temporal, f"temporal mismatch in {path}"
+if temporal:
+    tdep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "codewire-temporal")
+    tenv = {e["name"]: e.get("value") for e in tdep["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert tenv.get("POSTGRES_TLS_ENABLED") == "true", "POSTGRES_TLS_ENABLED missing on temporal"
+    assert tenv.get("SQL_TLS_ENABLED") == "true", "SQL_TLS_ENABLED missing on temporal"
 assert (("Deployment", "codewire-derp") in kn) == direct, f"derp mismatch in {path}"
 assert (("Deployment", "codewire-coordinator") in kn) == direct, f"coordinator mismatch in {path}"
 assert (("Deployment", "codewire-udp-relay") in kn) == direct, f"udp-relay mismatch in {path}"

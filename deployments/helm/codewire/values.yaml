@@ -550,6 +550,9 @@ orchestration:
     secretName: codewire-tenant-keks
     mountPath: /var/run/secrets/codewire/tenant-keks
     activeKeyId: v1
+  # Optional override for orchestration's TEMPORAL_HOST_PORT env entry when
+  # running in-cluster or external Temporal (#6706). Empty keeps orchestration.env.
+  temporalHostPort: ""
 
 # The hosted-egress switch (#4000) and what the warm-pool template admission
 # policy needs for its broker arm: codewire-hosted-egress. Off, so only today's

@@ -20,8 +20,9 @@ readonly ENVOY_GATEWAY_CHART_VERSION="v1.3.2"
 STACK_NAME=""
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 NAMESPACE="codewire"
+SANDBOX_NAMESPACE="codewire-sandboxes"
 IMAGE_REGISTRY="ghcr.io/codewiresh"
-IMAGE_TAG="latest"
+IMAGE_TAG=""
 ACME_EMAIL=""
 ADMIN_EMAIL=""
 TEMPORAL_EXTERNAL_HOST=""
@@ -37,7 +38,7 @@ Options:
   --region <aws-region>           AWS region (required, or set AWS_REGION)
   --namespace <ns>                Kubernetes namespace (default: codewire)
   --image-registry <registry>     Container registry (default: ghcr.io/codewiresh)
-  --image-tag <tag>               Image release tag (default: latest)
+  --image-tag <tag>               Image release tag (default: latest git v* tag)
   --acme-email <email>            Email for Let's Encrypt Route53 DNS-01 issuer
   --admin-email <email>           Email for first admin bootstrap Job
   --temporal-host <host:port>     External Temporal endpoint (when TemporalMode=External)
@@ -65,6 +66,14 @@ done
 
 [ -n "$STACK_NAME" ] || { echo "error: --stack-name is required" >&2; exit 2; }
 [ -n "$REGION" ] || { echo "error: --region is required" >&2; exit 2; }
+
+if [ -z "$IMAGE_TAG" ]; then
+  IMAGE_TAG="$(git -C "$REPO_ROOT" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+  if [ -z "$IMAGE_TAG" ]; then
+    echo "error: --image-tag <vX.Y.Z> is required (GHCR publishes release tags, not :latest)" >&2
+    exit 2
+  fi
+fi
 
 for tool in aws kubectl helm jq python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: required tool not found: $tool" >&2; exit 1; }
@@ -189,8 +198,13 @@ fi
 log "Configuring kubeconfig for ${CLUSTER_NAME}"
 aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER_NAME" >/dev/null
 
-log "Ensuring namespace ${NAMESPACE}"
+log "Ensuring namespaces ${NAMESPACE} and ${SANDBOX_NAMESPACE}"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl create namespace "$SANDBOX_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl label namespace "$SANDBOX_NAMESPACE" \
+  codewire.sh/resource-type=sandbox \
+  codewire.sh/runtime-scope=shared \
+  --overwrite >/dev/null
 
 log "Installing pinned cluster controllers"
 helm repo add eks https://aws.github.io/eks-charts >/dev/null 2>&1 || true
@@ -198,30 +212,46 @@ helm repo add external-secrets https://charts.external-secrets.io >/dev/null 2>&
 helm repo add jetstack https://charts.jetstack.io >/dev/null 2>&1 || true
 helm repo update >/dev/null
 
-helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  --namespace kube-system \
-  --version "$AWS_LB_CONTROLLER_CHART_VERSION" \
-  --set clusterName="$CLUSTER_NAME" \
-  --set region="$REGION" \
-  --set vpcId="$VPC_ID" \
-  --wait
+controller_ready() {
+  local rel="$1" ns="$2" expected_chart="$3"
+  local info
+  info="$(helm list -n "$ns" --filter "^${rel}\$" -o json 2>/dev/null || echo '[]')"
+  jq -e --arg c "$expected_chart" 'length == 1 and .[0].status == "deployed" and .[0].chart == $c' <<<"$info" >/dev/null 2>&1
+}
 
-helm upgrade --install external-secrets external-secrets/external-secrets \
-  --namespace external-secrets --create-namespace \
-  --version "$EXTERNAL_SECRETS_CHART_VERSION" \
-  --set installCRDs=true \
-  --wait
+if ! controller_ready aws-load-balancer-controller kube-system "aws-load-balancer-controller-${AWS_LB_CONTROLLER_CHART_VERSION}"; then
+  helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    --namespace kube-system \
+    --version "$AWS_LB_CONTROLLER_CHART_VERSION" \
+    --set clusterName="$CLUSTER_NAME" \
+    --set region="$REGION" \
+    --set vpcId="$VPC_ID" \
+    --wait
+fi
 
-helm upgrade --install cert-manager jetstack/cert-manager \
-  --namespace cert-manager --create-namespace \
-  --version "$CERT_MANAGER_CHART_VERSION" \
-  --set crds.enabled=true \
-  --wait
+if ! controller_ready external-secrets external-secrets "external-secrets-${EXTERNAL_SECRETS_CHART_VERSION}"; then
+  helm upgrade --install external-secrets external-secrets/external-secrets \
+    --namespace external-secrets --create-namespace \
+    --version "$EXTERNAL_SECRETS_CHART_VERSION" \
+    --set installCRDs=true \
+    --wait
+fi
 
-helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
-  --namespace envoy-gateway-system --create-namespace \
-  --version "$ENVOY_GATEWAY_CHART_VERSION" \
-  --wait
+if ! controller_ready cert-manager cert-manager "cert-manager-${CERT_MANAGER_CHART_VERSION}"; then
+  helm upgrade --install cert-manager jetstack/cert-manager \
+    --namespace cert-manager --create-namespace \
+    --version "$CERT_MANAGER_CHART_VERSION" \
+    --set crds.enabled=true \
+    --wait
+fi
+
+if ! controller_ready eg envoy-gateway-system "gateway-helm-${ENVOY_GATEWAY_CHART_VERSION}"; then
+  helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
+    --namespace envoy-gateway-system --create-namespace \
+    --version "$ENVOY_GATEWAY_CHART_VERSION" \
+    --set config.envoyGateway.extensionApis.enableBackend=true \
+    --wait
+fi
 
 log "Applying encrypted GP3 StorageClass, EnvoyProxy NLB config, and ExternalSecrets"
 cat <<EOF | kubectl apply -f -
@@ -438,8 +468,23 @@ log "Deploying Codewire Helm release into namespace ${NAMESPACE}"
 helm upgrade --install codewire "$CHART_DIR" \
   --namespace "$NAMESPACE" \
   -f "$RENDERED_VALUES" \
-  --wait \
   --timeout 15m
+
+log "Publishing public orchestration internal CA root into ${SANDBOX_NAMESPACE} and ${NAMESPACE}"
+kubectl -n "$NAMESPACE" wait --for=condition=Ready certificate/codewire-orchestration-internal-ca --timeout=120s
+CA_PEM_FILE="${WORK_DIR}/orchestration-internal-ca.crt"
+kubectl -n "$NAMESPACE" get secret codewire-orchestration-internal-ca -o jsonpath='{.data.tls\.crt}' | base64 -d >"$CA_PEM_FILE"
+[ -s "$CA_PEM_FILE" ] || { echo "error: empty public CA certificate in codewire-orchestration-internal-ca" >&2; exit 1; }
+for target_ns in "$SANDBOX_NAMESPACE" "$NAMESPACE"; do
+  kubectl -n "$target_ns" create configmap codewire-orchestration-internal-roots \
+    --from-file=ca.crt="$CA_PEM_FILE" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+done
+
+log "Waiting for Codewire Deployments in ${NAMESPACE} to become Ready"
+for dep in $(kubectl -n "$NAMESPACE" get deployments -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl -n "$NAMESPACE" rollout status "deployment/${dep}" --timeout=10m
+done
 
 log "Codewire deployed on EKS (${CLUSTER_NAME}). Point DNS for ${DOMAIN_NAME} (and ${PREVIEW_WILDCARD_HOST}) to the Envoy Gateway NLB:"
 kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=codewire-public -o wide || true

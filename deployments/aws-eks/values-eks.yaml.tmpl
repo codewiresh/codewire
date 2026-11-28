@@ -22,6 +22,8 @@ config:
   CODEWIRE_API_URL: "https://__DOMAIN_NAME__"
   CODEWIRE_CREDIT_ENFORCEMENT: "off"
   CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: "__IMAGE_REGISTRY__/workspace"
+  SANDBOX_NAMESPACE: "codewire-sandboxes"
+  SANDBOX_DAEMON_IMAGE: "__IMAGE_REGISTRY__/daemon:__IMAGE_TAG__"
   SANDBOX_WORKSPACE_STORAGE_CLASS: "codewire-gp3"
   SANDBOX_VOLUME_SNAPSHOT_CLASS: "codewire-ebs-csi"
   DB_HOST: "__RDS_ENDPOINT__"
@@ -115,6 +117,7 @@ orchestration:
     secretName: codewire-tenant-keks
     mountPath: /var/run/secrets/codewire/tenant-keks
     activeKeyId: v1
+  temporalHostPort: "__TEMPORAL_HOST_PORT__"
 
 # Phase 1 keeps credential-service off unless ExternalOpenBao is configured;
 # Phase 2 enables credential-service natively with SecretKekMode=AwsKms.
@@ -145,7 +148,7 @@ temporal:
     passwordSecretName: codewire-db-app
     passwordSecretKey: password
     tlsEnabled: true
-    tlsDisableHostVerification: false
+    tlsDisableHostVerification: true
 
 databaseInit:
   enabled: __DATABASE_INIT_ENABLED__

@@ -17,19 +17,27 @@ remains tested via the enrolled-host steps below.
 
 ## Where the walk stands
 
-Updated 2026-11-28. Template, bootstrap scripts, and static CI checks are in
-tree; live AWS verification is not yet observed.
+Updated 2026-11-28. First live AWS EKS verification ran in `us-east-1` from
+`c61b29ed1a` plus the PR 4 fixes (9 bugs caught and fixed live in
+`template.yaml`, `install.sh`, `values-eks.yaml.tmpl`, `orchestration.yaml`,
+`temporal.yaml`, and `gateway.yaml`). Stack deploy, Nitro nested-KVM L2
+execution, IMDSv2 hop-limit isolation, controller/ESO/RDS-TLS/Temporal/IdP/
+Dashboard/Billing/Envoy-Gateway routing, first-admin bootstrap/sign-in/
+invite-only sign-up, and zero-leak teardown are observed; public NLB ingress,
+`codewire-orchestration` `local-keyring` readiness, and `cw` enrolled-host
+lifecycle await an ELB-enabled verification account and the next GHCR release
+tag (`>= v0.4.42`, after `#6685`).
 
 | ID | What | AWS EKS (`EksKvmStandard` default) |
 | --- | --- | --- |
-| `eks-stack-deploy` | Deploy CloudFormation stack and inspect outputs | not yet observed |
-| `eks-nitro-nested-kvm` | Verify Nitro nested-KVM `/dev/kvm`, AccessEntry join, and Cloud Hypervisor boot | not yet observed |
-| `eks-helm-bootstrap` | Bootstrap cluster controllers, Helm release and TLS | not yet observed |
-| `eks-first-admin` | Create first admin and verify invite-only sign-up | not yet observed |
-| `eks-host-lifecycle` | Enroll host and run create, run, stop, start and rm | not yet observed |
-| `eks-empty-failure-recovery` | Verify empty, offline-host, pod-restart and RDS-reconnect states | not yet observed |
-| `eks-imds-isolation` | Verify IMDSv2 hop-limit=1 blocks Pod access to EC2 metadata | not yet observed |
-| `eks-clean-teardown` | Drain LoadBalancers/PVCs and delete stack with zero orphans | not yet observed |
+| `eks-stack-deploy` | Deploy CloudFormation stack and inspect outputs | observed (2026-11-28, `us-east-1`, `m7i.xlarge` under 8-vCPU account quota) |
+| `eks-nitro-nested-kvm` | Verify Nitro nested-KVM `/dev/kvm`, AccessEntry join, and KVM L2 execution | observed (2026-11-28, `m7i.xlarge`, `KVM_RUN` L2 guest `'OK'` -> `KVM_EXIT_HLT`; full Cloud Hypervisor boot awaits GHCR runtime mirrors) |
+| `eks-helm-bootstrap` | Bootstrap cluster controllers, Helm release and TLS | partially observed (2026-11-28; ESO, RDS PG 17.9 TLS, Temporal, IdP, Billing, Dashboard, Envoy Gateway HTTPS `200`/`204`/`301` verified; public NLB blocked by new-account ELB restriction, orchestration `local-keyring` awaits `>= v0.4.42` GHCR tag) |
+| `eks-first-admin` | Create first admin and verify invite-only sign-up | partially observed (2026-11-28; bootstrap Job, second-admin refusal, admin sign-in `200`, uninvited sign-up `202` `accessPending:true` verified via Envoy Gateway HTTPS; `cw login` awaits public NLB + `>= v0.4.42`) |
+| `eks-host-lifecycle` | Enroll host and run create, run, stop, start and rm | not yet observed (awaits public NLB + `>= v0.4.42` GHCR release) |
+| `eks-empty-failure-recovery` | Verify empty, offline-host, pod-restart and RDS-reconnect states | partially observed (2026-11-28; `codewire-idp` rollout restart + RDS TLS reconnect verified; `cw hosts` offline/recovery awaits `eks-host-lifecycle`) |
+| `eks-imds-isolation` | Verify IMDSv2 hop-limit=1 blocks Pod access to EC2 metadata | observed (2026-11-28; `curl` timed out after 3001 ms, `HTTP 000`) |
+| `eks-clean-teardown` | Drain LoadBalancers/PVCs and delete stack with zero orphans | observed (2026-11-28; `DELETE_COMPLETE` in 624s, zero leaked AWS resources) |
 | `eks-kvm-standard` | End-to-end `standard` VM sandbox lifecycle (after GHCR runtime mirrors) | not yet observed |
 | `eks-kms-credentials` | Phase 2: `aws-kms` KEK wrapping for orchestration and credential-service | not yet observed |
 
@@ -83,7 +91,20 @@ tree; live AWS verification is not yet observed.
   AMI.
 - **Gotchas:** Ensure `AllowedApiCidrs` includes the workstation IP running
   the bootstrap step, or run bootstrap from inside the VPC.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on real AWS (`us-east-1`, base commit `c61b29ed1a`,
+  `cw v0.4.26`). Stack `codewire-eks-walk-6706` reached `CREATE_COMPLETE`
+  (`SandboxComputeMode=EksKvmStandard`, `DeploymentProfile=Minimal`,
+  `DeletionProtection=false`, `HostedZoneId=""`). Verified EKS `1.33`
+  (`v1.33.13-eks-9adbfea`) `ACTIVE` with KMS `secrets` encryption and CIDR-scoped
+  public API + private API; RDS PostgreSQL `17.9` (`db.t4g.medium`)
+  `PubliclyAccessible=false`, `StorageEncrypted=true` on the stack KMS CMK;
+  both Launch Templates enforced `HttpTokens=required` and
+  `HttpPutResponseHopLimit=1`; dynamic SSM AL2023 AMI resolved to
+  `ami-099a88fd7c697e35b`. The disposable dev account had an 8-vCPU On-Demand
+  Standard quota (`L-1216C47A`), so 4-vCPU Nitro nested-virt types
+  (`m7i.xlarge`/`m8i.xlarge`/`c7i.xlarge`/`c8i.xlarge`) were added to
+  `KvmInstanceType.AllowedValues` (keeping `m7i.4xlarge` default) and the KVM
+  ASG launched `m7i.xlarge` with `CpuOptions.NestedVirtualization=enabled`.
 
 ### `eks-nitro-nested-kvm`: verify Nitro nested-KVM `/dev/kvm`, AccessEntry join, and Cloud Hypervisor boot
 
@@ -109,7 +130,18 @@ tree; live AWS verification is not yet observed.
   `CpuOptions.NestedVirtualization`; confirm the KVM node belongs to
   `KvmNodeAutoScalingGroup` and reports `NestedVirtualization: enabled` via
   `aws ec2 describe-instances`.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 on real AWS (`us-east-1`, `m7i.xlarge`,
+  AL2023 `6.12.115-140.210.amzn2023.x86_64`, `containerd://2.3.7`). Self-managed
+  ASG node joined EKS 1.33 via `KvmNodeAccessEntry` (`Type: EC2_LINUX`) in 69 s
+  with labels `node.codewire.sh/purpose=sandbox-runtime,codewire.sh/node-pool=kvm-sandbox`
+  and taint `node.codewire.sh/runtime-candidate=true:NoSchedule` (zero `aws-auth`
+  edits). Live probe pod verified `/dev/kvm` exists (`0666`), all 4 vCPUs expose
+  `vmx`, containerd config sets `device_ownership_from_security_context = true`
+  under `[plugins.'io.containerd.cri.v1.runtime']` (template updated from
+  containerd 1.x `grpc.v1.cri`), and `KVM_GET_API_VERSION=12` +
+  `KVM_CREATE_VM` + `KVM_RUN` executed a real-mode x86 L2 guest to
+  `KVM_EXIT_HLT` with serial output `'OK'`. Full Cloud Hypervisor guest kernel
+  boot awaits public runtime image mirrors (`eks-kvm-standard`).
 
 ### `eks-helm-bootstrap`: bootstrap cluster controllers, Helm release and TLS
 
@@ -138,7 +170,35 @@ tree; live AWS verification is not yet observed.
   report `SecretSynced`; re-running `deployments/aws-eks/install.sh` exits `0`.
 - **Gotchas:** Wait for DNS-01 ACME propagation before testing TLS; verify
   the NLB target group health checks pass on the Envoy Gateway pods.
-- **Observed:** not yet observed.
+- **Observed:** partially observed 2026-11-28 (`us-east-1`, `HostedZoneId=""`
+  with BYO self-signed TLS Secrets, `--image-tag v0.4.41`). Live bootstrap
+  caught and fixed 9 real defects: GHCR has no `:latest` tag (fixed `install.sh`
+  to resolve latest `v*` tag or require `--image-tag`); `orchestration.env`
+  hardcoded `TEMPORAL_HOST_PORT` to `temporal-system` (added
+  `orchestration.temporalHostPort`); `install.sh` omitted `codewire-sandboxes`
+  namespace, its required `codewire.sh/resource-type=sandbox` +
+  `codewire.sh/runtime-scope=shared` labels, and the
+  `codewire-orchestration-internal-roots` ConfigMap; `values-eks.yaml.tmpl`
+  omitted `SANDBOX_DAEMON_IMAGE` and `SANDBOX_NAMESPACE`; `temporal.yaml` used
+  only `SQL_TLS_ENABLED` instead of `POSTGRES_TLS_ENABLED` + `SQL_TLS_ENABLED`
+  / `SQL_HOST_VERIFICATION` for RDS `rds.force_ssl=1`; Envoy Gateway v1.3.2
+  rejected `Backend` references without `extensionApis.enableBackend=true` and
+  rejected `maxStreamDuration`/`streamIdleTimeout`/`clientSelectors[].path`/
+  `Distinct` local CIDRMatch in `BackendTrafficPolicy`. After fixes, verified
+  live: all 4 controllers `deployed`, all 5 `ExternalSecret` objects
+  `SecretSynced` via namespace-scoped `SecretStore` + EKS Pod Identity,
+  `Job/codewire-database-init` `Complete` (3 s) against RDS PG 17.9 over TLS,
+  `codewire-temporal`, `codewire-idp`, `codewire-billing`, and
+  `codewire-dashboard` `1/1 Running`, `HTTPRoute/codewire-apex` `Accepted=True`
+  + `ResolvedRefs=True`, `BackendTrafficPolicy/codewire-long-lived`
+  `Accepted=True`, Envoy Gateway HTTPS `GET /healthz` (`204`),
+  `GET /.well-known/openid-configuration` (`200`), `GET /.well-known/jwks.json`
+  (`200`), `GET /` (`200`), and HTTP→HTTPS `301` redirect. Not yet observed:
+  public AWS NLB provisioning (the fresh dev account returned AWS account-level
+  `OperationNotPermitted: This AWS account currently does not support creating
+  load balancers`), Route53 DNS-01 ACME issuance, and `codewire-orchestration`
+  `local-keyring` readiness (`v0.4.41` predates `#6685`; requires next release
+  tag `>= v0.4.42`).
 
 ### `eks-first-admin`: create first admin and verify invite-only sign-up
 
@@ -162,7 +222,16 @@ tree; live AWS verification is not yet observed.
   requests to `codewire.sh`.
 - **Gotchas:** Without SMTP/SES configured, copy one-time invite links from
   the organization Members page.
-- **Observed:** not yet observed.
+- **Observed:** partially observed 2026-11-28 (`us-east-1`, `--image-tag
+  v0.4.41`). `Job/codewire-admin-bootstrap` reached `Complete` (6 s) logging
+  `created the admin admin@codewire-walk.test`; a second `create-admin` Job
+  exited cleanly with `this server already has an admin; nothing changed`.
+  Through Envoy Gateway HTTPS: `GET /api/auth/sign-up/mode` returned `200`
+  (`{"mode":"invite-only","reason":false}`), `POST /api/auth/sign-in` for the
+  bootstrapped admin returned `200` (`is_admin: true`, session created), and
+  uninvited `POST /api/auth/sign-up` returned `202` (`"accessPending": true`,
+  `is_admin: false`). Browser org creation and `cw login` / `cw whoami` await
+  an ELB-enabled account and `>= v0.4.42` GHCR release.
 
 ### `eks-host-lifecycle`: enroll host and run create, run, stop, start and rm
 
@@ -205,7 +274,11 @@ tree; live AWS verification is not yet observed.
   previously enrolled host returns online with zero data loss.
 - **Gotchas:** Do not confuse Kubernetes readiness transition (5–15 s) with
   a permanent error; wait for `kubectl rollout status` to complete.
-- **Observed:** not yet observed.
+- **Observed:** partially observed 2026-11-28 (`us-east-1`).
+  `kubectl -n codewire rollout restart deployment/codewire-idp` rolled cleanly
+  to `1/1 Running` and reconnected to RDS PostgreSQL 17.9 over TLS with the
+  bootstrapped admin intact. Empty-host and offline-host `cw` checks await
+  `eks-host-lifecycle`.
 
 ### `eks-imds-isolation`: verify IMDSv2 hop-limit=1 blocks Pod access to EC2 metadata
 
@@ -220,7 +293,12 @@ tree; live AWS verification is not yet observed.
   returned, confirming `HttpPutResponseHopLimit=1` blocks Pod IMDS access
   while EKS Pod Identity still works for authorized ServiceAccounts.
 - **Gotchas:** Run with `hostNetwork: false` (default Pod networking).
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 (`us-east-1`). Non-privileged Pod (`hostNetwork:
+  false`) running `curl -sS -m 3 -X PUT http://169.254.169.254/latest/api/token
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600'` timed out after 3001 ms
+  (`curl_exit=28`, `HTTP_CODE=000`, zero bytes returned), while EKS Pod Identity
+  worked for `ebs-csi-controller-sa`, `external-secrets`, and
+  `aws-load-balancer-controller`.
 
 ### `eks-clean-teardown`: drain LoadBalancers/PVCs and delete stack with zero orphans
 
@@ -246,7 +324,15 @@ tree; live AWS verification is not yet observed.
 - **Gotchas:** Stacks deployed with `DeletionProtection=true` intentionally
   retain RDS, KMS, and Secrets Manager KEK secrets; this step tests
   `DeletionProtection=false`.
-- **Observed:** not yet observed.
+- **Observed:** 2026-11-28 (`us-east-1`).
+  `./deployments/aws-eks/uninstall.sh --stack-name codewire-eks-walk-6706
+  --region us-east-1 --delete-stack` uninstalled releases and reached
+  CloudFormation `DELETE_COMPLETE` in 624 s with zero manual ENI cleanup.
+  Post-delete AWS CLI audit confirmed zero remaining EKS clusters, EC2
+  instances, Auto Scaling Groups, NLBs, NAT Gateways, EIPs, EBS volumes, RDS
+  instances, non-default VPCs, or ENIs; the intentionally retained disposable
+  RDS snapshot, 5 Secrets Manager secrets, and KMS CMK were explicitly deleted
+  or scheduled for 7-day deletion.
 
 ## Follow-up: In-cluster `standard` sandboxes & AWS KMS KEK
 

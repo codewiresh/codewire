@@ -108,6 +108,10 @@ Parameters:
     Type: String
     Default: m7i.4xlarge
     AllowedValues:
+      - m7i.xlarge
+      - m8i.xlarge
+      - c7i.xlarge
+      - c8i.xlarge
       - m7i.2xlarge
       - m8i.2xlarge
       - c7i.2xlarge
@@ -967,7 +971,7 @@ Resources:
                   - --register-with-taints=node.codewire.sh/runtime-candidate=true:NoSchedule
               containerd:
                 config: |
-                  [plugins."io.containerd.grpc.v1.cri"]
+                  [plugins."io.containerd.cri.v1.runtime"]
                     device_ownership_from_security_context = true
             --BOUNDARY--
 

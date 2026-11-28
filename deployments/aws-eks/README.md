@@ -51,19 +51,23 @@ for the acceptance walk.
        AllowedApiCidrs="$(curl -s https://checkip.amazonaws.com)/32"
    ```
 
-2. Bootstrap cluster controllers and deploy Codewire:
+2. Bootstrap cluster controllers and deploy Codewire (pass a published GHCR
+   release tag, or omit `--image-tag` inside a git checkout to use the latest
+   `v*` tag):
 
    ```sh
    ./deployments/aws-eks/install.sh \
      --stack-name codewire-eks \
      --region us-east-1 \
+     --image-tag v0.4.42 \
      --acme-email ops@example.com \
      --admin-email admin@example.com
    ```
 
 3. Scale or upgrade KVM sandbox capacity at any time via stack update
-   (`m7i.2xlarge` → `m7i.4xlarge`/`m8i.4xlarge` → `m8i.8xlarge`/`m8i.16xlarge`
-   → `c7i.metal-24xl`/`m7i.metal-24xl`; `.metal` automatically omits
+   (`m7i.xlarge` for 8-vCPU dev quotas → `m7i.2xlarge` →
+   `m7i.4xlarge`/`m8i.4xlarge` → `m8i.8xlarge`/`m8i.16xlarge` →
+   `c7i.metal-24xl`/`m7i.metal-24xl`; `.metal` automatically omits
    `CpuOptions.NestedVirtualization`):
 
    ```sh

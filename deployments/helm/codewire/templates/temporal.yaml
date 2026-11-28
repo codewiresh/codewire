@@ -70,10 +70,14 @@ spec:
             - name: BIND_ON_IP
               value: "0.0.0.0"
             {{- if .postgres.tlsEnabled }}
+            - name: POSTGRES_TLS_ENABLED
+              value: "true"
+            - name: POSTGRES_TLS_DISABLE_HOST_VERIFICATION
+              value: {{ ternary "true" "false" .postgres.tlsDisableHostVerification | quote }}
             - name: SQL_TLS_ENABLED
               value: "true"
-            - name: SQL_TLS_DISABLE_HOST_VERIFICATION
-              value: {{ ternary "true" "false" .postgres.tlsDisableHostVerification | quote }}
+            - name: SQL_HOST_VERIFICATION
+              value: {{ ternary "false" "true" .postgres.tlsDisableHostVerification | quote }}
             {{- end }}
           readinessProbe:
             tcpSocket:

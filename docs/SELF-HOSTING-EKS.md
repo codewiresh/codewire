@@ -34,6 +34,9 @@ userdata (`device_ownership_from_security_context = true`), and a dedicated
 Upgrade vertically or horizontally at any time via a CloudFormation stack
 update on `KvmInstanceType` and `KvmMinSize` / `KvmDesiredSize` / `KvmMaxSize`:
 
+- Evaluation / 8-vCPU AWS account quota: `m7i.xlarge`, `m8i.xlarge`,
+  `c7i.xlarge`, `c8i.xlarge` (4 vCPUs each; fits alongside 2× `t3.large` system
+  nodes inside an 8-vCPU On-Demand Standard quota)
 - Entry / smaller: `m7i.2xlarge`, `m8i.2xlarge`, `c7i.2xlarge`, `c8i.2xlarge`
 - Default sweet spot (~$700–$1,000/mo total): **`m7i.4xlarge`**, `m8i.4xlarge`,
   `c7i.4xlarge`, `c8i.4xlarge`, `r7i.4xlarge`, `r8i.4xlarge`
@@ -105,12 +108,15 @@ and registry mirrors); all AWS/EKS wiring lives in `deployments/aws-eks/`.
    Pass `SandboxComputeMode=ControlPlaneOnly` to skip the KVM Auto Scaling
    Group and run sandboxes exclusively on enrolled hosts (`cw host run`).
 
-2. Bootstrap cluster controllers and deploy Codewire via Helm:
+2. Bootstrap cluster controllers and deploy Codewire via Helm (pass a published
+   GHCR release tag, or omit `--image-tag` in a git checkout to default to the
+   latest `v*` tag):
 
    ```sh
    ./deployments/aws-eks/install.sh \
      --stack-name codewire-eks \
      --region us-east-1 \
+     --image-tag v0.4.42 \
      --acme-email ops@example.com \
      --admin-email admin@example.com
    ```

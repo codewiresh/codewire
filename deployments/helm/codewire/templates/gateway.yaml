@@ -538,8 +538,7 @@ spec:
   timeout:
     http:
       requestTimeout: 0s
-      maxStreamDuration: 0s
-      streamIdleTimeout: 3600s
+      connectionIdleTimeout: 3600s
 {{- end }}
 ---
 apiVersion: gateway.envoyproxy.io/v1alpha1
@@ -563,35 +562,28 @@ spec:
   timeout:
     http:
       requestTimeout: 0s
-      maxStreamDuration: 0s
-      streamIdleTimeout: 3600s
+      connectionIdleTimeout: 3600s
   rateLimit:
     type: Local
     local:
       rules:
         - clientSelectors:
-            - path: { type: RegularExpression, value: "^/api/oauth/token([?].*)?$" }
-              sourceCIDR: { type: Distinct, value: 0.0.0.0/0 }
+            - headers:
+                - name: ":path"
+                  type: RegularExpression
+                  value: "^/api/oauth/token([?].*)?$"
           limit: { requests: 120, unit: Minute }
         - clientSelectors:
-            - path: { type: RegularExpression, value: "^/api/oauth/token([?].*)?$" }
-              sourceCIDR: { type: Distinct, value: "::/0" }
-          limit: { requests: 120, unit: Minute }
-        - clientSelectors:
-            - path: { type: RegularExpression, value: "^/api/oauth/authorize([?].*)?$" }
-              sourceCIDR: { type: Distinct, value: 0.0.0.0/0 }
+            - headers:
+                - name: ":path"
+                  type: RegularExpression
+                  value: "^/api/oauth/authorize([?].*)?$"
           limit: { requests: 30, unit: Minute }
         - clientSelectors:
-            - path: { type: RegularExpression, value: "^/api/oauth/authorize([?].*)?$" }
-              sourceCIDR: { type: Distinct, value: "::/0" }
-          limit: { requests: 30, unit: Minute }
-        - clientSelectors:
-            - path: { type: PathPrefix, value: /api/oauth/device }
-              sourceCIDR: { type: Distinct, value: 0.0.0.0/0 }
-          limit: { requests: 20, unit: Minute }
-        - clientSelectors:
-            - path: { type: PathPrefix, value: /api/oauth/device }
-              sourceCIDR: { type: Distinct, value: "::/0" }
+            - headers:
+                - name: ":path"
+                  type: RegularExpression
+                  value: "^/api/oauth/device(/.*)?([?].*)?$"
           limit: { requests: 20, unit: Minute }
 {{- end }}
 {{- end }}
