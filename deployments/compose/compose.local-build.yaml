@@ -1,0 +1,37 @@
+# Local-build override for developing or testing self-hosted Compose directly
+# from a Codewire source checkout:
+#
+#   docker compose -f compose.yaml -f compose.local-build.yaml up -d --build
+#
+# Builds the canonical `services` and `dashboard` images from the repository
+# root using the shared `rust-base` toolchain stage.
+
+services:
+  rust-base:
+    build:
+      context: ../..
+      dockerfile: deployments/docker/rust-base.Dockerfile
+    deploy:
+      replicas: 0
+
+  idp:
+    image: codewire-selfhost-services:local
+    build:
+      context: ../..
+      dockerfile: deployments/docker/services.Dockerfile
+      additional_contexts:
+        codewire-rust-base: service:rust-base
+
+  orchestration:
+    image: codewire-selfhost-services:local
+
+  billing:
+    image: codewire-selfhost-services:local
+
+  dashboard:
+    image: codewire-selfhost-dashboard:local
+    build:
+      context: ../..
+      dockerfile: apps/dashboard/Dockerfile
+      additional_contexts:
+        codewire-rust-base: service:rust-base

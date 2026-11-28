@@ -1,0 +1,112 @@
+# Self-hosted Codewire edge Caddyfile (deployments/compose/compose.yaml).
+#
+# Audit-IP integrity (#2505 M1): Caddy 2.10's default proxy posture is
+# REPLACE — an incoming client X-Forwarded-For is discarded and the peer IP
+# is forwarded as the sole hop. Keep it that way: adding `trusted_proxies`
+# here would switch this edge to APPEND mode, preserve attacker-chosen hops
+# for every backend, and re-open the audit_logs IP spoof.
+
+{
+	admin off
+	auto_https disable_redirects
+}
+
+https://{$CODEWIRE_HOST}:{$CODEWIRE_HTTPS_PORT:443} {
+	import /etc/caddy/tls.caddy
+
+	# OIDC provider (codewire-idp binary)
+	@idp path /.well-known/openid-configuration /.well-known/oauth-authorization-server /.well-known/jwks.json /api/oauth/* /api/oidc/* /api/auth/two-factor/* /api/auth/verify-email /api/auth/forget-password /api/auth/reset-password /api/auth/send-verification-email /api/auth/sign-up /api/auth/sign-in /api/auth/sign-out /api/auth/get-session /api/auth/oauth/* /api/auth/sessions /api/auth/sessions/revoke /api/auth/user-tokens /api/auth/user-tokens/revoke
+	handle @idp {
+		reverse_proxy idp:8091
+	}
+
+	# Stripe delivery is the only permanent non-Connect billing route.
+	@billing path /api/webhooks/stripe
+	handle @billing {
+		reverse_proxy billing:8081
+	}
+
+	# Connect-RPC routes: /{package}.{Service}/{Method}
+	# Routing is per-Service because packages span binaries.
+	handle /codewire.internal.v1.MeshCoordinatorService/* {
+		reverse_proxy mesh:18090 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+	@connect_mesh path /codewire.v1.MeshNetworkService/* /codewire.v1.MeshNodeService/* /codewire.v1.MeshInviteService/* /codewire.v1.MeshGroupService/* /codewire.v1.MeshKeyValueService/*
+	handle @connect_mesh {
+		reverse_proxy mesh:18090
+	}
+	@connect_admin path /codewire.admin.v1.AdminService/*
+	handle @connect_admin {
+		reverse_proxy orchestration:8084
+	}
+	@connect_billing_catalog path /codewire.admin.v1.BillingCatalogService/*
+	handle @connect_billing_catalog {
+		reverse_proxy billing:8081
+	}
+	@connect_billing path /codewire.console.v1.BillingService/*
+	handle @connect_billing {
+		reverse_proxy billing:8081
+	}
+	# The coordinator's native bidi stream needs HTTP/2 on the backend leg.
+	handle /codewire.internal.v1.CoordinatorService/* {
+		reverse_proxy coordinator:8090 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+	# Environment sessions use native gRPC; preserve h2c to orchestration.
+	handle /codewire.v1.EnvironmentSessionService/* {
+		reverse_proxy orchestration:8084 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+	# Host sessions (#3609) are the hosts' native bidi stream to orchestration.
+	handle /codewire.v1.HostAgentService/* {
+		reverse_proxy orchestration:8084 {
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+
+	# Isolated credential authority routes (activated in Stage 3).
+	handle /codewire.v1.CredentialDelegationService/* {
+		reverse_proxy credential-service:8086 {
+			flush_interval -1
+			transport http {
+				versions h2c 2
+			}
+		}
+	}
+	handle /codewire.v1.CredentialMutationService/* {
+		reverse_proxy credential-service:8086 {
+			flush_interval -1
+		}
+	}
+	handle /codewire.v1.GithubRepositoryService/* {
+		reverse_proxy credential-service:8086
+	}
+	handle /codewire.* {
+		reverse_proxy orchestration:8084
+	}
+
+	# Browser GitHub App authorization returns to the dashboard, not the API.
+	handle /api/v1/github/oauth/callback {
+		reverse_proxy dashboard:5173
+	}
+
+	# All remaining API traffic is Rust orchestration.
+	handle /api/* {
+		reverse_proxy orchestration:8084
+	}
+
+	# Default: Rust web app and generated documentation.
+	reverse_proxy dashboard:5173
+}

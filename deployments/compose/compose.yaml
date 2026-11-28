@@ -1,0 +1,178 @@
+# Self-hosted Codewire control plane (Docker Compose).
+#
+# Run `./init` first to generate `.env` and `secrets/`, configure TLS and the
+# local KEK keyring, start the stack, and create the first admin account.
+#
+# To build from a local source checkout instead of pulling published images:
+#   docker compose -f compose.yaml -f compose.local-build.yaml up -d --build
+#
+# See docs/SELF-HOSTING.md for architecture, backup, and upgrade instructions.
+
+name: codewire-selfhost
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17-alpine@sha256:7456ef82e5f5bc43d997f4781bbd7c0d6389bff397564649a356e206ba473aee
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-codewire}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./init first}
+      POSTGRES_DB: ${POSTGRES_DB:-codewire}
+    command:
+      - postgres
+      - -c
+      - max_locks_per_transaction=1024
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-codewire} -d ${POSTGRES_DB:-codewire}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  temporal:
+    image: docker.io/temporalio/auto-setup:1.29.0@sha256:6605395ec22aa6a1993bb0bfd35002b011603e21d11c4a71ee646038c59e8909
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_USER:-codewire}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?run ./init first}
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+      SKIP_DB_CREATE: "true"
+      DEFAULT_NAMESPACE_RETENTION: 7d
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator namespace describe -n default --address \"$$(hostname -i):7233\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  idp:
+    image: ${CODEWIRE_SERVICES_IMAGE:-ghcr.io/codewiresh/services:latest}
+    command: ["/codewire-idp"]
+    user: "${CODEWIRE_UID:-65532}:${CODEWIRE_GID:-65532}"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-codewire}:${POSTGRES_PASSWORD:?run ./init first}@postgres:5432/${POSTGRES_DB:-codewire}?sslmode=disable
+      SESSION_SECRET: ${SESSION_SECRET:?run ./init first}
+      IDP_PORT: "8091"
+      PUBLIC_OIDC_ISSUER_URL: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      FRONTEND_URL: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      IDP_SIGNING_KEK_DIR: /var/run/secrets/codewire/idp-signing-keks
+      IDP_SIGNING_ACTIVE_KEK_ID: ${IDP_SIGNING_ACTIVE_KEK_ID:-v1}
+      IDP_SIGNUP: ${IDP_SIGNUP:-invite-only}
+      IDP_SIGNUP_REASON: ${IDP_SIGNUP_REASON:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      CODEWIRE_SMTP_HOST: ${CODEWIRE_SMTP_HOST:-}
+      CODEWIRE_SMTP_PORT: ${CODEWIRE_SMTP_PORT:-}
+      CODEWIRE_SMTP_USERNAME: ${CODEWIRE_SMTP_USERNAME:-}
+      CODEWIRE_SMTP_PASSWORD: ${CODEWIRE_SMTP_PASSWORD:-}
+      CODEWIRE_SMTP_FROM: ${CODEWIRE_SMTP_FROM:-}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./secrets/idp-signing-keks:/var/run/secrets/codewire/idp-signing-keks:ro
+
+  orchestration:
+    image: ${CODEWIRE_SERVICES_IMAGE:-ghcr.io/codewiresh/services:latest}
+    command: ["/codewire-orchestration"]
+    user: "${CODEWIRE_UID:-65532}:${CODEWIRE_GID:-65532}"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-codewire}:${POSTGRES_PASSWORD:?run ./init first}@postgres:5432/${POSTGRES_DB:-codewire}?sslmode=disable
+      SESSION_SECRET: ${SESSION_SECRET:?run ./init first}
+      ORCHESTRATION_PORT: "8084"
+      TEMPORAL_HOST_PORT: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      FRONTEND_URL: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      CODEWIRE_API_URL: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      CODEWIRE_SECRET_KEK_PROVIDER: ${CODEWIRE_SECRET_KEK_PROVIDER:-local-keyring}
+      CODEWIRE_SECRET_KEK_DIR: /var/run/secrets/codewire/tenant-keks
+      CODEWIRE_SECRET_KEK_ACTIVE_ID: ${CODEWIRE_SECRET_KEK_ACTIVE_ID:-v1}
+      CODEWIRE_WORKSPACE_IMAGE_REPOSITORY: ${CODEWIRE_WORKSPACE_IMAGE_REPOSITORY:-ghcr.io/codewiresh/workspace}
+      CODEWIRE_APPROVED_IMAGE_REGISTRIES: ${CODEWIRE_APPROVED_IMAGE_REGISTRIES:-ghcr.io/codewiresh/,docker.io/library/}
+      CODEWIRE_CREDIT_ENFORCEMENT: ${CODEWIRE_CREDIT_ENFORCEMENT:-off}
+      CODEWIRE_CW_RUNTIME_STAGING: /var/lib/codewire-orchestration/staging
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./secrets/tenant-keks:/var/run/secrets/codewire/tenant-keks:ro
+    tmpfs:
+      - /var/lib/codewire-orchestration/staging:uid=${CODEWIRE_UID:-65532},gid=${CODEWIRE_GID:-65532},mode=0755,size=2g
+
+  billing:
+    image: ${CODEWIRE_SERVICES_IMAGE:-ghcr.io/codewiresh/services:latest}
+    command: ["/codewire-billing"]
+    user: "${CODEWIRE_UID:-65532}:${CODEWIRE_GID:-65532}"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-codewire}:${POSTGRES_PASSWORD:?run ./init first}@postgres:5432/${POSTGRES_DB:-codewire}?sslmode=disable
+      SESSION_SECRET: ${SESSION_SECRET:?run ./init first}
+      BILLING_PORT: "8081"
+      FRONTEND_URL: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      TEMPORAL_HOST_PORT: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      CODEWIRE_CREDIT_ENFORCEMENT: ${CODEWIRE_CREDIT_ENFORCEMENT:-off}
+      RUST_LOG: ${RUST_LOG:-info}
+
+  dashboard:
+    image: ${CODEWIRE_DASHBOARD_IMAGE:-ghcr.io/codewiresh/dashboard:latest}
+    restart: unless-stopped
+    depends_on:
+      - idp
+      - orchestration
+      - billing
+    environment:
+      CODEWIRE_DASHBOARD_LISTEN_ADDR: 0.0.0.0:5173
+      CODEWIRE_DOCS_ROOT: /srv/codewire/docs
+      CODEWIRE_PUBLIC_ORIGIN: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      CODEWIRE_BROWSER_API_ORIGIN: ${CODEWIRE_PUBLIC_ORIGIN:?run ./init first}
+      CODEWIRE_API_ORIGIN: http://orchestration:8084
+      CODEWIRE_IDENTITY_ORIGIN: http://idp:8091
+      CODEWIRE_BILLING_ORIGIN: http://billing:8081
+      CODEWIRE_CREDENTIAL_ORIGIN: http://127.0.0.1:8086
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      RUST_LOG: ${RUST_LOG:-info}
+
+  caddy:
+    image: docker.io/library/caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    depends_on:
+      - idp
+      - orchestration
+      - billing
+      - dashboard
+    environment:
+      CODEWIRE_HOST: ${CODEWIRE_HOST:?run ./init first}
+      CODEWIRE_HTTPS_PORT: ${CODEWIRE_HTTPS_PORT:-443}
+    ports:
+      - "${CODEWIRE_BIND_ADDRESS:-0.0.0.0}:${CODEWIRE_HTTPS_PORT:-443}:${CODEWIRE_HTTPS_PORT:-443}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./secrets/tls.caddy:/etc/caddy/tls.caddy:ro
+      - ./secrets/certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

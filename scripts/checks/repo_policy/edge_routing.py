@@ -5,8 +5,19 @@ from .shared import *
 # Connect edge routing
 
 
+CADDY_FILES = (
+    "Caddyfile",
+    "Caddyfile.docker",
+    "deployments/compose/Caddyfile",
+)
+
+
+def is_caddy_file(rel_path: str) -> bool:
+    return rel_path in CADDY_FILES
+
+
 def check_connect_edge_routing(_args: argparse.Namespace) -> int:
-    caddy_files = ["Caddyfile", "Caddyfile.docker"]
+    caddy_files = list(CADDY_FILES)
     local_ingress_files = [
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
@@ -238,7 +249,7 @@ def assert_idp_session_edges(
 ) -> None:
     # The broader /api fallback is orchestration, so each Account control
     # needs its own IdP route at every local edge.
-    for file in ("Caddyfile", "Caddyfile.docker"):
+    for file in CADDY_FILES:
         source = reader(file)
         matchers = re.findall(r"^[ \t]*@idp path ([^\n]+)$", source, re.MULTILINE)
         paths = matchers[0].split() if len(matchers) == 1 else []
@@ -248,7 +259,7 @@ def assert_idp_session_edges(
                     fail(f"{file}: {label} need one exact IdP matcher for {path}")
         handlers = re.findall(r"handle @idp\s*\{([^}]*)\}", source, re.DOTALL)
         if len(handlers) != 1 or not re.search(
-            r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8091\b", handlers[0]
+            r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|idp):8091\b", handlers[0]
         ):
             fail(f"{file}: Account sessions must use the IdP listener on 8091")
     for file, name in IDP_SESSION_INGRESSES.items():
@@ -272,13 +283,13 @@ def assert_idp_session_edges(
 
 
 def idp_session_edges_self_test() -> None:
-    for file in ("Caddyfile", "Caddyfile.docker", *IDP_SESSION_INGRESSES):
+    for file in (*CADDY_FILES, *IDP_SESSION_INGRESSES):
         original = read_text(file)
         attacks: dict[str, str] = {}
-        if file.startswith("Caddyfile"):
+        if is_caddy_file(file):
             attacks["wrong backend"] = original.replace(":8091", ":8084", 1)
         for prefix, label in IDP_ACCOUNT_ROUTES:
-            if file.startswith("Caddyfile"):
+            if is_caddy_file(file):
                 attacks[f"{label}: missing inventory"] = original.replace(f"{prefix} ", "", 1)
                 attacks[f"{label}: missing revoke"] = original.replace(
                     f"{prefix}/revoke", "/api/auth/other", 1
@@ -347,15 +358,15 @@ def assert_github_browser_callback_ingress(
 def assert_github_browser_callback_edges(
     fail: Callable[[str], None], reader: Callable[[str], str] = read_text
 ) -> None:
-    for file in ("Caddyfile", "Caddyfile.docker"):
+    for file in CADDY_FILES:
         text = reader(file)
         block = caddy_handle_block(text, GITHUB_BROWSER_CALLBACK)
         if len(re.findall(r"\bhandle\s+" + re.escape(GITHUB_BROWSER_CALLBACK) + r"\s*\{", text)) != 1 or not block:
             fail(f"{file}: browser GitHub callback needs one exact dashboard handle")
-        elif not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):5173\s*\}", block):
+        elif not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|dashboard):5173\s*\}", block):
             fail(f"{file}: browser GitHub callback must use dashboard port 5173")
         fallback = caddy_handle_block(text, "/api/*") or ""
-        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8084\s*\}", fallback):
+        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|orchestration):8084\s*\}", fallback):
             fail(f"{file}: browser callback must preserve /api orchestration port 8084")
         if block and text.index(block) > text.index(fallback or text):
             fail(f"{file}: browser GitHub callback must precede the broad API handle")
@@ -366,14 +377,14 @@ def assert_github_browser_callback_edges(
 
 
 def github_browser_callback_edges_self_test() -> None:
-    files = ["Caddyfile", "Caddyfile.docker", *GITHUB_BROWSER_INGRESSES]
+    files = [*CADDY_FILES, *GITHUB_BROWSER_INGRESSES]
     for file in files:
         original = read_text(file)
         attacks = {
             "missing": original.replace(GITHUB_BROWSER_CALLBACK, "/wrong-callback"),
             "non-exact path": original.replace(GITHUB_BROWSER_CALLBACK, GITHUB_BROWSER_CALLBACK + "/*"),
         }
-        if file.startswith("Caddyfile"):
+        if is_caddy_file(file):
             block = caddy_handle_block(original, GITHUB_BROWSER_CALLBACK)
             if not block:
                 raise RuntimeError(f"{file}: missing browser callback fixture")
@@ -412,9 +423,9 @@ def assert_github_repository_edges(
         if len(rules) != 1 or rules[0]["backend"] != "credential-service":
             fail(f"{file}: GitHub discovery requires the isolated credential listener")
         text = reader(file)
-        if file.startswith("Caddyfile"):
+        if is_caddy_file(file):
             block = caddy_handle_block(text, f"/{service}/*") or ""
-            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8086\b", block):
+            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|credential-service):8086\b", block):
                 fail(f"{file}: GitHub discovery must use public port 8086")
         else:
             expected = (
@@ -439,7 +450,7 @@ def github_repository_edges_self_test(per_file: dict[str, dict[str, Any]]) -> No
             raise RuntimeError(f"{file}: accepted GitHub discovery through orchestration")
     for file in per_file:
         original = read_text(file)
-        before = caddy_handle_block(original, f"/{service}/*") if file.startswith("Caddyfile") else (
+        before = caddy_handle_block(original, f"/{service}/*") if is_caddy_file(file) else (
             "path: /codewire\\.v1\\.GithubRepositoryService/\n"
             "            pathType: ImplementationSpecific\n"
             "            backend:\n"
@@ -450,7 +461,7 @@ def github_repository_edges_self_test(per_file: dict[str, dict[str, Any]]) -> No
         )
         if not before or before not in original:
             raise RuntimeError(f"{file}: missing GitHub discovery negative fixture")
-        after = before.replace(":8086", ":9443") if file.startswith("Caddyfile") else before.replace("name: http", "name: broker-tls")
+        after = before.replace(":8086", ":9443") if is_caddy_file(file) else before.replace("name: http", "name: broker-tls")
         changed = original.replace(before, after, 1)
         failures = []
         assert_github_repository_edges(per_file, failures.append, lambda path: changed if path == file else read_text(path))
@@ -472,9 +483,9 @@ def assert_credential_mutation_edges(
         text = reader(file)
         if "broker.v1.CredentialBrokerService" in text.replace("\\.", "."):
             fail(f"{file}: private credential broker must not have a public edge matcher")
-        if file.startswith("Caddyfile"):
+        if is_caddy_file(file):
             block = caddy_handle_block(text, f"/{service}/*") or ""
-            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8086\b", block):
+            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|credential-service):8086\b", block):
                 fail(f"{file}: credential mutation edge must use public port 8086")
             if not re.search(r"flush_interval\s+-1\b", block):
                 fail(f"{file}: credential mutation challenge must stream without buffering")
@@ -520,7 +531,7 @@ def credential_mutation_edges_self_test(per_file: dict[str, dict[str, Any]]) -> 
         # credential-service route happens to appear first in the file.
         scope = original
         if wanted != "private credential broker":
-            if file.startswith("Caddyfile"):
+            if is_caddy_file(file):
                 scope = caddy_handle_block(original, f"/{service}/*") or ""
             else:
                 scope = connect_fallback_ingress_document(original, file, lambda _: None) or ""
@@ -586,9 +597,9 @@ def assert_credential_delegation_edges(
         if len(rules) != 1 or rules[0]["backend"] != "credential-service":
             fail(f"{file}: credential delegation needs one exact isolated public listener route")
         text = reader(file)
-        if file.startswith("Caddyfile"):
+        if is_caddy_file(file):
             block = caddy_handle_block(text, f"/{service}/*") or ""
-            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8086\b", block):
+            if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|credential-service):8086\b", block):
                 fail(f"{file}: credential delegation must use public port 8086")
             if not re.search(r"transport\s+http\s*\{[\s\S]*?versions\s+h2c\s+2\b", block):
                 fail(f"{file}: credential delegation backend must enable versions h2c 2")
@@ -623,7 +634,7 @@ def credential_delegation_edges_self_test(per_file: dict[str, dict[str, Any]]) -
                 raise RuntimeError(f"{file}: accepted {attack} delegation routing")
 
         original = read_text(file)
-        if file.startswith("Caddyfile"):
+        if is_caddy_file(file):
             scope = caddy_handle_block(original, f"/{service}/*") or ""
             mutations = [
                 (":8086", ":9443", "public port 8086"),
@@ -739,8 +750,7 @@ def assert_mesh_primary_origin_rest_edge(
 ) -> None:
     """Reject the retired primary-origin Mesh network REST bridge everywhere."""
     for file in (
-        "Caddyfile",
-        "Caddyfile.docker",
+        *CADDY_FILES,
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
@@ -754,8 +764,7 @@ def mesh_primary_origin_rest_edge_self_test() -> None:
     source = {
         file: read_text(file)
         for file in [
-            "Caddyfile",
-            "Caddyfile.docker",
+            *CADDY_FILES,
             "deployments/k8s/overlays/local-kind/ingress.yaml",
             "deployments/k8s/overlays/local-kind-static/ingress.yaml",
             "tests/e2e/kind/ingress.yaml",
@@ -830,8 +839,7 @@ DERP_ADMISSION_EDGE_FILES = (
     "deployments/k8s/overlays/local-kind/ingress.yaml",
     "deployments/k8s/overlays/local-kind-static/ingress.yaml",
     "tests/e2e/kind/ingress.yaml",
-    "Caddyfile",
-    "Caddyfile.docker",
+    *CADDY_FILES,
 )
 
 
@@ -1112,8 +1120,7 @@ def assert_workspace_binding_listener_boundary(
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
-        "Caddyfile",
-        "Caddyfile.docker",
+        *CADDY_FILES,
     ):
         source = reader(file)
         if WORKSPACE_BINDING_SERVICE_NAME in source or re.search(r":8087\b", source):
@@ -1141,8 +1148,7 @@ def internal_connect_listener_self_test() -> None:
         "deployments/k8s/overlays/local-kind/ingress.yaml",
         "deployments/k8s/overlays/local-kind-static/ingress.yaml",
         "tests/e2e/kind/ingress.yaml",
-        "Caddyfile",
-        "Caddyfile.docker",
+        *CADDY_FILES,
     ]
     source = {path: read_text(path) for path in paths}
     def record(service: str, listener: str, port: int) -> dict[str, Any]:
@@ -1553,7 +1559,7 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
     rules: list[dict[str, str | None]] = []
     fallback = False
 
-    if rel_path.startswith("Caddyfile"):
+    if is_caddy_file(rel_path):
         lines = text.split("\n")
         matcher_paths: dict[str, list[str]] = {}
         for line in lines:
@@ -1565,7 +1571,10 @@ def connect_rules(rel_path: str, fail: Callable[[str], None]) -> dict[str, Any]:
             if not handle:
                 continue
             window = "\n".join(lines[index + 1 : index + 4])
-            target = re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):(\d+)", window)
+            target = re.search(
+                r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|orchestration|billing|credential-service|coordinator|mesh|idp|dashboard):(\d+)",
+                window,
+            )
             backend: str | None
             if not target:
                 backend = None
@@ -1787,12 +1796,12 @@ def assert_coordinator_ingress_shape(document: str | None, label: str, fail: Cal
 
 def assert_coordinator_transport_shape(rel_path: str, fail: Callable[[str], None]) -> None:
     text = read_text(rel_path)
-    if rel_path.startswith("Caddyfile"):
+    if is_caddy_file(rel_path):
         block = caddy_handle_block(text, "/codewire.internal.v1.CoordinatorService/*")
         if not block:
             fail(f"{rel_path}: missing explicit CoordinatorService handle block")
             return
-        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8090\b", block):
+        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|coordinator):8090\b", block):
             fail(f"{rel_path}: CoordinatorService must target coordinator :8090 explicitly")
         if not re.search(r"transport\s+http\s*\{[\s\S]*?versions\s+h2c\s+2\b", block):
             fail(f"{rel_path}: CoordinatorService backend transport must enable versions h2c 2")
@@ -1855,7 +1864,7 @@ def assert_mesh_coordinator_transport_shape(
     rel_path: str, fail: Callable[[str], None]
 ) -> None:
     text = read_text(rel_path)
-    if rel_path.startswith("Caddyfile"):
+    if is_caddy_file(rel_path):
         block = caddy_handle_block(
             text, "/codewire.internal.v1.MeshCoordinatorService/*"
         )
@@ -1863,7 +1872,7 @@ def assert_mesh_coordinator_transport_shape(
             fail(f"{rel_path}: missing explicit MeshCoordinatorService handle block")
             return
         if not re.search(
-            r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):18090\b", block
+            r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|mesh):18090\b", block
         ):
             fail(f"{rel_path}: MeshCoordinatorService must target Mesh :18090 explicitly")
         if not re.search(
@@ -1966,12 +1975,12 @@ def assert_environment_session_transport_shape(
     rel_path: str, fail: Callable[[str], None]
 ) -> None:
     text = read_text(rel_path)
-    if rel_path.startswith("Caddyfile"):
+    if is_caddy_file(rel_path):
         block = caddy_handle_block(text, "/codewire.v1.EnvironmentSessionService/*")
         if not block:
             fail(f"{rel_path}: missing explicit EnvironmentSessionService handle block")
             return
-        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1):8084\b", block):
+        if not re.search(r"reverse_proxy\s+(?:localhost|127\.0\.0\.1|orchestration):8084\b", block):
             fail(f"{rel_path}: EnvironmentSessionService must target orchestration :8084")
         if not re.search(r"transport\s+http\s*\{[\s\S]*?versions\s+h2c\s+2\b", block):
             fail(

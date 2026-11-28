@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# Initialize a self-hosted Codewire Docker Compose deployment (#4121).
+#
+# Generates `.env` and `secrets/` (mode 0600/0700), refuses to overwrite an
+# existing deployment, configures TLS (tailnet, ACME, or LAN internal CA) and
+# the tenant-secret KEK provider (defaulting to a local keyring file), starts
+# the stack, and creates the first administrator account.
+#
+# Interactive by default; scripted installs may set:
+#   CODEWIRE_HOST                Server hostname (e.g. codewire.tailnet.ts.net)
+#   CODEWIRE_HTTPS_PORT          HTTPS port (default: 443)
+#   CODEWIRE_BIND_ADDRESS        Host bind address (default: 0.0.0.0)
+#   CODEWIRE_TLS_MODE            tailnet | acme | internal (default: tailnet)
+#   CODEWIRE_TLS_CERT_FILE       Certificate PEM path (for tailnet mode)
+#   CODEWIRE_TLS_KEY_FILE        Private key PEM path (for tailnet mode)
+#   CODEWIRE_ACME_EMAIL          Optional ACME contact email (for acme mode)
+#   CODEWIRE_KEK_PROVIDER        local-keyring (default; only supported mode today)
+#   CODEWIRE_ADMIN_EMAIL         First administrator email address
+#   CODEWIRE_ADMIN_PASSWORD_FILE File containing the admin password (single line)
+#   CODEWIRE_COMPOSE_FILES       Space-separated extra -f files (e.g. compose.local-build.yaml)
+#   CODEWIRE_SKIP_START          Set to 1 to only generate .env and secrets/
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+ENV_FILE="$SCRIPT_DIR/.env"
+SECRETS_DIR="$SCRIPT_DIR/secrets"
+
+fail() {
+  printf 'codewire-init: %s\n' "$1" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command '$1' not found"
+}
+
+random_hex() {
+  local bytes="$1"
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex "$bytes" | tr -d '\n'
+  else
+    od -An -tx1 -N"$bytes" /dev/urandom | tr -d ' \n'
+  fi
+}
+
+compose_cmd() {
+  local args=(-f "$SCRIPT_DIR/compose.yaml")
+  if [ -n "${CODEWIRE_COMPOSE_FILES:-}" ]; then
+    local extra
+    for extra in $CODEWIRE_COMPOSE_FILES; do
+      case "$extra" in
+        /*) args+=(-f "$extra") ;;
+        *) args+=(-f "$SCRIPT_DIR/$extra") ;;
+      esac
+    done
+  fi
+  docker compose --project-directory "$SCRIPT_DIR" "${args[@]}" "$@"
+}
+
+prompt_default() {
+  local prompt="$1" default="$2" reply=""
+  if [ -n "$default" ]; then
+    printf '%s [%s]: ' "$prompt" "$default" >&2
+  else
+    printf '%s: ' "$prompt" >&2
+  fi
+  IFS= read -r reply || true
+  if [ -z "$reply" ]; then
+    printf '%s' "$default"
+  else
+    printf '%s' "$reply"
+  fi
+}
+
+validate_host() {
+  local host="$1"
+  [ -n "$host" ] || fail "hostname must not be empty"
+  case "$host" in
+    *://* | */* | *:* | *[[:space:]]*)
+      fail "CODEWIRE_HOST must be a bare hostname without scheme, port, or path (got '$host')"
+      ;;
+  esac
+}
+
+validate_port() {
+  local port="$1"
+  case "$port" in
+    '' | *[!0-9]*) fail "CODEWIRE_HTTPS_PORT must be a TCP port number (got '$port')" ;;
+  esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    fail "CODEWIRE_HTTPS_PORT must be between 1 and 65535 (got '$port')"
+  fi
+}
+
+if [ -e "$ENV_FILE" ] || [ -e "$SECRETS_DIR" ]; then
+  fail "refusing to overwrite existing deployment in $SCRIPT_DIR (.env or secrets/ already exists)"
+fi
+
+need_cmd docker
+docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 plugin ('docker compose') is required"
+
+# 1. Key provider choice (design §5 decision 1: ask once, default to local keyring file).
+SCRIPTED=0
+if [ -n "${CODEWIRE_HOST:-}" ] && [ -n "${CODEWIRE_ADMIN_EMAIL:-}" ] && [ -n "${CODEWIRE_ADMIN_PASSWORD_FILE:-}" ]; then
+  SCRIPTED=1
+fi
+
+KEK_PROVIDER="${CODEWIRE_KEK_PROVIDER:-}"
+if [ -z "$KEK_PROVIDER" ]; then
+  if [ -t 0 ] && [ "$SCRIPTED" -eq 0 ]; then
+    cat >&2 <<'EOF'
+Where should Codewire store the key that encrypts tenant secrets?
+  1) Local key file on this machine (recommended, default)
+  2) External OpenBao / Vault (planned; non-Kubernetes login not yet shipped)
+EOF
+    choice="$(prompt_default "Select key provider (1 or 2)" "1")"
+    case "$choice" in
+      1 | local | local-keyring) KEK_PROVIDER="local-keyring" ;;
+      2 | openbao | vault)
+        fail "external OpenBao/Vault login without Kubernetes is planned for a follow-up stage; re-run with option 1 (local-keyring)"
+        ;;
+      *) fail "unrecognized key provider choice '$choice'" ;;
+    esac
+  else
+    KEK_PROVIDER="local-keyring"
+  fi
+fi
+[ "$KEK_PROVIDER" = "local-keyring" ] || fail "CODEWIRE_KEK_PROVIDER='$KEK_PROVIDER' is not supported yet; use 'local-keyring'"
+
+printf '\nWARNING: Tenant secrets are encrypted with %s/tenant-keks/v1.\n' "$SECRETS_DIR" >&2
+printf 'Losing that file loses every stored tenant secret. Back up secrets/ alongside PostgreSQL.\n\n' >&2
+
+# 2. TLS mode and hostname (design §5 decision 3: tailnet first, also ACME and LAN internal CA).
+TLS_MODE="${CODEWIRE_TLS_MODE:-}"
+if [ -z "$TLS_MODE" ]; then
+  if [ -t 0 ]; then
+    cat >&2 <<'EOF'
+How will devices trust this server's HTTPS certificate?
+  1) Tailnet name and certificate (recommended; e.g. codewire.tailnet.ts.net)
+  2) Public domain with automatic Let's Encrypt / ACME certificate
+  3) LAN or localhost name with Caddy's internal CA (clients use cw login --ca-file)
+EOF
+    tls_choice="$(prompt_default "Select TLS mode (1, 2, or 3)" "1")"
+    case "$tls_choice" in
+      1 | tailnet) TLS_MODE="tailnet" ;;
+      2 | acme | public) TLS_MODE="acme" ;;
+      3 | internal | lan) TLS_MODE="internal" ;;
+      *) fail "unrecognized TLS mode choice '$tls_choice'" ;;
+    esac
+  else
+    TLS_MODE="internal"
+  fi
+fi
+
+case "$TLS_MODE" in
+  tailnet | acme | internal) ;;
+  *) fail "CODEWIRE_TLS_MODE must be one of: tailnet, acme, internal (got '$TLS_MODE')" ;;
+esac
+
+HOST="${CODEWIRE_HOST:-}"
+if [ -z "$HOST" ]; then
+  if [ -t 0 ]; then
+    case "$TLS_MODE" in
+      tailnet) HOST="$(prompt_default "Tailnet hostname (FQDN)" "")" ;;
+      acme) HOST="$(prompt_default "Public domain name (FQDN)" "")" ;;
+      internal) HOST="$(prompt_default "LAN or local hostname" "localhost")" ;;
+    esac
+  else
+    fail "CODEWIRE_HOST is required in non-interactive mode"
+  fi
+fi
+validate_host "$HOST"
+
+HTTPS_PORT="${CODEWIRE_HTTPS_PORT:-443}"
+validate_port "$HTTPS_PORT"
+BIND_ADDRESS="${CODEWIRE_BIND_ADDRESS:-0.0.0.0}"
+
+if [ "$HTTPS_PORT" = "443" ]; then
+  PUBLIC_ORIGIN="https://${HOST}"
+else
+  PUBLIC_ORIGIN="https://${HOST}:${HTTPS_PORT}"
+fi
+
+TLS_CERT_FILE="${CODEWIRE_TLS_CERT_FILE:-}"
+TLS_KEY_FILE="${CODEWIRE_TLS_KEY_FILE:-}"
+ACME_EMAIL="${CODEWIRE_ACME_EMAIL:-}"
+
+case "$TLS_MODE" in
+  tailnet)
+    if [ -z "$TLS_CERT_FILE" ] && [ -t 0 ]; then
+      TLS_CERT_FILE="$(prompt_default "Path to tailnet TLS certificate PEM (from tailscale cert)" "")"
+    fi
+    if [ -z "$TLS_KEY_FILE" ] && [ -t 0 ]; then
+      TLS_KEY_FILE="$(prompt_default "Path to tailnet TLS private key PEM" "")"
+    fi
+    [ -n "$TLS_CERT_FILE" ] && [ -r "$TLS_CERT_FILE" ] || fail "tailnet mode requires a readable CODEWIRE_TLS_CERT_FILE"
+    [ -n "$TLS_KEY_FILE" ] && [ -r "$TLS_KEY_FILE" ] || fail "tailnet mode requires a readable CODEWIRE_TLS_KEY_FILE"
+    ;;
+  acme)
+    if [ -z "$ACME_EMAIL" ] && [ -t 0 ]; then
+      ACME_EMAIL="$(prompt_default "ACME contact email (optional, press Enter to skip)" "")"
+    fi
+    ;;
+  internal)
+    ;;
+esac
+
+# 3. Collect first administrator credentials before writing files if starting now.
+ADMIN_EMAIL="${CODEWIRE_ADMIN_EMAIL:-}"
+ADMIN_PASSWORD_FILE="${CODEWIRE_ADMIN_PASSWORD_FILE:-}"
+ADMIN_PASSWORD=""
+
+if [ "${CODEWIRE_SKIP_START:-0}" != "1" ]; then
+  if [ -z "$ADMIN_EMAIL" ]; then
+    if [ -t 0 ]; then
+      ADMIN_EMAIL="$(prompt_default "First administrator email address" "")"
+    else
+      fail "CODEWIRE_ADMIN_EMAIL is required in non-interactive mode (or set CODEWIRE_SKIP_START=1)"
+    fi
+  fi
+  [ -n "$ADMIN_EMAIL" ] || fail "administrator email must not be empty"
+
+  if [ -n "$ADMIN_PASSWORD_FILE" ]; then
+    [ -r "$ADMIN_PASSWORD_FILE" ] || fail "CODEWIRE_ADMIN_PASSWORD_FILE '$ADMIN_PASSWORD_FILE' is not readable"
+  elif [ -t 0 ]; then
+    printf 'First administrator password (min 12 chars): ' >&2
+    IFS= read -rs ADMIN_PASSWORD
+    printf '\n' >&2
+    printf 'Confirm administrator password: ' >&2
+    IFS= read -rs confirm_password
+    printf '\n' >&2
+    [ "$ADMIN_PASSWORD" = "$confirm_password" ] || fail "passwords did not match"
+    [ -n "$ADMIN_PASSWORD" ] || fail "administrator password must not be empty"
+    unset confirm_password
+  else
+    fail "CODEWIRE_ADMIN_PASSWORD_FILE is required in non-interactive mode (or set CODEWIRE_SKIP_START=1)"
+  fi
+fi
+
+# 4. Generate secrets with strict permissions (0700 directories, 0600 secret files).
+umask 077
+mkdir -p "$SECRETS_DIR/idp-signing-keks" "$SECRETS_DIR/tenant-keks" "$SECRETS_DIR/certs"
+chmod 700 "$SECRETS_DIR" "$SECRETS_DIR/idp-signing-keks" "$SECRETS_DIR/tenant-keks" "$SECRETS_DIR/certs"
+
+# Keyring files must be exactly 64 lowercase hex characters with NO trailing newline.
+printf '%s' "$(random_hex 32)" > "$SECRETS_DIR/idp-signing-keks/v1"
+printf '%s' "$(random_hex 32)" > "$SECRETS_DIR/tenant-keks/v1"
+chmod 600 "$SECRETS_DIR/idp-signing-keks/v1" "$SECRETS_DIR/tenant-keks/v1"
+
+# Configure Caddy TLS directive file.
+case "$TLS_MODE" in
+  tailnet)
+    cp "$TLS_CERT_FILE" "$SECRETS_DIR/certs/tls.crt"
+    cp "$TLS_KEY_FILE" "$SECRETS_DIR/certs/tls.key"
+    chmod 644 "$SECRETS_DIR/certs/tls.crt"
+    chmod 600 "$SECRETS_DIR/certs/tls.key"
+    printf 'tls /etc/caddy/certs/tls.crt /etc/caddy/certs/tls.key\n' > "$SECRETS_DIR/tls.caddy"
+    ;;
+  acme)
+    if [ -n "$ACME_EMAIL" ]; then
+      printf 'tls %s\n' "$ACME_EMAIL" > "$SECRETS_DIR/tls.caddy"
+    else
+      printf '# Automatic HTTPS via ACME (default).\n' > "$SECRETS_DIR/tls.caddy"
+    fi
+    ;;
+  internal)
+    printf 'tls internal\n' > "$SECRETS_DIR/tls.caddy"
+    ;;
+esac
+chmod 644 "$SECRETS_DIR/tls.caddy"
+
+# Run non-root service containers as the current non-root user so they can read
+# 0600 keyring files without relaxing permissions; if invoked as root, chown
+# the keyring directories to distroless nonroot (65532:65532).
+CURRENT_UID="$(id -u)"
+CURRENT_GID="$(id -g)"
+if [ "$CURRENT_UID" -eq 0 ]; then
+  CODEWIRE_UID=65532
+  CODEWIRE_GID=65532
+  chown -R 65532:65532 "$SECRETS_DIR/idp-signing-keks" "$SECRETS_DIR/tenant-keks"
+else
+  CODEWIRE_UID="$CURRENT_UID"
+  CODEWIRE_GID="$CURRENT_GID"
+fi
+
+SESSION_SECRET="$(random_hex 32)"
+POSTGRES_PASSWORD="$(random_hex 24)"
+
+cat > "$ENV_FILE" <<EOF
+# Generated by deployments/compose/init — keep this file private (mode 0600).
+CODEWIRE_HOST=${HOST}
+CODEWIRE_HTTPS_PORT=${HTTPS_PORT}
+CODEWIRE_BIND_ADDRESS=${BIND_ADDRESS}
+CODEWIRE_PUBLIC_ORIGIN=${PUBLIC_ORIGIN}
+CODEWIRE_UID=${CODEWIRE_UID}
+CODEWIRE_GID=${CODEWIRE_GID}
+
+POSTGRES_USER=codewire
+POSTGRES_DB=codewire
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+
+SESSION_SECRET=${SESSION_SECRET}
+
+IDP_SIGNUP=invite-only
+IDP_SIGNING_ACTIVE_KEK_ID=v1
+
+CODEWIRE_SECRET_KEK_PROVIDER=local-keyring
+CODEWIRE_SECRET_KEK_ACTIVE_ID=v1
+CODEWIRE_CREDIT_ENFORCEMENT=off
+EOF
+chmod 600 "$ENV_FILE"
+
+printf 'Wrote %s (0600) and %s/ (0700).\n' "$ENV_FILE" "$SECRETS_DIR"
+
+if [ "${CODEWIRE_SKIP_START:-0}" = "1" ]; then
+  printf 'CODEWIRE_SKIP_START=1 set; start the stack with:\n'
+  printf '  cd %s && docker compose up -d\n' "$SCRIPT_DIR"
+  exit 0
+fi
+
+# 5. Start the stack and create the first administrator account.
+printf 'Starting Codewire control plane...\n'
+compose_cmd up -d
+
+printf 'Creating the first administrator account (%s)...\n' "$ADMIN_EMAIL"
+if [ -n "$ADMIN_PASSWORD_FILE" ]; then
+  compose_cmd exec -T idp /codewire-idp create-admin --email "$ADMIN_EMAIL" < "$ADMIN_PASSWORD_FILE"
+else
+  printf '%s\n' "$ADMIN_PASSWORD" | compose_cmd exec -T idp /codewire-idp create-admin --email "$ADMIN_EMAIL"
+  unset ADMIN_PASSWORD
+fi
+
+# 6. Export Caddy's local root CA when using internal TLS so clients can pin it.
+if [ "$TLS_MODE" = "internal" ]; then
+  ca_dest="$SECRETS_DIR/root-ca.pem"
+  for _ in $(seq 1 30); do
+    if compose_cmd exec -T caddy test -r /data/caddy/pki/authorities/local/root.crt 2>/dev/null; then
+      compose_cmd exec -T caddy cat /data/caddy/pki/authorities/local/root.crt > "$ca_dest"
+      chmod 644 "$ca_dest"
+      break
+    fi
+    sleep 1
+  done
+fi
+
+cat <<EOF
+
+Codewire is running at: ${PUBLIC_ORIGIN}
+
+Next steps:
+  1. Open ${PUBLIC_ORIGIN}/login in your browser and sign in as ${ADMIN_EMAIL}.
+  2. Create your first organization at ${PUBLIC_ORIGIN}/organizations/new.
+  3. Invite teammates from your organization's Members page (sign-up is invite-only).
+  4. Sign in from the CLI:
+EOF
+if [ "$TLS_MODE" = "internal" ] && [ -f "$SECRETS_DIR/root-ca.pem" ]; then
+  printf '       cw login --server %s --ca-file %s\n' "$PUBLIC_ORIGIN" "$SECRETS_DIR/root-ca.pem"
+else
+  printf '       cw login --server %s\n' "$PUBLIC_ORIGIN"
+fi
+cat <<EOF
+  5. Enroll a Linux or Mac machine to run environments:
+       cw host enroll <name>
+       cw host run
+
+Backup reminder: back up PostgreSQL (pg_dump) together with ${SECRETS_DIR}/.
+EOF
