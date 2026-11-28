@@ -41,36 +41,5 @@ pub(super) fn from_seed(seed: &Seed) -> Option<Interception> {
     })
 }
 
-/// Whether this boot binds GitHub's hosts: its seed carries the CA and,
-/// beside it, GitHub's placeholder, which the runner sends exactly then.
-pub(super) fn binds_github(seed: &Seed) -> bool {
-    seed.egress_ca().is_some()
-        && seed
-            .credential_placeholders()
-            .entries()
-            .iter()
-            .any(|(slot, _)| *slot == PlaceholderSlot::GitHub)
-}
-
-/// Whether this boot binds the Gemini API host: its seed carries the CA and,
-/// beside it, Gemini's placeholder (#6555).
-pub(super) fn binds_gemini(seed: &Seed) -> bool {
-    seed.egress_ca().is_some()
-        && seed
-            .credential_placeholders()
-            .entries()
-            .iter()
-            .any(|(slot, _)| *slot == PlaceholderSlot::GeminiApiKey)
-}
-
-/// Whether this boot binds Antigravity's Google hosts: its seed carries the CA
-/// and selects the Antigravity client (#6555).
-pub(super) fn binds_antigravity(seed: &Seed) -> bool {
-    seed.egress_ca().is_some()
-        && seed
-            .managed_credential_clients()
-            .contains(codewire_access::ManagedCredentialClient::Antigravity)
-}
-
 #[cfg(test)]
 mod tests;

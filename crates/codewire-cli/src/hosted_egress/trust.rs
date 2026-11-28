@@ -6,9 +6,8 @@
 //! [`HOSTED_EGRESS_TRUST_BUNDLE_PATH`] the container's own system bundle
 //! followed by it, and [`HOSTED_EGRESS_TRUST_CA_DIR`] the CA alone under its
 //! subject-hash name, and the bind's interception is marked so that every
-//! launch names them (`codewire_daemon::env`; the directory only while
-//! GitHub's hosts are bound, #4001). Without one, the CA path holds a comment
-//! and nothing is named. A trust that is not a CA certificate, or
+//! launch names them (`codewire_daemon::env`). Without one, the CA path holds a
+//! comment and nothing is named. A trust that is not a CA certificate, or
 //! a file that can't be written, stops the daemon before it serves: an
 //! intercepted Sandbox whose agents can't trust their front door fails
 //! closed at once rather than at every request.

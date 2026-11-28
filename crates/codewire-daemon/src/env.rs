@@ -211,10 +211,11 @@ fn bypass_proxy_for_loopback(
 
 /// An intercepted hosted Sandbox's launches trust its front door (#6072), as
 /// a local guest's workload does: `NODE_EXTRA_CA_CERTS` names the CA the
-/// daemon installed, `CODEX_CA_CERTIFICATE` the bundle while the Codex
-/// client is selected, and `SSL_CERT_DIR` the image's own certificate
-/// directory then the CA's while the launch projects GitHub's placeholder,
-/// so `gh` adds the CA to its roots (#4001). A name the image or the project
+/// daemon installed, `SSL_CERT_DIR` the image's own certificate directory
+/// then the CA's hashed directory (so OpenSSL, `curl`, Python, Go, and `gh`
+/// add the CA to their roots for intercepted provider hosts and host-bound
+/// application secrets alike, #4001, #4003), and `CODEX_CA_CERTIFICATE` the
+/// bundle while the Codex client is selected. A name the image or the project
 /// already sets is kept, and that tool then does not trust the front door;
 /// a kept `SSL_CERT_DIR`, and a `GIT_SSL_CAINFO` that overrides Git's
 /// setting, are logged, as a local guest logs them.
@@ -223,10 +224,16 @@ fn name_hosted_egress_ca(
     persisted: &[String],
     inherited: &mut Vec<(String, String)>,
 ) {
-    let mut trust = vec![(
-        "NODE_EXTRA_CA_CERTS",
-        HOSTED_EGRESS_TRUST_CA_PATH.to_owned(),
-    )];
+    let mut trust = vec![
+        (
+            "NODE_EXTRA_CA_CERTS",
+            HOSTED_EGRESS_TRUST_CA_PATH.to_owned(),
+        ),
+        (
+            "SSL_CERT_DIR",
+            format!("{IMAGE_CERTIFICATE_DIRECTORY}:{HOSTED_EGRESS_TRUST_CA_DIR}"),
+        ),
+    ];
     if config
         .managed_credential_clients
         .contains(ManagedCredentialClient::Codex)
@@ -240,19 +247,6 @@ fn name_hosted_egress_ca(
         .interception
         .as_ref()
         .is_some_and(|interception| interception.github().is_some());
-    let gemini = config
-        .interception
-        .as_ref()
-        .is_some_and(|interception| interception.gemini().is_some());
-    let antigravity = config
-        .managed_credential_clients
-        .contains(ManagedCredentialClient::Antigravity);
-    if github || gemini || antigravity {
-        trust.push((
-            "SSL_CERT_DIR",
-            format!("{IMAGE_CERTIFICATE_DIRECTORY}:{HOSTED_EGRESS_TRUST_CA_DIR}"),
-        ));
-    }
     for (name, path) in trust {
         let set = inherited.iter().any(|(inherited, _)| inherited == name)
             || environment_names(persisted).any(|persisted| persisted == name);
@@ -261,7 +255,7 @@ fn name_hosted_egress_ca(
         } else if name == "SSL_CERT_DIR" {
             tracing::info!(
                 name,
-                "the image or project sets this name, so it is kept and gh does not trust the egress front door"
+                "the image or project sets this name, so it is kept and clients using it do not trust the egress front door"
             );
         }
     }
@@ -614,8 +608,9 @@ mod tests {
     /// and `gh` the placeholder and the front door's trust: Git's helper and
     /// `GH_TOKEN`, Git's `sslCAInfo` for `https://github.com/` naming the
     /// bundle, and `SSL_CERT_DIR` the image's directory then the CA's, never
-    /// over an image's or project's own. Without GitHub's placeholder, or
-    /// without an installed CA, no `SSL_CERT_DIR` is set.
+    /// over an image's or project's own. Any launch with an installed CA gets
+    /// `SSL_CERT_DIR` (covering host-bound secrets too); without an installed
+    /// CA, no `SSL_CERT_DIR` is set.
     #[test]
     fn a_hosted_launch_with_githubs_placeholder_gives_git_and_gh_the_front_doors_trust() {
         let value = |entries: &[String], name: &str| {
@@ -689,7 +684,10 @@ mod tests {
 
         config.interception = Some(installed);
         let without = managed_entries(&config);
-        assert_eq!(value(&without, "SSL_CERT_DIR"), None);
+        assert_eq!(
+            value(&without, "SSL_CERT_DIR").as_deref(),
+            Some("/etc/ssl/certs:/codewire/run/egress-trust/ca.d")
+        );
         assert_ne!(
             value(&without, "GH_TOKEN").as_deref(),
             Some(placeholder.as_str())

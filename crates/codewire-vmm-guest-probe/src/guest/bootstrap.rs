@@ -364,14 +364,7 @@ pub(super) fn with_boot_selection(plan: WorkspacePlan, seed: &Seed) -> Result<Wo
             interception::from_seed(seed).as_ref(),
         )
         .context("apply this boot's selected client configuration")?;
-    egress_trust::with_trust_environment(
-        plan,
-        seed.egress_ca(),
-        seed.managed_credential_clients(),
-        interception::binds_github(seed)
-            || interception::binds_gemini(seed)
-            || interception::binds_antigravity(seed),
-    )
+    egress_trust::with_trust_environment(plan, seed.egress_ca(), seed.managed_credential_clients())
 }
 
 pub(super) fn runtime_path_environment(environment: &[String], enabled: bool) -> Vec<String> {

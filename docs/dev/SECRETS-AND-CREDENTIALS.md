@@ -2436,25 +2436,27 @@ above.
   Nothing is mounted over the image's trust store and its layer is never
   written. A restored boot publishes from its own seed before the workspace
   thaws.
-- **What Git and `gh` trust.** Only while GitHub's hosts are bound:
-  - Git gets `http.https://github.com/.sslCAInfo` naming the bundle, in the
-    same `GIT_CONFIG_*` list as its credential helper. The setting applies to
+- **What `SSL_CERT_DIR` and Git trust.**
+  - Whenever an intercepted boot or hosted Sandbox has a front-door CA, it
+    publishes the CA alone under its OpenSSL subject-hash name (`<hash>.0`) in
+    its hashed CA directory (`/run/codewire-host/egress-ca.d` locally;
+    `/codewire/run/egress-trust/ca.d` hosted) and sets `SSL_CERT_DIR` to the
+    image's own certificate directory first, then that directory,
+    colon-separated (`/etc/ssl/certs:/run/codewire-host/egress-ca.d` locally;
+    `/etc/ssl/certs:/codewire/run/egress-trust/ca.d` hosted). OpenSSL, `curl`,
+    Python, Go, `gh` and other tools that read `SSL_CERT_DIR` read the image's
+    default bundle and every certificate in those directories, so the CA is
+    added to their roots and replaces nothing; a root added to the image's
+    store after boot is still trusted. This covers host-bound application
+    secrets (#4003) as well as intercepted provider hosts without ever setting
+    `SSL_CERT_FILE`.
+  - Only while GitHub's hosts are bound, Git also gets
+    `http.https://github.com/.sslCAInfo` naming the bundle, in the same
+    `GIT_CONFIG_*` list as its credential helper. The setting applies to
     `https://github.com/` URLs only, so no other host's trust changes. Git's
     TLS library on the image reads one bundle file, which is why it gets the
     whole bundle and not the CA alone.
-  - `gh` gets `SSL_CERT_DIR`: the image's own certificate directory first,
-    then `/run/codewire-host/egress-ca.d`, colon-separated. The second
-    directory holds the CA alone, under its OpenSSL subject-hash name
-    (`<hash>.0`). `gh` reads the image's default bundle and every certificate
-    in those directories, so the CA is added to its roots and replaces
-    nothing. A root added to the image's store after boot is still trusted.
-    A hosted daemon installs that directory with its CA as
-    `/codewire/run/egress-trust/ca.d`, and a launch that projects GitHub's
-    placeholder gets `SSL_CERT_DIR` `/etc/ssl/certs:/codewire/run/egress-trust/ca.d`
-    and Git's setting naming `/codewire/run/egress-trust/ca-certificates.crt`.
-  - Other tools that read `SSL_CERT_DIR` see the same addition, as Node
-    already does through `NODE_EXTRA_CA_CERTS`. What limits the CA differs by
-    placement:
+  - What limits the CA differs by placement:
     - in a local VM, the CA is name-constrained to the bound hosts, and only
       the front door holds its key;
     - in a hosted Sandbox, the Pod's CA permits no DNS subtree, and the
@@ -2464,12 +2466,12 @@ above.
 
     On both, the key never enters the guest.
   - An `SSL_CERT_DIR` that the image or project already sets is kept and
-    logged, as for Node; then `gh`'s intercepted connections fail their TLS
-    handshake. Git's setting arrives as `GIT_CONFIG_*` entries, which
-    override every Git config file, so the image's and the project's Git
-    configuration never replace it. Git reads `GIT_SSL_CAINFO` after its
-    configuration, so one the image or project sets does replace it; the
-    boot log names it, and Git's intercepted connections fail their TLS
+    logged, as for Node; then clients that rely on it fail their TLS handshake
+    against intercepted hosts. Git's setting arrives as `GIT_CONFIG_*`
+    entries, which override every Git config file, so the image's and the
+    project's Git configuration never replace it. Git reads `GIT_SSL_CAINFO`
+    after its configuration, so one the image or project sets does replace it;
+    the boot log names it, and Git's intercepted connections fail their TLS
     handshake.
 - **The agent's login.** A broker paired with the boot's front door seals
   Claude's and Codex's logins with this environment's placeholders, never the
