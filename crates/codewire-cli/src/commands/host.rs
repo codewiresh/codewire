@@ -369,6 +369,7 @@ pub(crate) fn validate_host_create(
         || args.coding_agent.is_some()
         || !args.env.is_empty()
         || args.profile.is_some()
+        || args.no_profile
         || args.secrets.is_some()
         || args.user_secrets.is_some()
         || args.org_secrets

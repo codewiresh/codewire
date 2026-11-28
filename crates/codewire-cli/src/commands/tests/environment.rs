@@ -3888,11 +3888,17 @@ fn cloud_create_profile_precedence_is_flag_then_no_profile_then_file() {
             .profile,
         "platform:user/other"
     );
-    // --no-profile overrides the file, and so also the default.
-    let none = request(&["--no-profile"]);
-    assert!(none.project_spec.credentials.is_none() && !none.confirm_personal_credentials);
-    assert!(
-        Cli::try_parse_from(["cw", "create", "--profile", "platform:work", "--no-profile"])
-            .is_err()
-    );
+    // --no-profile (and its --no-credentials alias) overrides the file, and so also the default.
+    for flag in ["--no-profile", "--no-credentials"] {
+        let none = request(&[flag]);
+        assert!(none.project_spec.credentials.is_none() && !none.confirm_personal_credentials);
+        assert!(Cli::try_parse_from(["cw", "create", "--profile", "platform:work", flag]).is_err());
+        let local = Cli::try_parse_from(["cw", "--local", "create", flag]).unwrap();
+        let (_, _, EnvCommand::Create(local_args)) = env_operation(local) else {
+            panic!("local create");
+        };
+        assert!(local_args.no_profile);
+        let init = Cli::try_parse_from(["cw", "init", flag]).unwrap();
+        assert!(matches!(init.command, Command::Init(args) if args.no_profile));
+    }
 }

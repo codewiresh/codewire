@@ -582,7 +582,7 @@ pub(crate) struct InitArgs {
         help = "Credential profile reference to write to codewire.yaml"
     )]
     profile: Option<String>,
-    #[arg(long, help = "Write no credential profile")]
+    #[arg(long, alias = "no-credentials", help = "Write no credential profile")]
     no_profile: bool,
     #[arg(
         long,

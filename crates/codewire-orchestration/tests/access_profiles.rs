@@ -72,16 +72,18 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
             token = page["nextPageToken"].as_str().unwrap_or_default().to_owned();
             ensure!(token.is_empty() == (index == 2), "page cursor did not terminate exactly");
         }
-        let mut expected = vec![id(&cookie["accessProfile"] )?.to_owned(), id(&profile)?.to_owned(), id(&third)?.to_owned()];
-        expected.sort();
+        let cookie_id = id(&cookie["accessProfile"])?.to_owned();
+        let mut rest = vec![id(&profile)?.to_owned(), id(&third)?.to_owned()];
+        rest.sort();
+        let mut expected = vec![cookie_id.clone()];
+        expected.extend(rest);
         ensure!(seen == expected && !seen.iter().any(|value| value == bob_id));
         for request in [json!({"pageSize":-1}), json!({"pageSize":101}), json!({"pageToken":"not a cursor"})] {
             h.rpc.error("ListAccessProfiles", Auth::Alice, request, "invalid_argument").await?;
         }
 
         // Alice's first profile is her default: marked in every response,
-        // never deletable, and moved only to her own profile.
-        let cookie_id = id(&cookie["accessProfile"])?.to_owned();
+        // pinned to the top of lists, never deletable, and moved only to her own profile.
         let defaults = |page: &Value| -> Result<Vec<String>> {
             page["accessProfiles"].as_array().context("missing profiles")?.iter()
                 .filter(|profile| profile["isDefault"] == true)
@@ -90,6 +92,7 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
         ensure!(cookie["accessProfile"]["isDefault"] == true && profile.get("isDefault").is_none());
         let all = h.rpc.ok("ListAccessProfiles", Auth::Alice, json!({})).await?;
         ensure!(defaults(&all)? == std::slice::from_ref(&cookie_id));
+        ensure!(id(&all["accessProfiles"][0])? == cookie_id);
         ensure!(bob["accessProfile"]["isDefault"] == true, "each user has their own default");
         h.rpc.error("DeleteAccessProfile", Auth::Alice,
             json!({"accessProfileId":cookie_id,"expectedRevision":"1"}), "failed_precondition").await?;
@@ -101,7 +104,12 @@ async fn public_profiles_auth_owner_pagination_and_immutable_revision_cas() -> R
         let moved = h.rpc.ok("SetDefaultAccessProfile", Auth::Alice,
             json!({"accessProfileId":id(&third)?})).await?;
         ensure!(moved["accessProfile"]["isDefault"] == true && id(&moved["accessProfile"])? == id(&third)?);
-        ensure!(defaults(&h.rpc.ok("ListAccessProfiles", Auth::Alice, json!({})).await?)? == [id(&third)?.to_owned()]);
+        let after_move = h.rpc.ok("ListAccessProfiles", Auth::Alice, json!({})).await?;
+        ensure!(defaults(&after_move)? == [id(&third)?.to_owned()]);
+        ensure!(
+            id(&after_move["accessProfiles"][0])? == id(&third)?
+                && after_move["accessProfiles"][0]["isDefault"] == true
+        );
         let got = h.rpc.ok("GetAccessProfile", Auth::Alice, json!({"accessProfileId":cookie_id})).await?;
         ensure!(got["accessProfile"].get("isDefault").is_none());
         h.rpc.ok("SetDefaultAccessProfile", Auth::Alice, json!({"accessProfileId":cookie_id})).await?;

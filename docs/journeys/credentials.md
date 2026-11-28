@@ -677,12 +677,17 @@ Issues: #4850, #4717 (C2). The screens are the approved screens 3 and 4.
 - **Entry points:** `cw credentials --local profiles default NAME` and
   `cw credentials --cloud profiles default NAME`; `cw credentials
   --PLACEMENT profiles list`; `cw create --local` and `cw create --cloud`
-  with no `--profile`.
+  with no `--profile` (and with `--no-profile` / `--no-credentials`);
+  dashboard Settings → Credentials profile list and Create Sandbox profile
+  picker.
 - **States to exercise:**
-  - a store with no profiles: create says nothing about a profile;
+  - a store with no profiles: create says nothing about a profile; dashboard
+    Create Sandbox selects "No provider credentials";
   - the store's first profile: it becomes the default;
-  - a second profile made the default: create uses it, and `--no-profile`
-    selects none;
+  - a second profile made the default: lists show it first (API, CLI,
+    Settings → Credentials and Create Sandbox picker), CLI create uses it,
+    dashboard Create Sandbox pre-selects it, and `--no-profile` /
+    `--no-credentials` or choosing "No provider credentials" selects none;
   - deleting the default: refused;
   - local only, a store from before defaults (schema 5) with profiles: no
     default, so create uses no profile and says so, and a profile added

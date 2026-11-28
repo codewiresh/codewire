@@ -140,11 +140,12 @@ pub(crate) struct EnvCreateArgs {
     #[arg(
         long,
         value_name = "PROFILE",
-        help = "Credential profile, for example local:work or platform:work; a cloud environment otherwise uses codewire.yaml's profile, then your default profile"
+        help = "Credential profile, for example local:work or platform:work; otherwise uses codewire.yaml's profile, then your default profile"
     )]
     pub(crate) profile: Option<String>,
     #[arg(
         long,
+        alias = "no-credentials",
         conflicts_with = "profile",
         help = "Create without a credential profile, even when codewire.yaml names one or you have a default"
     )]

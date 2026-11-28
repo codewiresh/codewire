@@ -377,7 +377,8 @@ impl PlatformAccessProfileStore {
     }
 
     /// [`Self::list`] and the owner's default, read in one transaction. The
-    /// page keeps its ID order; callers that show a list put the default first.
+    /// owner's default profile comes first, followed by the remaining profiles
+    /// in ID order, preserving keyset pagination on `after`.
     pub async fn list_with_default(
         &self,
         owner: &Owner,
@@ -390,24 +391,53 @@ impl PlatformAccessProfileStore {
         let mut tx = self.begin_transaction().await?;
         lock_owner(&mut tx, owner).await?;
         let (user_id, organization_id) = owner_columns(owner);
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM platform_access_profiles WHERE \
-             (user_id=$1 OR organization_id=$2) AND ($3::text IS NULL OR id>$3) \
-             ORDER BY id LIMIT $4 FOR SHARE",
-        )
-        .bind(user_id)
-        .bind(organization_id)
-        .bind(after.map(AccessProfileId::as_str))
-        .bind(i64::from(limit))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(database_error)?;
+        let default = load_default(&mut tx, owner, false).await?;
+        let default_id = default.as_ref().map(AccessProfileId::as_str);
+        let ids: Vec<String> = match after {
+            None => sqlx::query_scalar(
+                "SELECT id FROM platform_access_profiles WHERE \
+                 (user_id=$1 OR organization_id=$2) \
+                 ORDER BY (CASE WHEN $3::text IS NOT NULL AND id=$3 THEN 0 ELSE 1 END), id \
+                 LIMIT $4 FOR SHARE",
+            )
+            .bind(user_id)
+            .bind(organization_id)
+            .bind(default_id)
+            .bind(i64::from(limit))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(database_error)?,
+            Some(cursor) if default.as_ref() == Some(cursor) => sqlx::query_scalar(
+                "SELECT id FROM platform_access_profiles WHERE \
+                 (user_id=$1 OR organization_id=$2) AND id<>$3 \
+                 ORDER BY id LIMIT $4 FOR SHARE",
+            )
+            .bind(user_id)
+            .bind(organization_id)
+            .bind(cursor.as_str())
+            .bind(i64::from(limit))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(database_error)?,
+            Some(cursor) => sqlx::query_scalar(
+                "SELECT id FROM platform_access_profiles WHERE \
+                 (user_id=$1 OR organization_id=$2) AND ($3::text IS NULL OR id<>$3) AND id>$4 \
+                 ORDER BY id LIMIT $5 FOR SHARE",
+            )
+            .bind(user_id)
+            .bind(organization_id)
+            .bind(default_id)
+            .bind(cursor.as_str())
+            .bind(i64::from(limit))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(database_error)?,
+        };
         let mut profiles = Vec::with_capacity(ids.len());
         for id in ids {
             let id = AccessProfileId::parse(id).map_err(|_| Error::CorruptRecord)?;
             profiles.push(load_profile(&mut tx, owner, &id, None, false).await?);
         }
-        let default = load_default(&mut tx, owner, false).await?;
         tx.commit().await.map_err(database_error)?;
         Ok((profiles, default))
     }

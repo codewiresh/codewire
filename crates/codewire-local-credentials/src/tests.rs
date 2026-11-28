@@ -3932,6 +3932,17 @@ fn the_first_profile_becomes_the_default_which_moves_only_when_set_and_is_never_
             .map(|record| record.profile.id),
         Some(work.profile.id.clone())
     );
+    let initial_marks: Vec<_> = authority
+        .list_profiles()
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.profile.name.to_string(), record.is_default))
+        .collect();
+    assert_eq!(
+        initial_marks,
+        [("work".to_owned(), true), ("other".to_owned(), false)],
+        "default profile sorts ahead of alphabetically earlier profiles"
+    );
 
     assert_eq!(
         authority.delete_profile(&work.profile.id),

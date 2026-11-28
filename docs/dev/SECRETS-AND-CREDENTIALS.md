@@ -540,9 +540,10 @@ profile stays until another one is made the default. The default is a standing
 selection the user's clients apply, never the API: a cloud `cw create` that
 names no profile (no `--profile`, no `credentials.profile` in `codewire.yaml`)
 sends the default as its explicit selection with personal-credential
-confirmation, and `--no-profile` sends none; the dashboard create form
-preselects it. `CreateEnvironment` without a selection still means no
-provider access. Lists show the default first.
+confirmation, and `--no-profile` (alias `--no-credentials`) sends none; the
+dashboard create form preselects it while keeping "No provider credentials"
+selectable. `CreateEnvironment` without a selection still means no provider
+access. API, CLI and dashboard lists show the default first.
 
 A local store keeps one default the same way (#4717): `default_profiles` in
 its SQLite (schema 6), served from authority protocol 18 by

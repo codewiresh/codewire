@@ -200,7 +200,7 @@ async fn profiles(
             options.push(profile_option(profile)?);
         }
         if response.next_page_token.is_empty() {
-            options.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+            sort_profile_options(&mut options);
             return Ok(options);
         }
         if response.next_page_token == page_token {
@@ -209,6 +209,15 @@ async fn profiles(
         page_token = response.next_page_token;
     }
     Err(invalid_options())
+}
+
+fn sort_profile_options(options: &mut [EnvironmentCredentialProfileOption]) {
+    options.sort_by(|a, b| {
+        b.is_default
+            .cmp(&a.is_default)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 }
 
 fn profile_option(
@@ -246,6 +255,7 @@ fn profile_option(
         name: profile.name,
         revision: profile.revision,
         identity_count,
+        is_default: profile.is_default,
         bound_revision: false,
         synthetic: false,
         selected: false,
@@ -298,6 +308,12 @@ impl EnvironmentSourceFieldsView {
         self.project_selection_error.clear();
         self.profile_selection_error.clear();
         if validate_selection(selection).is_err() {
+            for project in &mut self.projects {
+                project.selected = false;
+            }
+            for profile in &mut self.profiles {
+                profile.selected = false;
+            }
             self.project_selection_error =
                 "Current source selection is invalid. Reload before editing.".into();
             self.profile_selection_error = self.project_selection_error.clone();
@@ -364,12 +380,35 @@ impl EnvironmentSourceFieldsView {
                 }),
                 revision: selection.profile_revision.unwrap_or_default(),
                 identity_count: 0,
+                is_default: false,
                 bound_revision: already_bound,
                 synthetic: true,
                 selected: true,
             });
         }
         // Consent is not inferred from the stored selection.
+    }
+
+    /// Pre-select the user's unique default credential profile on a fresh
+    /// create form when no explicit selection has been applied yet.
+    pub(crate) fn select_default_profile(&mut self) {
+        if self.selection.is_some()
+            || !self.credential_selection_enabled
+            || !self.profile_error.is_empty()
+        {
+            return;
+        }
+        let mut defaults = self
+            .profiles
+            .iter_mut()
+            .filter(|profile| profile.is_default && !profile.synthetic);
+        let Some(default) = defaults.next() else {
+            return;
+        };
+        if defaults.next().is_some() {
+            return;
+        }
+        default.selected = true;
     }
 
     pub(crate) fn retain_submission(&mut self, previous: &Self) {
@@ -753,6 +792,7 @@ mod tests {
                 name: "<unsafe-profile>".into(),
                 revision: 7,
                 identity_count: 2,
+                is_default: false,
                 bound_revision: false,
                 synthetic: false,
                 selected: true,
@@ -870,5 +910,115 @@ mod tests {
         .expect("disabled source options");
         assert!(!disabled.contains("No secret projects are available"));
         assert!(!disabled.contains("You have no credential profiles yet"));
+    }
+
+    #[test]
+    fn default_profile_pins_to_top_preselects_and_honors_switching_to_none() {
+        let alpha = "11111111-1111-4111-8111-111111111111";
+        let zeta = "22222222-2222-4222-8222-222222222222";
+        let mut profiles = vec![
+            profile_option(AccessProfile {
+                id: alpha.into(),
+                name: "alpha".into(),
+                revision: 1,
+                is_default: false,
+                ..Default::default()
+            })
+            .unwrap(),
+            profile_option(AccessProfile {
+                id: zeta.into(),
+                name: "zeta".into(),
+                revision: 3,
+                is_default: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        ];
+        sort_profile_options(&mut profiles);
+        assert_eq!(profiles[0].id, zeta);
+        assert_eq!(profiles[1].id, alpha);
+
+        let mut sources = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            profiles,
+            ..Default::default()
+        };
+        sources.select_default_profile();
+        assert!(sources.profiles[0].selected);
+        assert!(!sources.profiles[1].selected);
+
+        let body = SourceFieldsTemplate {
+            source_creation_draft_parameter: "",
+            source_fields_id: "environment-create",
+            sources: &sources,
+            organization: &ORGANIZATION,
+        }
+        .render()
+        .unwrap();
+        let default_pos = body
+            .find(&format!("value=\"{zeta}@3\" selected>zeta (default)"))
+            .expect("default profile selected first");
+        let alpha_pos = body
+            .find(&format!("value=\"{alpha}@1\">alpha"))
+            .expect("non-default profile follows");
+        let none_pos = body
+            .find("<option value=\"\">No provider credentials</option>")
+            .expect("explicit opt-out remains available");
+        assert!(default_pos < alpha_pos && alpha_pos < none_pos);
+
+        // Switching to "No provider credentials" clears the default and keeps it cleared.
+        sources.select(&Default::default());
+        sources.select_default_profile();
+        assert!(!sources.has_selected_profile());
+        let none_body = SourceFieldsTemplate {
+            source_creation_draft_parameter: "",
+            source_fields_id: "environment-create",
+            sources: &sources,
+            organization: &ORGANIZATION,
+        }
+        .render()
+        .unwrap();
+        assert!(none_body.contains("<option value=\"\" selected>No provider credentials</option>"));
+        assert!(!none_body.contains(&format!("value=\"{zeta}@3\" selected")));
+    }
+
+    #[test]
+    fn ambiguous_or_failed_catalog_never_preselects_a_default_profile() {
+        let mut ambiguous = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            profiles: vec![
+                profile_option(AccessProfile {
+                    id: "11111111-1111-4111-8111-111111111111".into(),
+                    name: "first".into(),
+                    revision: 1,
+                    is_default: true,
+                    ..Default::default()
+                })
+                .unwrap(),
+                profile_option(AccessProfile {
+                    id: "22222222-2222-4222-8222-222222222222".into(),
+                    name: "second".into(),
+                    revision: 1,
+                    is_default: true,
+                    ..Default::default()
+                })
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        ambiguous.select_default_profile();
+        assert!(!ambiguous.has_selected_profile());
+
+        let mut failed = EnvironmentSourceFieldsView {
+            application_selection_enabled: true,
+            credential_selection_enabled: true,
+            profile_error: "Credential profiles could not be loaded.".into(),
+            profiles: vec![ambiguous.profiles[0].clone()],
+            ..Default::default()
+        };
+        failed.select_default_profile();
+        assert!(!failed.has_selected_profile());
     }
 }

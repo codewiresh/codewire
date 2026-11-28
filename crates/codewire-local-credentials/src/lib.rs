@@ -1732,7 +1732,12 @@ impl<S: ProtectedStore> LocalCredentialAuthority<S> {
     pub fn list_profiles(&self) -> Result<Vec<AccessProfileRecord>, LocalCredentialError> {
         let connection = self.connection()?;
         let mut statement = connection
-            .prepare("SELECT id FROM profiles ORDER BY name COLLATE NOCASE, id")
+            .prepare(
+                "SELECT p.id
+                 FROM profiles p
+                 LEFT JOIN default_profiles d ON d.profile_id = p.id
+                 ORDER BY (d.profile_id IS NOT NULL) DESC, p.name COLLATE NOCASE, p.id",
+            )
             .map_err(database_error)?;
         let rows = statement
             .query_map([], |row| row.get::<_, String>(0))

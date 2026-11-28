@@ -2019,7 +2019,11 @@ pub(super) fn hydrate_options(
     form.confidential_available = options.confidential_available;
     form.credit_refusal = options.credit_refusal;
     let mut sources = options.sources;
+    let fresh_selection = form.sources.selection.is_none() && form.draft_restore_allowed;
     sources.retain_submission(&form.sources);
+    if fresh_selection {
+        sources.select_default_profile();
+    }
     form.sources = sources;
 }
 
@@ -4066,6 +4070,7 @@ mod tests {
                     name: "work".into(),
                     revision: 7,
                     identity_count: 2,
+                    is_default: false,
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
@@ -4115,6 +4120,7 @@ mod tests {
                     name: "work".into(),
                     revision: 8,
                     identity_count: 2,
+                    is_default: false,
                     bound_revision: false,
                     synthetic: false,
                     selected: false,
@@ -4166,6 +4172,70 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn fresh_create_form_preselects_default_profile_while_explicit_none_stays_cleared() {
+        let default_id = "6bf8d155-e84c-4fc5-b479-b17022fe41dd";
+        let other_id = "315dd4c2-6bf2-4c3b-9d8f-68fc97654a76";
+        let options = || EnvironmentCreateOptions {
+            presets: vec![],
+            preview_base_domain: String::new(),
+            agents: vec![],
+            confidential_available: false,
+            credit_refusal: None,
+            sources: crate::view::EnvironmentSourceFieldsView {
+                application_selection_enabled: true,
+                credential_selection_enabled: true,
+                profiles: vec![
+                    crate::view::EnvironmentCredentialProfileOption {
+                        id: default_id.into(),
+                        name: "work".into(),
+                        revision: 4,
+                        identity_count: 2,
+                        is_default: true,
+                        bound_revision: false,
+                        synthetic: false,
+                        selected: false,
+                    },
+                    crate::view::EnvironmentCredentialProfileOption {
+                        id: other_id.into(),
+                        name: "alpha".into(),
+                        revision: 1,
+                        identity_count: 1,
+                        is_default: false,
+                        bound_revision: false,
+                        synthetic: false,
+                        selected: false,
+                    },
+                ],
+                ..Default::default()
+            },
+        };
+
+        let mut fresh = default_create_form("token".into(), true);
+        hydrate_options(&mut fresh, options());
+        assert!(fresh.sources.profiles[0].selected);
+        assert!(!fresh.sources.profiles[1].selected);
+
+        // Editing an existing sandbox with no bound profile clears the create default.
+        let mut edit_fields = fresh.sources.clone();
+        edit_fields.select_bound(&Default::default());
+        assert!(!edit_fields.has_selected_profile());
+
+        // Submitting "No provider credentials" keeps no profile selected on rerender.
+        let submission = EnvironmentSubmission::parse(
+            b"image=example.test%2Fworkspace&credential_profile=&secret_project=",
+        )
+        .unwrap();
+        let mut submitted = submission.form_view("token".into());
+        hydrate_options(&mut submitted, options());
+        assert!(!submitted.sources.has_selected_profile());
+        let draft = submission
+            .validate_and_draft("org-test", &mut submitted)
+            .unwrap();
+        assert!(draft.expected_profile_revision.is_none());
+        assert!(!draft.confirm_personal_credentials);
     }
 
     #[test]

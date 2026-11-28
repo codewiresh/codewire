@@ -470,6 +470,26 @@ pub(super) async fn offer_assignment(
         .context("credential saved; profile assignment did not complete")
 }
 
+fn order_profile_choices(mut items: Vec<(String, String, bool)>) -> Vec<(String, String)> {
+    items.sort_by(|a, b| {
+        b.2.cmp(&a.2)
+            .then_with(|| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()))
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    items
+        .into_iter()
+        .map(|(name, selector, is_default)| {
+            let label = if is_default {
+                format!("{name} (default)")
+            } else {
+                name
+            };
+            (label, selector)
+        })
+        .collect()
+}
+
 pub(super) async fn profile_choices(
     globals: &Globals,
     placement: StoragePlacement,
@@ -478,27 +498,38 @@ pub(super) async fn profile_choices(
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let mut client = connect_local_credential_authority().await?;
-            return Ok(client
-                .list_profiles()
-                .await?
-                .into_iter()
-                .map(|record| {
-                    (
-                        record.profile.name.to_string(),
-                        format!("id:{}", record.profile.id),
-                    )
-                })
-                .collect());
+            return Ok(order_profile_choices(
+                client
+                    .list_profiles()
+                    .await?
+                    .into_iter()
+                    .map(|record| {
+                        (
+                            record.profile.name.to_string(),
+                            format!("id:{}", record.profile.id),
+                            record.is_default,
+                        )
+                    })
+                    .collect(),
+            ));
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         anyhow::bail!("local protected storage is unavailable on this host");
     }
     let client = platform_client(globals)?;
-    Ok(super::platform_profiles::list_profiles(&client)
-        .await?
-        .into_iter()
-        .map(|profile| (profile.name, format!("id:{}", profile.id)))
-        .collect())
+    Ok(order_profile_choices(
+        super::platform_profiles::list_profiles(&client)
+            .await?
+            .into_iter()
+            .map(|profile| {
+                (
+                    profile.name,
+                    format!("id:{}", profile.id),
+                    profile.is_default,
+                )
+            })
+            .collect(),
+    ))
 }
 
 /// The configuration editor selects the protected store separately from VM placement.
@@ -710,6 +741,23 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("JSON commands never prompt")
+        );
+    }
+
+    #[test]
+    fn guided_profile_choices_pin_default_first_and_mark_it() {
+        let ordered = order_profile_choices(vec![
+            ("alpha".into(), "id:1".into(), false),
+            ("zeta".into(), "id:2".into(), true),
+            ("beta".into(), "id:3".into(), false),
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                ("zeta (default)".into(), "id:2".into()),
+                ("alpha".into(), "id:1".into()),
+                ("beta".into(), "id:3".into()),
+            ]
         );
     }
 }

@@ -279,7 +279,8 @@ async fn profiles_are_exact_owner_scoped_and_use_only_explicit_catalog_metadata(
             .await?;
         let page = profiles.list(&user, None, 1).await?;
         let next = profiles.list(&user, Some(&page[0].id), 1).await?;
-        ensure!(next.len() == 1 && next[0].id > page[0].id);
+        ensure!(page.len() == 1 && page[0].id == first.id);
+        ensure!(next.len() == 1 && next[0].id == second.id);
         ensure!(profiles.list(&user, Some(&next[0].id), 1).await?.is_empty());
         ensure!(profiles.list(&stranger, None, 10).await?.is_empty());
         ensure!(profiles.list(&user, None, 0).await == Err(Error::InvalidInput));
@@ -1474,10 +1475,18 @@ async fn each_user_has_one_default_that_moves_explicitly_and_is_never_deleted() 
             .await?;
         ensure!(profiles.default_profile(&user).await? == Some(first.id.clone()));
         let (listed, default) = profiles.list_with_default(&user, None, 10).await?;
-        ensure!(listed.len() == 2 && default == Some(first.id.clone()));
-        // Pages carry the default too, whichever page holds it.
+        ensure!(listed.len() == 2 && listed[0].id == first.id && default == Some(first.id.clone()));
+        // Pages return the default first and carry the default across pages.
         let (page, default) = profiles.list_with_default(&user, None, 1).await?;
-        ensure!(page.len() == 1 && default == Some(first.id.clone()));
+        ensure!(page.len() == 1 && page[0].id == first.id && default == Some(first.id.clone()));
+        let (next_page, next_default) = profiles
+            .list_with_default(&user, Some(&page[0].id), 1)
+            .await?;
+        ensure!(
+            next_page.len() == 1
+                && next_page[0].id == second.id
+                && next_default == Some(first.id.clone())
+        );
 
         // Deleting the default is refused and changes nothing.
         ensure!(profiles.delete(&user, &first.id, 1).await == Err(Error::DefaultProfile));
@@ -1494,6 +1503,30 @@ async fn each_user_has_one_default_that_moves_explicitly_and_is_never_deleted() 
         ensure!(profiles.set_default(&user, &second.id).await? == second);
         ensure!(profiles.default_profile(&user).await? == Some(second.id.clone()));
         ensure!(profiles.default_profile(&other).await? == Some(elsewhere.id.clone()));
+        let (reordered, current_default) = profiles.list_with_default(&user, None, 10).await?;
+        ensure!(
+            reordered.len() == 2
+                && reordered[0].id == second.id
+                && reordered[1].id == first.id
+                && current_default == Some(second.id.clone())
+        );
+        let (first_page, _) = profiles.list_with_default(&user, None, 1).await?;
+        let (second_page, _) = profiles
+            .list_with_default(&user, Some(&first_page[0].id), 1)
+            .await?;
+        ensure!(
+            first_page.len() == 1
+                && first_page[0].id == second.id
+                && second_page.len() == 1
+                && second_page[0].id == first.id
+        );
+        ensure!(
+            profiles
+                .list_with_default(&user, Some(&second_page[0].id), 1)
+                .await?
+                .0
+                .is_empty()
+        );
 
         // The former default is an ordinary profile again.
         profiles.delete(&user, &first.id, 1).await?;

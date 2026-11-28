@@ -1023,7 +1023,12 @@ fn build_settings_data_at(
             .cmp(credential_display_name(b))
             .then(a.id.cmp(&b.id))
     });
-    profiles.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    profiles.sort_by(|a, b| {
+        b.is_default
+            .cmp(&a.is_default)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     let mut seen_credentials = BTreeSet::new();
     let mut credential_index = BTreeMap::new();
@@ -1198,6 +1203,7 @@ fn build_settings_data_at(
             id: profile.id,
             name: profile.name,
             revision: profile.revision,
+            is_default: profile.is_default,
             entries,
             attention,
             codex: selected.remove("codex").unwrap_or_default(),
@@ -2533,5 +2539,42 @@ mod tests {
                 form.word
             );
         }
+    }
+
+    #[test]
+    fn settings_profiles_pin_the_default_profile_to_the_top() {
+        let profiles = vec![
+            AccessProfile {
+                id: "00000000-0000-4000-8000-000000000001".into(),
+                name: "alpha".into(),
+                revision: 1,
+                is_default: false,
+                ..Default::default()
+            },
+            AccessProfile {
+                id: "00000000-0000-4000-8000-000000000002".into(),
+                name: "zeta".into(),
+                revision: 2,
+                is_default: true,
+                ..Default::default()
+            },
+            AccessProfile {
+                id: "00000000-0000-4000-8000-000000000003".into(),
+                name: "beta".into(),
+                revision: 1,
+                is_default: false,
+                ..Default::default()
+            },
+        ];
+        let data = build_settings_data_at(Vec::new(), profiles, 1_700_000_000).unwrap();
+        let summary: Vec<(&str, bool)> = data
+            .profiles
+            .iter()
+            .map(|profile| (profile.name.as_str(), profile.is_default))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![("zeta", true), ("alpha", false), ("beta", false)]
+        );
     }
 }

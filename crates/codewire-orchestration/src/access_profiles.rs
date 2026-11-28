@@ -40,7 +40,8 @@ impl AccessProfiles {
         }
     }
 
-    /// One page in ID order, each profile with whether it is the default.
+    /// One page with the owner's default profile first, then the remaining
+    /// profiles in ID order, each with whether it is the default.
     pub async fn list(
         &self,
         user: &AuthUser,

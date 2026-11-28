@@ -545,6 +545,7 @@ pub(crate) struct CredentialProfileRowView {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) revision: u64,
+    pub(crate) is_default: bool,
     pub(crate) entries: Vec<CredentialProfileEntryView>,
     /// This revision's capabilities that the broker withholds now.
     pub(crate) attention: Vec<CredentialAttentionView>,
@@ -1642,6 +1643,7 @@ pub(crate) struct EnvironmentCredentialProfileOption {
     pub(crate) name: String,
     pub(crate) revision: u64,
     pub(crate) identity_count: usize,
+    pub(crate) is_default: bool,
     pub(crate) bound_revision: bool,
     pub(crate) synthetic: bool,
     pub(crate) selected: bool,
@@ -1666,6 +1668,10 @@ impl EnvironmentGithubConnectionOption {
 }
 
 impl EnvironmentSourceFieldsView {
+    pub(crate) fn has_selected_profile(&self) -> bool {
+        self.profiles.iter().any(|profile| profile.selected)
+    }
+
     pub(crate) fn has_connected_github(&self) -> bool {
         self.github_connections
             .iter()
